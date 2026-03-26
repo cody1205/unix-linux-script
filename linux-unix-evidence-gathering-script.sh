@@ -25,6 +25,12 @@ readonly HOSTNAME_VALUE
 TIMESTAMP=$(date 2>/dev/null || echo unknown)
 readonly TIMESTAMP
 
+ARCHIVE_TIMESTAMP=$(date '+%Y%m%d-%H%M%S' 2>/dev/null || echo unknown_time)
+readonly ARCHIVE_TIMESTAMP
+
+SAFE_HOSTNAME=$(printf '%s' "$HOSTNAME_VALUE" | tr -c 'A-Za-z0-9._-' '_')
+readonly SAFE_HOSTNAME
+
 WORKING_DIRECTORY=$(pwd 2>/dev/null || echo .)
 readonly WORKING_DIRECTORY
 
@@ -33,6 +39,15 @@ readonly COLLECTION_DIRECTORY
 
 COLLECTION_FILES_DIRECTORY="$COLLECTION_DIRECTORY/files"
 readonly COLLECTION_FILES_DIRECTORY
+
+REPORT_FILE="$COLLECTION_DIRECTORY/SOX-ITGC-AUDIT-REPORT.txt"
+readonly REPORT_FILE
+
+MANIFEST_FILE="$COLLECTION_DIRECTORY/MANIFEST.txt"
+readonly MANIFEST_FILE
+
+ARCHIVE_BASE_NAME="SOX-ITGC-AUDIT-LINUX-UNIX-$SAFE_HOSTNAME-$ARCHIVE_TIMESTAMP"
+readonly ARCHIVE_BASE_NAME
 
 ARCHIVE_FILE=""
 ARCHIVE_STATUS="not created"
@@ -122,24 +137,24 @@ print_section_guidance() {
             print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Password-based SSH may still be acceptable in some environments, but it is generally less restrictive than key-based access. If direct root login is enabled, reviewers usually ask for compensating controls. \"not available\" may mean SSH is not installed, the daemon is managed differently, or the file is unreadable."
             print_guidance_block "WHY IT MATTERS:" "SSH is one of the most common administrative entry points into Unix and Linux servers. This section helps determine how securely administrators can reach the host from the network."
             ;;
-        "8. Installed Packages")
-            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists installed software packages using the package manager available on the host."
-            print_guidance_block "HOW TO MAKE SENSE OF IT:" "This is software inventory evidence. Reviewers often look for security-relevant packages such as SSH, sudo, audit tools, backup agents, monitoring agents, database software, or packages that should not be present."
-            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "The format changes by platform. Linux package names often include version and architecture, AIX uses lslpp output, Solaris may show pkg information, and HP-UX may use swlist. Large inventories are normal; the key is identifying relevant packages and versions."
-            print_guidance_block "WHY IT MATTERS:" "Installed software affects security posture, patching scope, and compliance obligations. This section helps verify what software is actually present on the host."
-            ;;
+#        "8. Installed Packages")
+#            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists installed software packages using the package manager available on the host."
+#            print_guidance_block "HOW TO MAKE SENSE OF IT:" "This is software inventory evidence. Reviewers often look for security-relevant packages such as SSH, sudo, audit tools, backup agents, monitoring agents, database software, or packages that should not be present."
+#            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "The format changes by platform. Linux package names often include version and architecture, AIX uses lslpp output, Solaris may show pkg information, and HP-UX may use swlist. Large inventories are normal; the key is identifying relevant packages and versions."
+#            print_guidance_block "WHY IT MATTERS:" "Installed software affects security posture, patching scope, and compliance obligations. This section helps verify what software is actually present on the host."
+#            ;;
         "9. Recent Login Activity")
             print_guidance_block "WHAT YOU ARE SEEING:" "This section shows recent login or session activity from commands such as last, lastlogin, or who."
             print_guidance_block "HOW TO MAKE SENSE OF IT:" "Each line is typically a record of a user session, showing who logged in, from where, when, and sometimes whether the session is still active. Look for administrator accounts, remote source systems, unusual times, and unexpected account usage."
             print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "\"still logged in\" means the session is ongoing. Remote addresses can help identify whether access came from a jump host, workstation, or unknown source. Sparse or unavailable output can mean the log source is rotated, disabled, stored elsewhere, or not readable."
             print_guidance_block "WHY IT MATTERS:" "This section gives evidence of real usage, not just configured access. It helps answer whether powerful accounts are actually being used and from where."
             ;;
-        "10. World-Writable Files")
-            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists files that any user on the system can modify because the world-writable permission bit is set."
-            print_guidance_block "HOW TO MAKE SENSE OF IT:" "World-writable means the file is writable by \"others,\" not just the owner or a trusted group. Some temporary or application-generated files may be expected, but sensitive system files should not appear here."
-            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A few temporary files under locations like /tmp or /var/tmp may be normal depending on application behavior. World-writable files in system directories, application binaries, scripts, or configuration paths are more concerning because they can allow tampering or privilege escalation paths."
-            print_guidance_block "WHY IT MATTERS:" "Overly permissive file permissions are a common control weakness. This section helps identify places where a low-privilege user might be able to alter data, scripts, or executable content."
-            ;;
+#        "10. World-Writable Files")
+#            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists files that any user on the system can modify because the world-writable permission bit is set."
+#            print_guidance_block "HOW TO MAKE SENSE OF IT:" "World-writable means the file is writable by \"others,\" not just the owner or a trusted group. Some temporary or application-generated files may be expected, but sensitive system files should not appear here."
+#            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A few temporary files under locations like /tmp or /var/tmp may be normal depending on application behavior. World-writable files in system directories, application binaries, scripts, or configuration paths are more concerning because they can allow tampering or privilege escalation paths."
+#            print_guidance_block "WHY IT MATTERS:" "Overly permissive file permissions are a common control weakness. This section helps identify places where a low-privilege user might be able to alter data, scripts, or executable content."
+#            ;;
         "11. SetUID and SetGID Files")
             print_guidance_block "WHAT YOU ARE SEEING:" "This section lists files with the setuid or setgid permission bits set. These special bits cause a program to run with the permissions of the file owner or group instead of the user launching it."
             print_guidance_block "HOW TO MAKE SENSE OF IT:" "Some entries are expected and necessary, such as passwd or su, because those tools need controlled privileged behavior. The review focus is on unfamiliar binaries, custom scripts, or unexpected application files appearing in this list."
@@ -245,10 +260,22 @@ command_exists() {
 }
 
 prepare_collection_directory() {
-    if mkdir -p "$COLLECTION_FILES_DIRECTORY" 2>/dev/null; then
+    if rm -rf "$COLLECTION_FILES_DIRECTORY" 2>/dev/null && mkdir -p "$COLLECTION_FILES_DIRECTORY" 2>/dev/null; then
+        rm -f "$REPORT_FILE" "$MANIFEST_FILE" 2>/dev/null || :
+        : > "$MANIFEST_FILE"
         COLLECTION_STATUS="ready"
     else
         COLLECTION_STATUS="failed to create collection directory"
+    fi
+}
+
+record_copied_file() {
+    file_path=$1
+
+    if [ "$COLLECTION_STATUS" = "ready" ] && [ -f "$MANIFEST_FILE" ]; then
+        if ! grep -F -x "$file_path" "$MANIFEST_FILE" >/dev/null 2>&1; then
+            printf '%s\n' "$file_path" >> "$MANIFEST_FILE"
+        fi
     fi
 }
 
@@ -260,13 +287,15 @@ copy_file_to_collection() {
         target_directory=$(dirname "$target_path" 2>/dev/null || echo "$COLLECTION_FILES_DIRECTORY")
 
         if mkdir -p "$target_directory" 2>/dev/null; then
-            cp -p "$file_path" "$target_path" 2>/dev/null || cp "$file_path" "$target_path" 2>/dev/null || :
+            if cp -p "$file_path" "$target_path" 2>/dev/null || cp "$file_path" "$target_path" 2>/dev/null; then
+                record_copied_file "$file_path"
+            fi
         fi
     fi
 }
 
 create_collection_archive() {
-    archive_base=$WORKING_DIRECTORY/SOX-ITGC-AUDIT-LINUX-UNIX
+    archive_base=$WORKING_DIRECTORY/$ARCHIVE_BASE_NAME
 
     if [ "$COLLECTION_STATUS" != "ready" ]; then
         ARCHIVE_STATUS="skipped because collection directory was not ready"
@@ -857,23 +886,23 @@ print_sulog_content() {
     fi
 }
 
-print_package_inventory() {
-    if command_exists rpm; then
-        rpm -qa 2>/dev/null || not_available
-    elif command_exists dpkg; then
-        dpkg -l 2>/dev/null || not_available
-    elif command_exists pkginfo; then
-        pkginfo 2>/dev/null || not_available
-    elif command_exists swlist; then
-        swlist 2>/dev/null || not_available
-    elif command_exists lslpp; then
-        lslpp -L 2>/dev/null || not_available
-    elif command_exists pkg; then
-        pkg info 2>/dev/null || not_available
-    else
-        not_available
-    fi
-}
+#print_package_inventory() {
+#    if command_exists rpm; then
+#        rpm -qa 2>/dev/null || not_available
+#    elif command_exists dpkg; then
+#        dpkg -l 2>/dev/null || not_available
+#    elif command_exists pkginfo; then
+#        pkginfo 2>/dev/null || not_available
+#    elif command_exists swlist; then
+#        swlist 2>/dev/null || not_available
+#    elif command_exists lslpp; then
+#        lslpp -L 2>/dev/null || not_available
+#    elif command_exists pkg; then
+#        pkg info 2>/dev/null || not_available
+#    else
+#        not_available
+#    fi
+#}
 
 print_recent_login_activity() {
     if command_exists last; then
@@ -899,13 +928,13 @@ print_recent_login_activity() {
     fi
 }
 
-print_world_writable_files() {
-    if command_exists find; then
-        find / -type f -perm -0002 -print 2>/dev/null || find / -type f -perm -2 -print 2>/dev/null || not_available
-    else
-        not_available
-    fi
-}
+#print_world_writable_files() {
+#    if command_exists find; then
+#        find / -type f -perm -0002 -print 2>/dev/null || find / -type f -perm -2 -print 2>/dev/null || not_available
+#    else
+#        not_available
+#    fi
+#}
 
 print_setuid_setgid_files() {
     if command_exists find; then
@@ -1672,12 +1701,18 @@ print_critical_file_integrity() {
 
 prepare_collection_directory
 
+exec 3>&1
+if [ "$COLLECTION_STATUS" = "ready" ]; then
+    exec > "$REPORT_FILE"
+fi
+
 printf 'SOX ITGC Audit Data Collection\n'
 printf 'Generated: %s\n' "$TIMESTAMP"
 printf 'Hostname: %s\n' "$HOSTNAME_VALUE"
 printf 'Script Mode: %s\n' "$SCRIPT_MODE"
-printf 'Output Destination: stdout\n'
+printf 'Output Destination: report file with stdout replay at completion\n'
 printf 'Evidence Collection Directory: %s\n' "$COLLECTION_DIRECTORY"
+printf 'Manifest File: %s\n' "$MANIFEST_FILE"
 
 section_with_guidance "Platform Details"
 print_platform_details
@@ -1734,14 +1769,14 @@ blank_line
 subsection "Full Content Review Files"
 print_sshd_full_content
 
-section_with_guidance "8. Installed Packages"
-print_package_inventory
+# section_with_guidance "8. Installed Packages"
+# print_package_inventory
 
 section_with_guidance "9. Recent Login Activity"
 print_recent_login_activity
 
-section_with_guidance "10. World-Writable Files"
-print_world_writable_files
+# section_with_guidance "10. World-Writable Files"
+# print_world_writable_files
 
 section_with_guidance "11. SetUID and SetGID Files"
 print_setuid_setgid_files
@@ -1799,4 +1834,12 @@ printf 'Files created in working directory: %s\n' "$COLLECTION_DIRECTORY"
 printf 'Collection directory status: %s\n' "$COLLECTION_STATUS"
 printf 'Archive status: %s\n' "$ARCHIVE_STATUS"
 printf 'Archive file: %s\n' "${ARCHIVE_FILE:-not available}"
+printf 'Report file: %s\n' "$REPORT_FILE"
+printf 'Manifest file: %s\n' "$MANIFEST_FILE"
 printf 'Configuration changes made: none\n'
+
+create_collection_archive
+
+if [ -r "$REPORT_FILE" ]; then
+    cat "$REPORT_FILE" >&3
+fi
