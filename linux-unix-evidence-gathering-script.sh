@@ -6,6 +6,12 @@
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 readonly PATH
 
+SECTION_SEPARATOR='=================================================================='
+readonly SECTION_SEPARATOR
+
+GUIDANCE_WRAP_WIDTH=62
+readonly GUIDANCE_WRAP_WIDTH
+
 SCRIPT_MODE="read-only"
 readonly SCRIPT_MODE
 
@@ -19,9 +25,139 @@ TIMESTAMP=$(date 2>/dev/null || echo unknown)
 readonly TIMESTAMP
 
 section() {
-    printf '\n==================================================\n'
+    printf '\n%s\n' "$SECTION_SEPARATOR"
     printf '%s\n' "$1"
-    printf '==================================================\n\n'
+    printf '%s\n\n' "$SECTION_SEPARATOR"
+}
+
+print_wrapped_text() {
+    printf '%s\n' "$1" | awk -v width="$GUIDANCE_WRAP_WIDTH" '
+        {
+            line = ""
+            for (i = 1; i <= NF; i++) {
+                word = $i
+                if (line == "") {
+                    line = word
+                } else if (length(line) + length(word) + 1 <= width) {
+                    line = line " " word
+                } else {
+                    print line
+                    line = word
+                }
+            }
+            if (line != "") {
+                print line
+            }
+        }
+    '
+}
+
+print_guidance_block() {
+    printf '%s\n' "$1"
+    print_wrapped_text "$2"
+    blank_line
+}
+
+print_section_guidance() {
+    case "$1" in
+        "Platform Details")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section identifies the operating system family, kernel release, kernel version, and hardware type of the host where the script was run."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Read this first because it tells you which later files, commands, and control mechanisms are likely to exist. Linux, AIX, Solaris, HP-UX, and BSD systems often store security settings in different places."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A Linux host will usually show Linux-specific files later, while AIX or Solaris may show different authentication and password sources. If a later section says \"not available,\" compare it to the platform here before assuming a control is missing."
+            print_guidance_block "WHY IT MATTERS:" "This is the context section. It explains how the rest of the evidence should be interpreted and helps an auditor or reviewer avoid applying the wrong expectation to the wrong operating system."
+            ;;
+        "1. Accounts and Groups with Root or Root Equivalent Access")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows which accounts are literally root-equivalent because they have UID 0, and which users belong to powerful administrative groups such as wheel or sudo."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "In Unix and Linux, UID 0 is the real superuser identity. Any account with UID 0 has the same power as root even if the account name is something else. Group-based access is slightly different because it usually means a user can elevate to root rather than being root at all times."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Seeing only \"root\" under UID 0 is typical and usually easier to govern. Seeing extra UID 0 accounts is a stronger risk signal because those accounts may bypass naming conventions and reduce accountability. Seeing many names in wheel or sudo means privileged access is broadly distributed and should be compared against approved administrator lists."
+            print_guidance_block "WHY IT MATTERS:" "This section helps answer the question \"who can fully control this system?\" It is one of the most important areas for access management, segregation of duties, and privileged account review."
+            ;;
+        "2. Password Parameters / Requirements")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section gathers password policy settings such as minimum length, aging rules, warning periods, complexity settings, and account lockout behavior from the files used by the host platform."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Treat this section as the system's password policy evidence. Longer minimum lengths, aging intervals, complexity requirements, and lockout thresholds generally indicate stronger controls, although the exact acceptable settings depend on your policy standard."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "\"not available\" can mean the setting is stored somewhere else on that platform, the file is unreadable, or the system uses another authentication method. Values such as very low minimum length, no lockout, or extremely long maximum password age can indicate weaker control enforcement."
+            print_guidance_block "WHY IT MATTERS:" "This section supports questions like \"how strong must passwords be?\" and \"what happens after repeated failed logins?\" It is often mapped to identity, access, and account management controls in audits."
+            ;;
+        "3. Authentication Configuration")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows how the host decides where user identities come from and which authentication modules are referenced. Examples include local files, LDAP, SSSD, winbind, NIS, and PAM configuration."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Read this as the \"where does the system trust identities from?\" section. If you see local files only, authentication is mostly local. If you see LDAP, SSSD, winbind, or similar terms, the system is likely tied to a centralized identity source."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "\"SSSD configuration present: yes\" usually means the host is integrated with a central directory. PAM module references tell you which authentication path is actually being enforced. If the section is sparse on older Unix, that may reflect platform differences rather than absence of authentication controls."
+            print_guidance_block "WHY IT MATTERS:" "Password rules alone do not tell you where identities are managed. This section helps you understand whether users are local, centrally managed, domain-based, or mixed, which is critical for account lifecycle and access review."
+            ;;
+        "4. Accounts and Groups Able to Sudo to Root")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows the active sudo rules that allow a person or group to run commands as root or as another privileged account."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Read each non-comment line as an authorization rule. User names, group names, host filters, command lists, and special flags such as NOPASSWD describe exactly who can elevate and under what conditions."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Rules that grant ALL privileges are broader than rules limited to specific commands. NOPASSWD means elevation can happen without re-entering a password, which may be acceptable in some automation cases but is generally a higher-risk pattern for interactive users. If there are multiple sudoers include files, all of them matter."
+            print_guidance_block "WHY IT MATTERS:" "A user does not need UID 0 to control a server if sudo grants root access. This section is the practical privilege-escalation evidence and is essential when reviewing administrative access."
+            ;;
+        "5. Groups and Their Members")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists system groups and the members recorded for each group."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Groups are shared permission containers. Membership in a group may grant access to files, services, devices, applications, or administrative capabilities. Reviewers typically focus on sensitive groups first, such as admin, wheel, sudo, security, system, database, or application support groups."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Some groups will have no listed members because access may be managed in another source or because only primary group membership is used. Very large group memberships can indicate broad access distribution and should be compared to approved role definitions."
+            print_guidance_block "WHY IT MATTERS:" "Group membership is a major part of access provisioning on Unix-like systems. This section helps connect user access to actual permission structures on the host."
+            ;;
+        "6. sulog Contents")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows the contents of the su log if the platform keeps one. It may record attempts to switch to another account, often root."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Each entry is usually evidence that one user attempted to become another user, commonly through the su command. Positive entries often mean a successful switch, while some platforms also log failed attempts or terminal details."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A populated log can help show who elevated to root and when. \"not available\" may simply mean the host does not use sulog logging, stores it elsewhere, or does not have the file enabled."
+            print_guidance_block "WHY IT MATTERS:" "This is useful operational evidence for tracing privileged activity, especially on systems where su is still used alongside or instead of sudo."
+            ;;
+        "7. SSH Configuration")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section highlights important Secure Shell daemon settings such as whether root can log in directly, whether passwords are allowed, whether key-based authentication is enabled, and whether empty passwords or X11 forwarding are allowed."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Think of this as the remote access policy for the server. Settings like \"PermitRootLogin no\" and \"PasswordAuthentication no\" generally indicate tighter remote-access control than allowing direct root password login."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Password-based SSH may still be acceptable in some environments, but it is generally less restrictive than key-based access. If direct root login is enabled, reviewers usually ask for compensating controls. \"not available\" may mean SSH is not installed, the daemon is managed differently, or the file is unreadable."
+            print_guidance_block "WHY IT MATTERS:" "SSH is one of the most common administrative entry points into Unix and Linux servers. This section helps determine how securely administrators can reach the host from the network."
+            ;;
+        "8. Installed Packages")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists installed software packages using the package manager available on the host."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "This is software inventory evidence. Reviewers often look for security-relevant packages such as SSH, sudo, audit tools, backup agents, monitoring agents, database software, or packages that should not be present."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "The format changes by platform. Linux package names often include version and architecture, AIX uses lslpp output, Solaris may show pkg information, and HP-UX may use swlist. Large inventories are normal; the key is identifying relevant packages and versions."
+            print_guidance_block "WHY IT MATTERS:" "Installed software affects security posture, patching scope, and compliance obligations. This section helps verify what software is actually present on the host."
+            ;;
+        "9. Recent Login Activity")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows recent login or session activity from commands such as last, lastlogin, or who."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Each line is typically a record of a user session, showing who logged in, from where, when, and sometimes whether the session is still active. Look for administrator accounts, remote source systems, unusual times, and unexpected account usage."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "\"still logged in\" means the session is ongoing. Remote addresses can help identify whether access came from a jump host, workstation, or unknown source. Sparse or unavailable output can mean the log source is rotated, disabled, stored elsewhere, or not readable."
+            print_guidance_block "WHY IT MATTERS:" "This section gives evidence of real usage, not just configured access. It helps answer whether powerful accounts are actually being used and from where."
+            ;;
+        "10. World-Writable Files")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists files that any user on the system can modify because the world-writable permission bit is set."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "World-writable means the file is writable by \"others,\" not just the owner or a trusted group. Some temporary or application-generated files may be expected, but sensitive system files should not appear here."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A few temporary files under locations like /tmp or /var/tmp may be normal depending on application behavior. World-writable files in system directories, application binaries, scripts, or configuration paths are more concerning because they can allow tampering or privilege escalation paths."
+            print_guidance_block "WHY IT MATTERS:" "Overly permissive file permissions are a common control weakness. This section helps identify places where a low-privilege user might be able to alter data, scripts, or executable content."
+            ;;
+        "11. SetUID and SetGID Files")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists files with the setuid or setgid permission bits set. These special bits cause a program to run with the permissions of the file owner or group instead of the user launching it."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Some entries are expected and necessary, such as passwd or su, because those tools need controlled privileged behavior. The review focus is on unfamiliar binaries, custom scripts, or unexpected application files appearing in this list."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Standard operating system utilities are common. Custom setuid or setgid files deserve extra scrutiny because they can create privilege escalation paths. The more custom or obscure the file, the more important it is to confirm business need and secure ownership."
+            print_guidance_block "WHY IT MATTERS:" "These files can intentionally or unintentionally grant elevated capability. This section is important for identifying privileged execution surfaces on the server."
+            ;;
+        "12. Scheduled Cron Jobs")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows scheduled tasks from system crontabs, cron include directories, and user-specific cron entries or spool files."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Read each line as \"something on this host runs automatically at a scheduled time.\" Focus on what account owns the job, what command or script runs, and whether the job executes with privileged rights such as root."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Root-owned cron jobs are not automatically a problem, but they should be expected, documented, and secured. User cron jobs can reveal automation, data movement, backups, or maintenance routines that may carry elevated access or business risk. \"not available\" may mean the user has no crontab, cron is stored elsewhere, or the script could not read it."
+            print_guidance_block "WHY IT MATTERS:" "Scheduled jobs often perform critical actions without human interaction. This section helps identify automated privileged processes and hidden operational dependencies."
+            ;;
+        "13. Service Accounts")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section lists lower-UID accounts that are likely service, daemon, or system accounts rather than normal human user accounts."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "The script uses a platform-sensitive UID threshold to separate likely service accounts from regular users. The output shows the account name, UID, GID, home directory, and shell so you can tell whether the account looks interactive or non-interactive."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Accounts with shells like nologin, false, or restricted shells are often non-interactive service accounts. Accounts with full interactive shells may still be valid service IDs, but they deserve more scrutiny because they may be used for both services and human access. Different platforms use different UID numbering conventions, so use the printed threshold as context rather than as an absolute rule of truth."
+            print_guidance_block "WHY IT MATTERS:" "Service accounts often own applications, scheduled jobs, or background processes. This section helps distinguish technical IDs from human users and supports reviews of non-person access."
+            ;;
+        "Execution Summary")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This final section summarizes whether the script completed and restates its operating behavior."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Use this as a quick integrity check for the evidence file. It tells you whether the script believes it completed, whether it only wrote to standard output, and whether it created files or made configuration changes."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A completed status supports the reliability of the collected output, although reviewers should still look for \"not available\" lines in earlier sections. If this section ever reported file creation or configuration changes, that would change the evidence handling expectations."
+            print_guidance_block "WHY IT MATTERS:" "Audit collection scripts should be easy to defend as read-only and non-invasive. This section makes those collection characteristics explicit at the end of the report."
+            ;;
+    esac
+}
+
+section_with_guidance() {
+    printf '\n%s\n' "$SECTION_SEPARATOR"
+    printf '%s\n\n' "$1"
+    print_section_guidance "$1"
+    printf '%s\n\n' "$SECTION_SEPARATOR"
 }
 
 subsection() {
@@ -625,10 +761,10 @@ printf 'Hostname: %s\n' "$HOSTNAME_VALUE"
 printf 'Script Mode: %s\n' "$SCRIPT_MODE"
 printf 'Output Destination: stdout\n'
 
-section "Platform Details"
+section_with_guidance "Platform Details"
 print_platform_details
 
-section "1. Accounts and Groups with Root or Root Equivalent Access"
+section_with_guidance "1. Accounts and Groups with Root or Root Equivalent Access"
 subsection "Users with UID 0 (Root Equivalent Accounts):"
 if file_readable /etc/passwd; then
     if awk -F: '
@@ -650,55 +786,55 @@ blank_line
 subsection "Users in the wheel or sudo groups:"
 print_group_membership_summary
 
-section "2. Password Parameters / Requirements"
+section_with_guidance "2. Password Parameters / Requirements"
 print_auth_summary
 blank_line
 subsection "Full Content Review Files"
 print_auth_full_content
 
-section "3. Authentication Configuration"
+section_with_guidance "3. Authentication Configuration"
 print_authentication_summary
 blank_line
 subsection "Full Content Review Files"
 print_authentication_full_content
 
-section "4. Accounts and Groups Able to Sudo to Root"
+section_with_guidance "4. Accounts and Groups Able to Sudo to Root"
 print_sudo_summary
 blank_line
 subsection "Full Content Review Files"
 print_sudo_full_content
 
-section "5. Groups and Their Members"
+section_with_guidance "5. Groups and Their Members"
 print_all_groups
 
-section "6. sulog Contents"
+section_with_guidance "6. sulog Contents"
 print_sulog_content
 
-section "7. SSH Configuration"
+section_with_guidance "7. SSH Configuration"
 print_ssh_summary
 blank_line
 subsection "Full Content Review Files"
 print_sshd_full_content
 
-section "8. Installed Packages"
+section_with_guidance "8. Installed Packages"
 print_package_inventory
 
-section "9. Recent Login Activity"
+section_with_guidance "9. Recent Login Activity"
 print_recent_login_activity
 
-section "10. World-Writable Files"
+section_with_guidance "10. World-Writable Files"
 print_world_writable_files
 
-section "11. SetUID and SetGID Files"
+section_with_guidance "11. SetUID and SetGID Files"
 print_setuid_setgid_files
 
-section "12. Scheduled Cron Jobs"
+section_with_guidance "12. Scheduled Cron Jobs"
 print_cron_content
 
-section "13. Service Accounts"
+section_with_guidance "13. Service Accounts"
 print_service_accounts
 
-section "Execution Summary"
+section_with_guidance "Execution Summary"
 printf 'Status: completed\n'
 printf 'Behavior: stdout only, read-only collection\n'
 printf 'Files created on target host: none\n'
