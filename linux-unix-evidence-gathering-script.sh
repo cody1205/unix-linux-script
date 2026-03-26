@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # SOX ITGC Audit Data Collection Script
-# Read-only evidence collection script that writes to stdout only.
+# Read-only against source files; writes report to stdout and
+# packages copied evidence files in the current working directory.
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 readonly PATH
@@ -12,7 +13,7 @@ readonly SECTION_SEPARATOR
 GUIDANCE_WRAP_WIDTH=62
 readonly GUIDANCE_WRAP_WIDTH
 
-SCRIPT_MODE="read-only"
+SCRIPT_MODE="read-only source collection with local packaging"
 readonly SCRIPT_MODE
 
 OS_NAME=$(uname -s 2>/dev/null || echo unknown)
@@ -23,6 +24,19 @@ readonly HOSTNAME_VALUE
 
 TIMESTAMP=$(date 2>/dev/null || echo unknown)
 readonly TIMESTAMP
+
+WORKING_DIRECTORY=$(pwd 2>/dev/null || echo .)
+readonly WORKING_DIRECTORY
+
+COLLECTION_DIRECTORY="$WORKING_DIRECTORY/SOX-ITGC-AUDIT-LINUX-UNIX"
+readonly COLLECTION_DIRECTORY
+
+COLLECTION_FILES_DIRECTORY="$COLLECTION_DIRECTORY/files"
+readonly COLLECTION_FILES_DIRECTORY
+
+ARCHIVE_FILE=""
+ARCHIVE_STATUS="not created"
+COLLECTION_STATUS="pending"
 
 section() {
     printf '\n%s\n' "$SECTION_SEPARATOR"
@@ -144,11 +158,65 @@ print_section_guidance() {
             print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Accounts with shells like nologin, false, or restricted shells are often non-interactive service accounts. Accounts with full interactive shells may still be valid service IDs, but they deserve more scrutiny because they may be used for both services and human access. Different platforms use different UID numbering conventions, so use the printed threshold as context rather than as an absolute rule of truth."
             print_guidance_block "WHY IT MATTERS:" "Service accounts often own applications, scheduled jobs, or background processes. This section helps distinguish technical IDs from human users and supports reviews of non-person access."
             ;;
+        "14. Account Status, SSH Keys, and Legacy Trust")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section adds lifecycle and remote-access evidence for user accounts, including account status indicators, password expiry details, authorized SSH keys, legacy trust files, shell timeout settings, and login banners."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Use this section to determine whether accounts are active or locked, whether passwords expire, whether users can log in with SSH keys, and whether older trust mechanisms like hosts.equiv or .rhosts still exist."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Locked or expired accounts are usually lower risk than active accounts. Authorized keys can be legitimate but should align to approved access. Legacy trust files are generally high-risk because they can bypass stronger authentication controls. Missing shell timeout or banner settings may indicate weaker session management or warning-banner enforcement."
+            print_guidance_block "WHY IT MATTERS:" "This section supports account lifecycle, remote access, and user accountability testing. It helps auditors move beyond 'who exists' to 'how can they authenticate and is the account governed properly?'"
+            ;;
+        "15. Audit Logging and Log Forwarding")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section captures host auditing and logging configuration, including native audit settings, syslog or journal settings, remote forwarding indicators, and sudo command logging configuration."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Read this section to determine whether the operating system is configured to create, retain, and potentially forward logs that could support privileged activity reviews and investigations."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "If audit configuration files exist but services are not active, logging may be incomplete. Remote forwarding entries are generally positive because they support centralized monitoring. Missing sudo logfile or weak retention settings can reduce the usefulness of evidence after the fact."
+            print_guidance_block "WHY IT MATTERS:" "SOX-relevant systems often depend on detective controls over privileged and sensitive activity. Logging that cannot be trusted, retained, or reviewed weakens those controls."
+            ;;
+        "16. Service and Startup Configuration")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows which services or subsystems are enabled, running, or configured to start automatically, along with startup-related configuration sources used by the platform."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Use this section to understand the operational baseline of the server. Compare running and enabled services to the intended purpose of the host and look for unexpected services or startup entries."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Application, monitoring, backup, and security agents may be expected. Unexpected services, old startup scripts, or unnecessary remote-access daemons can indicate configuration drift or unauthorized changes."
+            print_guidance_block "WHY IT MATTERS:" "A SOX in-scope host should run only what is needed and should start those services in a controlled way. This section helps support secure configuration and change management review."
+            ;;
+        "17. Network Exposure and Firewall Configuration")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows network listeners, firewall rules where available, file-sharing exports, and references to older or less secure network services."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Treat this as the host's exposure profile. Listening ports show what is reachable on the network, while firewall output shows how access may be restricted or allowed."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A small number of expected listeners is easier to justify than a wide open footprint. Legacy services such as telnet, rsh, rexec, or insecure FTP are usually red flags. Exported shares may be valid but should be tightly controlled."
+            print_guidance_block "WHY IT MATTERS:" "Even if user accounts are well controlled, an exposed or weakly protected service can undermine the control environment. This section supports review of network-facing access paths."
+            ;;
+        "18. Patch, Update, and Change Indicators")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section captures host-level indicators of operating system patch state, package update history, reboot timing, and repository or patch-management configuration files where available."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Use this section as technical evidence about the server's maintenance state. It does not prove approvals or testing, but it can show whether updates appear to be occurring and what patch tooling is in use."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Recent patch history may indicate active maintenance. Long gaps, obsolete kernel levels, or missing patch-management evidence can suggest a weak change-management or vulnerability-management posture. Different Unix platforms expose this evidence very differently."
+            print_guidance_block "WHY IT MATTERS:" "SOX change controls are not just about application changes. Operating system patches and infrastructure changes can also affect financially relevant systems and should be governed appropriately."
+            ;;
+        "19. Backup, Capacity, and Operational Indicators")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section gathers practical operations evidence such as filesystem capacity, possible backup-related processes or configuration files, log rotation settings, boot history, and monitoring-agent indicators."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Read this as a set of operational clues about whether the host is being maintained, monitored, and backed up. It does not prove restore testing, but it can reveal whether backup and support tooling appears to exist."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "High filesystem usage can threaten logging, batch jobs, and application processing. Backup or monitoring agents may be expected on production systems. Their absence is not always a failure, but it should align with the documented operating model."
+            print_guidance_block "WHY IT MATTERS:" "Operations controls support availability, recoverability, and timely detection of issues. Those are often important supporting controls around financial reporting systems."
+            ;;
+        "20. Time Synchronization")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section captures time-sync configuration and status from services such as chrony, NTP, or platform-native time daemons."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Time synchronization keeps logs, jobs, alerts, and transactions aligned across systems. Look for both configuration files and live status output where available."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Different platforms use different daemons, but some kind of controlled time source is usually expected. Missing or unhealthy time-sync evidence can weaken investigations and make event correlation unreliable."
+            print_guidance_block "WHY IT MATTERS:" "Accurate time is foundational for audit logging, incident review, and reconciling system events to business activity."
+            ;;
+        "21. Additional Scheduled Tasks and Timers")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section expands beyond classic cron to capture other schedulers and timed execution paths such as at jobs, anacron, systemd timers, and related log files where available."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Use this section to find jobs that may not appear in normal crontabs. Review the owner, schedule, and command or unit being executed."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Modern Linux systems may use systemd timers rather than cron. One-time at jobs can be legitimate but can also be a less visible way to execute administrative changes. Missing logs may limit reviewability."
+            print_guidance_block "WHY IT MATTERS:" "Unattended tasks can make changes, move data, or run privileged commands. A complete audit view should include more than just cron."
+            ;;
+        "22. Critical File Integrity and Sensitive File Permissions")
+            print_guidance_block "WHAT YOU ARE SEEING:" "This section shows metadata and checksums for selected sensitive operating system files, along with kernel or boot-related configuration files where available."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Use ownership, permissions, timestamps, and checksums to understand whether critical files appear tightly controlled and to support later change comparisons if needed."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "Strict permissions on files like passwd, shadow, sudoers, SSH configuration, audit settings, and bootloader files are generally expected. Unexpected owners, broad permissions, or surprising modification times can warrant follow-up."
+            print_guidance_block "WHY IT MATTERS:" "Sensitive operating system files govern authentication, privilege, startup behavior, and auditing. Their integrity is directly relevant to secure configuration and change control."
+            ;;
         "Execution Summary")
             print_guidance_block "WHAT YOU ARE SEEING:" "This final section summarizes whether the script completed and restates its operating behavior."
-            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Use this as a quick integrity check for the evidence file. It tells you whether the script believes it completed, whether it only wrote to standard output, and whether it created files or made configuration changes."
-            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A completed status supports the reliability of the collected output, although reviewers should still look for \"not available\" lines in earlier sections. If this section ever reported file creation or configuration changes, that would change the evidence handling expectations."
-            print_guidance_block "WHY IT MATTERS:" "Audit collection scripts should be easy to defend as read-only and non-invasive. This section makes those collection characteristics explicit at the end of the report."
+            print_guidance_block "HOW TO MAKE SENSE OF IT:" "Use this as a quick integrity check for the evidence package. It tells you whether the script believes it completed, where it wrote the local collection directory, whether it created an archive, and whether it changed source configuration."
+            print_guidance_block "COMMON VARIATIONS AND IMPLICATIONS:" "A completed status supports the reliability of the collected output, although reviewers should still look for \"not available\" lines in earlier sections. If archive creation failed, the copied directory may still exist. If collection-directory creation failed, the report may still print but source-file packaging will be incomplete."
+            print_guidance_block "WHY IT MATTERS:" "Audit collection should be transparent about where evidence was written and whether packaging succeeded. This section makes those collection characteristics explicit at the end of the report."
             ;;
     esac
 }
@@ -176,6 +244,70 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+prepare_collection_directory() {
+    if mkdir -p "$COLLECTION_FILES_DIRECTORY" 2>/dev/null; then
+        COLLECTION_STATUS="ready"
+    else
+        COLLECTION_STATUS="failed to create collection directory"
+    fi
+}
+
+copy_file_to_collection() {
+    file_path=$1
+
+    if [ -r "$file_path" ] && [ -f "$file_path" ] && [ "$COLLECTION_STATUS" = "ready" ]; then
+        target_path=$COLLECTION_FILES_DIRECTORY$file_path
+        target_directory=$(dirname "$target_path" 2>/dev/null || echo "$COLLECTION_FILES_DIRECTORY")
+
+        if mkdir -p "$target_directory" 2>/dev/null; then
+            cp -p "$file_path" "$target_path" 2>/dev/null || cp "$file_path" "$target_path" 2>/dev/null || :
+        fi
+    fi
+}
+
+create_collection_archive() {
+    archive_base=$WORKING_DIRECTORY/SOX-ITGC-AUDIT-LINUX-UNIX
+
+    if [ "$COLLECTION_STATUS" != "ready" ]; then
+        ARCHIVE_STATUS="skipped because collection directory was not ready"
+        return
+    fi
+
+    if command_exists tar; then
+        if command_exists gzip; then
+            if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null; then
+                ARCHIVE_FILE=$archive_base.tar.gz
+                ARCHIVE_STATUS="created"
+                return
+            fi
+        fi
+
+        if command_exists compress; then
+            if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && compress -f "$archive_base.tar" 2>/dev/null; then
+                ARCHIVE_FILE=$archive_base.tar.Z
+                ARCHIVE_STATUS="created"
+                return
+            fi
+        fi
+
+        if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null; then
+            ARCHIVE_FILE=$archive_base.tar
+            ARCHIVE_STATUS="created"
+            return
+        fi
+    fi
+
+    if command_exists zip; then
+        if zip -rq "$archive_base.zip" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null; then
+            ARCHIVE_FILE=$archive_base.zip
+            ARCHIVE_STATUS="created"
+            return
+        fi
+    fi
+
+    ARCHIVE_STATUS="failed"
+}
+
 grep_extended() {
     if printf 'x\n' | grep -E 'x' >/dev/null 2>&1; then
         grep -E "$@"
@@ -187,15 +319,120 @@ grep_extended() {
 }
 
 file_readable() {
-    [ -r "$1" ]
+    if [ -r "$1" ]; then
+        copy_file_to_collection "$1"
+        return 0
+    fi
+
+    return 1
 }
 
 directory_exists() {
     [ -d "$1" ]
 }
 
+path_exists() {
+    [ -e "$1" ]
+}
+
 no_entries_found() {
     printf 'no entries found\n'
+}
+
+print_command_output_or_not_available() {
+    command_name=$1
+    shift
+
+    if command_exists "$command_name"; then
+        if "$command_name" "$@" 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+}
+
+print_file_checksum() {
+    file_path=$1
+
+    if file_readable "$file_path"; then
+        if command_exists sha256sum; then
+            sha256sum "$file_path" 2>/dev/null
+        elif command_exists shasum; then
+            shasum -a 256 "$file_path" 2>/dev/null
+        elif command_exists digest; then
+            digest -a sha256 "$file_path" 2>/dev/null
+        elif command_exists cksum; then
+            cksum "$file_path" 2>/dev/null
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+}
+
+print_path_metadata() {
+    file_path=$1
+
+    printf 'Path: %s\n' "$file_path"
+    if path_exists "$file_path"; then
+        if ls -ld "$file_path" 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+
+        if [ -f "$file_path" ]; then
+            printf 'Checksum: '
+            print_file_checksum "$file_path"
+        fi
+    else
+        not_available
+    fi
+    blank_line
+}
+
+print_directory_listing_or_not_available() {
+    directory_path=$1
+
+    if directory_exists "$directory_path"; then
+        if ls -la "$directory_path" 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+}
+
+print_matching_processes() {
+    pattern=$1
+
+    if command_exists ps; then
+        if ps -ef 2>/dev/null | awk -v pattern="$pattern" '
+            $0 ~ pattern && $0 !~ /awk -v pattern/ {
+                print
+                found = 1
+            }
+            END { if (!found) exit 1 }
+        '; then
+            :
+        else
+            no_entries_found
+        fi
+    else
+        not_available
+    fi
+}
+
+print_passwd_users() {
+    if file_readable /etc/passwd; then
+        awk -F: '{print $1}' /etc/passwd 2>/dev/null
+    fi
 }
 
 print_matching_lines_from_files() {
@@ -755,11 +992,692 @@ print_service_accounts() {
     fi
 }
 
+print_account_status_summary() {
+    subsection "Account Status Summary:"
+    if file_readable /etc/passwd; then
+        found_output=no
+        if command_exists passwd; then
+            if passwd -S root >/dev/null 2>&1; then
+                while IFS=: read -r user _rest; do
+                    if passwd -S "$user" 2>/dev/null; then
+                        found_output=yes
+                    fi
+                done < /etc/passwd
+            elif passwd -s root >/dev/null 2>&1; then
+                while IFS=: read -r user _rest; do
+                    if passwd -s "$user" 2>/dev/null; then
+                        found_output=yes
+                    fi
+                done < /etc/passwd
+            fi
+        fi
+
+        if [ "$found_output" = no ] && command_exists lsuser; then
+            if lsuser -a account_locked expires login shell ALL 2>/dev/null; then
+                found_output=yes
+            fi
+        fi
+
+        if [ "$found_output" = no ]; then
+            not_available
+        fi
+    else
+        not_available
+    fi
+}
+
+print_password_expiry_details() {
+    subsection "Password Expiry Details by Account:"
+    if file_readable /etc/passwd; then
+        found_output=no
+        if command_exists chage; then
+            while IFS=: read -r user _rest; do
+                printf 'User: %s\n' "$user"
+                if chage -l "$user" 2>/dev/null; then
+                    found_output=yes
+                else
+                    not_available
+                fi
+                blank_line
+            done < /etc/passwd
+        elif command_exists lsuser; then
+            if lsuser -a maxage minage pwdwarntime expires account_locked ALL 2>/dev/null; then
+                found_output=yes
+            fi
+        fi
+
+        if [ "$found_output" = no ] && ! command_exists chage && ! command_exists lsuser; then
+            not_available
+        fi
+    else
+        not_available
+    fi
+}
+
+print_authorized_keys_content() {
+    subsection "Authorized SSH Keys:"
+    found_keys=no
+
+    if file_readable /etc/passwd; then
+        while IFS=: read -r user _password _uid _gid _gecos home_dir shell_path; do
+            if [ -n "$home_dir" ] && [ "$home_dir" != "/" ]; then
+                authorized_keys_path=$home_dir/.ssh/authorized_keys
+                if file_readable "$authorized_keys_path"; then
+                    printf 'User: %s\n' "$user"
+                    print_file_with_header "$authorized_keys_path"
+                    found_keys=yes
+                fi
+            fi
+        done < /etc/passwd
+    fi
+
+    if [ "$found_keys" = no ]; then
+        no_entries_found
+    fi
+}
+
+print_legacy_trust_content() {
+    subsection "Legacy Trust Files:"
+    found_trust_file=no
+
+    if file_readable /etc/hosts.equiv; then
+        print_file_with_header /etc/hosts.equiv
+        found_trust_file=yes
+    fi
+
+    if file_readable /etc/shosts.equiv; then
+        print_file_with_header /etc/shosts.equiv
+        found_trust_file=yes
+    fi
+
+    if file_readable /etc/passwd; then
+        while IFS=: read -r user _password _uid _gid _gecos home_dir shell_path; do
+            if [ -n "$home_dir" ] && [ "$home_dir" != "/" ]; then
+                for trust_file in "$home_dir"/.rhosts "$home_dir"/.shosts; do
+                    if file_readable "$trust_file"; then
+                        printf 'User: %s\n' "$user"
+                        print_file_with_header "$trust_file"
+                        found_trust_file=yes
+                    fi
+                done
+            fi
+        done < /etc/passwd
+    fi
+
+    if [ "$found_trust_file" = no ]; then
+        no_entries_found
+    fi
+}
+
+print_shell_timeout_and_banner_summary() {
+    subsection "Shell Timeout Settings:"
+    if print_matching_lines_from_files '(^[[:space:]]*TMOUT=|^[[:space:]]*readonly[[:space:]]+TMOUT|^[[:space:]]*export[[:space:]]+TMOUT|^[[:space:]]*autologout[[:space:]]*=)' /etc/profile /etc/bashrc /etc/ksh.kshrc /etc/csh.cshrc /etc/profile.d/*.sh /etc/security/login.cfg; then
+        :
+    else
+        not_available
+    fi
+    blank_line
+
+    subsection "Login Banner Files:"
+    print_file_with_header /etc/issue
+    print_file_with_header /etc/issue.net
+    print_file_with_header /etc/motd
+    print_file_with_header /etc/ssh/banner
+}
+
+print_audit_logging_summary() {
+    subsection "Native Audit Status:"
+    found_output=no
+
+    if command_exists auditctl; then
+        if auditctl -s 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists audit; then
+        if audit query 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists auditconfig; then
+        if auditconfig -getpolicy 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ]; then
+        not_available
+    fi
+    blank_line
+
+    subsection "Audit and Log Configuration Summary:"
+    if print_matching_lines_from_files '^[[:space:]]*(max_log_file|max_log_file_action|num_logs|space_left_action|admin_space_left_action|disk_full_action|Storage|ForwardToSyslog|Compress|SystemMaxUse|SystemKeepFree)[[:space:]]*[= ]' /etc/audit/auditd.conf /etc/systemd/journald.conf /etc/security/audit/config /etc/security/audit_control; then
+        :
+    else
+        not_available
+    fi
+    blank_line
+
+    subsection "Remote Log Forwarding Indicators:"
+    if print_matching_lines_from_files '(^[^#].*@@?[A-Za-z0-9._-]+|action\(.*omfwd|destination.*(tcp|udp)|forward_to|loghost)' /etc/rsyslog.conf /etc/rsyslog.d/*.conf /etc/syslog.conf /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/conf.d/*.conf /etc/systemd/journald.conf; then
+        :
+    else
+        not_available
+    fi
+    blank_line
+
+    subsection "Sudo Logging Indicators:"
+    if print_matching_lines_from_files '(logfile=|log_input|log_output|iolog_dir)' /etc/sudoers /etc/sudoers.d/* /usr/local/etc/sudoers /usr/local/etc/sudoers.d/*; then
+        :
+    else
+        not_available
+    fi
+}
+
+print_audit_logging_full_content() {
+    subsection "Full File Content: /etc/audit/auditd.conf"
+    print_file_with_header /etc/audit/auditd.conf
+
+    subsection "Full File Content: /etc/audit/audit.rules"
+    print_file_with_header /etc/audit/audit.rules
+
+    subsection "Full File Content: /etc/audit/rules.d"
+    if print_directory_file_contents /etc/audit/rules.d; then
+        :
+    else
+        not_available
+        blank_line
+    fi
+
+    subsection "Full File Content: /etc/systemd/journald.conf"
+    print_file_with_header /etc/systemd/journald.conf
+
+    subsection "Full File Content: /etc/rsyslog.conf"
+    print_file_with_header /etc/rsyslog.conf
+
+    subsection "Full File Content: /etc/rsyslog.d"
+    if print_directory_file_contents /etc/rsyslog.d; then
+        :
+    else
+        not_available
+        blank_line
+    fi
+
+    subsection "Full File Content: /etc/syslog.conf"
+    print_file_with_header /etc/syslog.conf
+
+    subsection "Full File Content: /etc/syslog-ng/syslog-ng.conf"
+    print_file_with_header /etc/syslog-ng/syslog-ng.conf
+
+    subsection "Full File Content: /etc/syslog-ng/conf.d"
+    if print_directory_file_contents /etc/syslog-ng/conf.d; then
+        :
+    else
+        not_available
+        blank_line
+    fi
+
+    subsection "Full File Content: /etc/security/audit/config"
+    print_file_with_header /etc/security/audit/config
+
+    subsection "Full File Content: /etc/security/audit_control"
+    print_file_with_header /etc/security/audit_control
+}
+
+print_service_startup_summary() {
+    subsection "Enabled or Startup Services:"
+    found_output=no
+
+    if command_exists systemctl; then
+        if systemctl list-unit-files --type=service --state=enabled --no-pager --no-legend 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists chkconfig; then
+        if chkconfig --list 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists svcs; then
+        if svcs -a 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists lssrc; then
+        if lssrc -a 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists service; then
+        if service --status-all 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ]; then
+        not_available
+    fi
+    blank_line
+
+    subsection "Running Services and Agent Processes:"
+    print_matching_processes 'splunkd|qualys|falcon-sensor|tanium|datadog-agent|zabbix_agentd|nrpe|newrelic|telegraf|ossec|auditd|rsyslogd|syslog-ng|sshd'
+    blank_line
+
+    subsection "Startup Configuration Files:"
+    print_file_with_header /etc/inittab
+    print_file_with_header /etc/rc.config
+    print_file_with_header /etc/default/grub
+
+    subsection "Startup Directories:"
+    if print_directory_listing_or_not_available /etc/init.d; then
+        :
+    fi
+    blank_line
+    if print_directory_listing_or_not_available /etc/rc.d; then
+        :
+    fi
+    blank_line
+    if print_directory_listing_or_not_available /etc/rc2.d; then
+        :
+    fi
+    blank_line
+    if print_directory_listing_or_not_available /etc/rc3.d; then
+        :
+    fi
+}
+
+print_network_exposure_summary() {
+    subsection "Listening Ports and Services:"
+    found_output=no
+
+    if command_exists ss; then
+        if ss -lntup 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists netstat; then
+        if netstat -an 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists lsof; then
+        if lsof -i -n -P 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ]; then
+        not_available
+    fi
+    blank_line
+
+    subsection "Firewall Configuration:"
+    found_output=no
+
+    if command_exists firewall-cmd; then
+        if firewall-cmd --list-all 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists nft; then
+        if nft list ruleset 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists iptables; then
+        if iptables -S 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists pfctl; then
+        if pfctl -sr 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists ipfstat; then
+        if ipfstat -io 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ]; then
+        not_available
+    fi
+    blank_line
+
+    subsection "Network Share and Legacy Service Configuration:"
+    print_file_with_header /etc/exports
+    print_file_with_header /etc/dfs/dfstab
+    print_file_with_header /etc/inet/inetd.conf
+
+    subsection "Legacy Insecure Service References:"
+    if print_matching_lines_from_files '(telnet|rlogin|rexec|rsh|ftp)' /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/* /etc/services; then
+        :
+    else
+        not_available
+    fi
+}
+
+print_patch_update_summary() {
+    subsection "Operating System Patch or Maintenance Level:"
+    found_output=no
+
+    if command_exists oslevel; then
+        if oslevel -s 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists swlist; then
+        if swlist -l patch 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists pkg; then
+        if pkg history 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists rpm; then
+        if rpm -qa --last 2>/dev/null | sed -n '1,20p'; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists dpkg; then
+        if file_readable /var/log/dpkg.log; then
+            if awk 'NR <= 20 { print }' /var/log/dpkg.log 2>/dev/null; then
+                found_output=yes
+            fi
+        fi
+    fi
+
+    if [ "$found_output" = no ]; then
+        not_available
+    fi
+    blank_line
+
+    subsection "Package Manager History and Update Indicators:"
+    found_output=no
+
+    if command_exists dnf; then
+        if dnf history list 2>/dev/null | sed -n '1,20p'; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists yum; then
+        if yum history list 2>/dev/null | sed -n '1,20p'; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists instfix; then
+        if instfix -i 2>/dev/null | sed -n '1,20p'; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists pkg; then
+        if pkg history 2>/dev/null | sed -n '1,20p'; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ]; then
+        not_available
+    fi
+    blank_line
+
+    subsection "Repository and Patch Configuration Files:"
+    print_file_with_header /etc/yum.conf
+    print_file_with_header /etc/dnf/dnf.conf
+    print_file_with_header /etc/apt/sources.list
+
+    subsection "Repository Configuration Directories:"
+    if print_directory_file_contents /etc/yum.repos.d; then
+        :
+    else
+        not_available
+        blank_line
+    fi
+    if print_directory_file_contents /etc/apt/sources.list.d; then
+        :
+    else
+        not_available
+        blank_line
+    fi
+}
+
+print_backup_operational_summary() {
+    subsection "Filesystem Capacity:"
+    if command_exists df; then
+        if df -k 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+    blank_line
+
+    subsection "Filesystem Inode Capacity:"
+    if command_exists df; then
+        if df -i 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+    blank_line
+
+    subsection "Backup and Recovery Process Indicators:"
+    print_matching_processes 'netbackup|bpbkar|bpbrm|bpjava|tsm|dsmcad|dsmc|veeam|commvault|cvd|bacula|rubrik|cohesity|avamar|nsrexecd|savefs|backup'
+    blank_line
+
+    subsection "Monitoring Agent Indicators:"
+    print_matching_processes 'splunkd|qualys|falcon-sensor|tanium|datadog-agent|zabbix_agentd|nrpe|newrelic|telegraf|ossec|auditd'
+    blank_line
+
+    subsection "Backup and Log Rotation Configuration Files:"
+    print_file_with_header /etc/logrotate.conf
+    print_file_with_header /etc/newsyslog.conf
+    print_file_with_header /usr/openv/netbackup/bp.conf
+    print_file_with_header /opt/tivoli/tsm/client/ba/bin/dsm.opt
+    print_file_with_header /etc/bacula/bacula-dir.conf
+    print_file_with_header /etc/nsr/nsrla.res
+
+    subsection "Backup and Log Rotation Directories:"
+    if print_directory_file_contents /etc/logrotate.d; then
+        :
+    else
+        not_available
+        blank_line
+    fi
+
+    subsection "Boot and Uptime Indicators:"
+    if command_exists who; then
+        if who -b 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+    blank_line
+
+    if command_exists uptime; then
+        if uptime 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+}
+
+print_time_sync_summary() {
+    subsection "Time Synchronization Status:"
+    found_output=no
+
+    if command_exists timedatectl; then
+        if timedatectl status 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists chronyc; then
+        if chronyc tracking 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists ntpq; then
+        if ntpq -p 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists ntpstat; then
+        if ntpstat 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ] && command_exists lssrc; then
+        if lssrc -s xntpd 2>/dev/null; then
+            found_output=yes
+        fi
+    fi
+
+    if [ "$found_output" = no ]; then
+        not_available
+    fi
+    blank_line
+
+    subsection "Time Synchronization Configuration Files:"
+    print_file_with_header /etc/chrony.conf
+    print_file_with_header /etc/chrony/chrony.conf
+    print_file_with_header /etc/ntp.conf
+    print_file_with_header /etc/inet/ntp.conf
+}
+
+print_additional_scheduler_content() {
+    subsection "Systemd Timers:"
+    if command_exists systemctl; then
+        if systemctl list-timers --all --no-pager 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+    blank_line
+
+    subsection "At Jobs:"
+    if command_exists atq; then
+        if atq 2>/dev/null; then
+            :
+        else
+            no_entries_found
+        fi
+    elif command_exists at; then
+        if at -l 2>/dev/null; then
+            :
+        else
+            no_entries_found
+        fi
+    else
+        not_available
+    fi
+    blank_line
+
+    subsection "Anacron and Additional Scheduler Files:"
+    print_file_with_header /etc/anacrontab
+    if print_directory_listing_or_not_available /var/spool/anacron; then
+        :
+    fi
+    blank_line
+    print_file_with_header /var/log/cron
+    print_file_with_header /var/log/cron.log
+}
+
+print_critical_file_integrity() {
+    subsection "Sensitive File Metadata and Checksums:"
+    for sensitive_path in \
+        /etc/passwd \
+        /etc/shadow \
+        /etc/group \
+        /etc/sudoers \
+        /etc/ssh/sshd_config \
+        /etc/pam.conf \
+        /etc/login.defs \
+        /etc/security/user \
+        /etc/security/audit/config \
+        /etc/security/audit_control \
+        /etc/audit/auditd.conf \
+        /etc/audit/audit.rules \
+        /etc/syslog.conf \
+        /etc/rsyslog.conf \
+        /etc/ntp.conf \
+        /etc/chrony.conf \
+        /etc/default/grub \
+        /boot/grub2/grub.cfg \
+        /boot/grub/menu.lst \
+        /etc/inittab; do
+        print_path_metadata "$sensitive_path"
+    done
+
+    subsection "Kernel and Security Parameter Indicators:"
+    if command_exists sysctl; then
+        if sysctl kernel.randomize_va_space net.ipv4.ip_forward fs.suid_dumpable kernel.modules_disabled 2>/dev/null; then
+            :
+        else
+            not_available
+        fi
+    else
+        not_available
+    fi
+    blank_line
+
+    subsection "Kernel Parameter Configuration Files:"
+    print_file_with_header /etc/sysctl.conf
+    if print_directory_file_contents /etc/sysctl.d; then
+        :
+    else
+        not_available
+        blank_line
+    fi
+}
+
+prepare_collection_directory
+
 printf 'SOX ITGC Audit Data Collection\n'
 printf 'Generated: %s\n' "$TIMESTAMP"
 printf 'Hostname: %s\n' "$HOSTNAME_VALUE"
 printf 'Script Mode: %s\n' "$SCRIPT_MODE"
 printf 'Output Destination: stdout\n'
+printf 'Evidence Collection Directory: %s\n' "$COLLECTION_DIRECTORY"
 
 section_with_guidance "Platform Details"
 print_platform_details
@@ -834,8 +1752,51 @@ print_cron_content
 section_with_guidance "13. Service Accounts"
 print_service_accounts
 
+section_with_guidance "14. Account Status, SSH Keys, and Legacy Trust"
+print_account_status_summary
+blank_line
+print_password_expiry_details
+blank_line
+print_authorized_keys_content
+blank_line
+print_legacy_trust_content
+blank_line
+print_shell_timeout_and_banner_summary
+
+section_with_guidance "15. Audit Logging and Log Forwarding"
+print_audit_logging_summary
+blank_line
+subsection "Full Content Review Files"
+print_audit_logging_full_content
+
+section_with_guidance "16. Service and Startup Configuration"
+print_service_startup_summary
+
+section_with_guidance "17. Network Exposure and Firewall Configuration"
+print_network_exposure_summary
+
+section_with_guidance "18. Patch, Update, and Change Indicators"
+print_patch_update_summary
+
+section_with_guidance "19. Backup, Capacity, and Operational Indicators"
+print_backup_operational_summary
+
+section_with_guidance "20. Time Synchronization"
+print_time_sync_summary
+
+section_with_guidance "21. Additional Scheduled Tasks and Timers"
+print_additional_scheduler_content
+
+section_with_guidance "22. Critical File Integrity and Sensitive File Permissions"
+print_critical_file_integrity
+
+create_collection_archive
+
 section_with_guidance "Execution Summary"
 printf 'Status: completed\n'
-printf 'Behavior: stdout only, read-only collection\n'
-printf 'Files created on target host: none\n'
+printf 'Behavior: stdout report plus local evidence packaging\n'
+printf 'Files created in working directory: %s\n' "$COLLECTION_DIRECTORY"
+printf 'Collection directory status: %s\n' "$COLLECTION_STATUS"
+printf 'Archive status: %s\n' "$ARCHIVE_STATUS"
+printf 'Archive file: %s\n' "${ARCHIVE_FILE:-not available}"
 printf 'Configuration changes made: none\n'
