@@ -1595,14 +1595,21 @@ $entered_path"
 }
 
 # Main execution sequence:
-# 1. Prepare the local evidence directory under the current working directory.
-# 2. Display help and exit if requested.
-# 3. Require elevated privileges for full collection unless dry-run mode is
-#    explicitly selected.
-# 4. Redirect report output into the local report file.
-# 5. Execute the evidence sections in a consistent order.
-# 6. Package the evidence directory into a local archive.
-prepare_collection_directory
+# 1. Display help and exit if requested. No filesystem changes occur on this
+#    path so --help and argument errors leave the working directory untouched.
+# 2. Require elevated privileges for full collection unless dry-run mode is
+#    explicitly selected. The sudo check exits before any directory is
+#    created or removed.
+# 3. Interactively prompt for application installation directories when no
+#    --app-dir flag was provided and stdin is a terminal.
+# 4. Prepare the local evidence directory. This step removes any prior
+#    evidence directory at the same path, so it is intentionally deferred
+#    until after help, sudo, and prompt handling so that early-exit paths
+#    do not disturb a previously generated collection in the working
+#    directory.
+# 5. Redirect report output into the local report file.
+# 6. Execute the evidence sections in a consistent order.
+# 7. Package the evidence directory into a local archive.
 
 if [ "$SHOW_HELP" = "yes" ]; then
     print_usage
@@ -1625,6 +1632,8 @@ fi
 # line or stdin is not a terminal, this returns immediately and the section
 # uses whatever was supplied (or none, if nothing was supplied).
 prompt_for_app_directories
+
+prepare_collection_directory
 
 # Preserve the original stdout on file descriptor 3. The script writes the
 # report to the report file first, then replays the completed report to the
