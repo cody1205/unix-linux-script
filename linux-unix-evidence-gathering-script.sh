@@ -55,17 +55,44 @@ readonly SCRIPT_NAME
 # Dry-run mode is provided so a client can inspect structure and behavior
 # without granting elevated access. Privileged-only evidence may be unavailable
 # during that mode.
+#
+# Application directory listing:
+# - --app-dir PATH or --app-dir=PATH selects an application installation
+#   directory to be included in the recursive directory-listing section.
+# - The flag may be provided multiple times to capture more than one
+#   directory.
+# - When no --app-dir flags are provided and stdin is connected to a
+#   terminal, the script will interactively prompt the operator for one or
+#   more directories before evidence collection starts.
 TEST_MODE=no
 SHOW_HELP=no
 ARGUMENT_ERROR=no
+APP_DIRECTORIES=""
+expect_app_dir_value=no
 
 for argument in "$@"; do
+    if [ "$expect_app_dir_value" = "yes" ]; then
+        APP_DIRECTORIES="$APP_DIRECTORIES
+$argument"
+        expect_app_dir_value=no
+        continue
+    fi
     case "$argument" in
         --dry-run|--no-sudo-test)
             TEST_MODE=yes
             ;;
         -h|--help)
             SHOW_HELP=yes
+            ;;
+        --app-dir)
+            expect_app_dir_value=yes
+            ;;
+        --app-dir=*)
+            app_dir_value=${argument#--app-dir=}
+            if [ -n "$app_dir_value" ]; then
+                APP_DIRECTORIES="$APP_DIRECTORIES
+$app_dir_value"
+            fi
             ;;
         *)
             printf 'Unknown option: %s\n' "$argument" >&2
@@ -74,6 +101,12 @@ for argument in "$@"; do
             ;;
     esac
 done
+
+if [ "$expect_app_dir_value" = "yes" ]; then
+    printf 'Missing value for --app-dir option.\n' >&2
+    ARGUMENT_ERROR=yes
+    SHOW_HELP=yes
+fi
 
 # The report records whether the execution was a full privileged collection or
 # a non-root test. This supports evidence traceability and reviewer context.
@@ -212,7 +245,7 @@ no_entries_found() {
 # Usage text distinguishes full collection from dry-run testing so the client
 # can decide which execution mode is appropriate for the review activity.
 print_usage() {
-    printf 'Usage: sh %s [--dry-run|--no-sudo-test] [--help]\n' "$SCRIPT_NAME"
+    printf 'Usage: sh %s [--dry-run|--no-sudo-test] [--app-dir PATH ...] [--help]\n' "$SCRIPT_NAME"
     printf '\n'
     printf '  sudo sh %s\n' "$SCRIPT_NAME"
     printf '      Perform the full privileged evidence collection.\n'
@@ -220,6 +253,14 @@ print_usage() {
     printf '  sh %s --dry-run\n' "$SCRIPT_NAME"
     printf '      Run a safe non-root test to generate a best-effort report,\n'
     printf '      collection directory, and local archive without requiring sudo.\n'
+    printf '\n'
+    printf '  sudo sh %s --app-dir /opt/myapp --app-dir /var/lib/myapp\n' "$SCRIPT_NAME"
+    printf '      Include recursive directory listings for one or more\n'
+    printf '      application installation directories. The flag may be\n'
+    printf '      repeated. The form --app-dir=PATH is also accepted.\n'
+    printf '      When no --app-dir flag is given and stdin is a terminal,\n'
+    printf '      the script will interactively prompt for application\n'
+    printf '      directories before evidence collection starts.\n'
 }
 
 # Capability helpers centralize command and path checks. They allow the script
@@ -1429,6 +1470,130 @@ create_collection_archive() {
     ARCHIVE_STATUS="failed"
 }
 
+# Application directory listing flags:
+# The desired listing on Linux is `ls -RlthBA`, which produces a recursive,
+# long-format, time-sorted, human-readable, hidden-files-included view that
+# omits backup files (`-B`). Several of those flags are GNU extensions and do
+# not exist on every Unix family, and some have different meanings on BSD ls
+# (for example, BSD `-B` forces printing of non-printable characters rather
+# than ignoring backup files). This helper selects a comparable flag set per
+# detected operating system so the resulting evidence has consistent meaning.
+application_listing_ls_flags() {
+    case "$OS_NAME" in
+        Linux)
+            printf -- '-RlthBA\n'
+            ;;
+        Darwin|FreeBSD|OpenBSD|NetBSD)
+            printf -- '-RlthA\n'
+            ;;
+        AIX|SunOS|HP-UX)
+            printf -- '-RltA\n'
+            ;;
+        *)
+            printf -- '-RltA\n'
+            ;;
+    esac
+}
+
+# Recursive listing of an application installation directory:
+# This helper validates the supplied path and runs a recursive ls listing on
+# it. The listing is read-only metadata: filenames, permissions, ownership,
+# size, and modification time. No file contents are read, modified, copied,
+# or removed by this helper. Errors during traversal (for example, an
+# unreadable subdirectory under the supplied root) are suppressed so a single
+# unreadable element does not abort the listing of the rest of the tree.
+print_application_directory_listing() {
+    app_path=$1
+
+    printf 'Application directory: %s\n' "$app_path"
+
+    if [ -z "$app_path" ]; then
+        printf 'Result: no path provided\n'
+        blank_line
+        return
+    fi
+
+    if ! path_exists "$app_path"; then
+        printf 'Result: path does not exist\n'
+        record_manifest_line "APP_DIR_MISSING|$app_path"
+        blank_line
+        return
+    fi
+
+    if ! directory_exists "$app_path"; then
+        printf 'Result: path is not a directory\n'
+        record_manifest_line "APP_DIR_NOT_DIRECTORY|$app_path"
+        blank_line
+        return
+    fi
+
+    if ! [ -r "$app_path" ]; then
+        printf 'Result: directory is not readable by the current user\n'
+        record_manifest_line "APP_DIR_UNREADABLE|$app_path"
+        blank_line
+        return
+    fi
+
+    if ! command_exists ls; then
+        printf 'Result: ls command not available on this host\n'
+        blank_line
+        return
+    fi
+
+    listing_flags=`application_listing_ls_flags`
+    printf 'Operating system family: %s\n' "$OS_NAME"
+    printf 'ls flags applied: %s\n' "$listing_flags"
+    blank_line
+
+    subsection "Recursive Listing:"
+    ls $listing_flags "$app_path" 2>/dev/null || not_available
+    record_manifest_line "APP_DIR_LISTED|$app_path|flags=$listing_flags"
+    blank_line
+}
+
+# Interactive application directory prompt:
+# When the operator does not pass --app-dir flags on the command line and
+# stdin is connected to a terminal, the script asks the operator for one or
+# more application installation directories. The prompt runs before stdout is
+# redirected into the report file so the questions appear directly on the
+# operator's terminal. If stdin is not a terminal, the prompt is skipped so
+# non-interactive runs (for example, scheduled or piped invocations) do not
+# block waiting for input.
+prompt_for_app_directories() {
+    if [ -n "$APP_DIRECTORIES" ]; then
+        return
+    fi
+    if [ ! -t 0 ]; then
+        return
+    fi
+
+    printf '\n'
+    printf 'Application Installation Directory Listing\n'
+    printf '------------------------------------------\n'
+    printf 'You may include one or more application installation directories\n'
+    printf 'in the evidence collection. The script will run a recursive\n'
+    printf 'directory listing on each directory you provide.\n'
+    printf '\n'
+    printf 'Enter one absolute path per line.\n'
+    printf 'Press Enter on an empty line to finish.\n'
+    printf 'Press Enter immediately to skip this section.\n'
+    printf '\n'
+
+    while :; do
+        printf 'Application directory path: '
+        if ! IFS= read -r entered_path; then
+            printf '\n'
+            break
+        fi
+        if [ -z "$entered_path" ]; then
+            break
+        fi
+        APP_DIRECTORIES="$APP_DIRECTORIES
+$entered_path"
+    done
+    printf '\n'
+}
+
 # Main execution sequence:
 # 1. Prepare the local evidence directory under the current working directory.
 # 2. Display help and exit if requested.
@@ -1454,6 +1619,13 @@ if [ "$EFFECTIVE_UID_VALUE" != "0" ] && [ "$TEST_MODE" != "yes" ]; then
     exit 1
 fi
 
+# Interactive collection of application installation directories. This runs
+# before stdout is redirected into the report file so the prompts appear on
+# the operator's terminal. When --app-dir flags were passed on the command
+# line or stdin is not a terminal, this returns immediately and the section
+# uses whatever was supplied (or none, if nothing was supplied).
+prompt_for_app_directories
+
 # Preserve the original stdout on file descriptor 3. The script writes the
 # report to the report file first, then replays the completed report to the
 # operator at the end of the run.
@@ -1477,6 +1649,17 @@ printf 'Client Non-Root Test Instruction: sh %s --dry-run\n' "$SCRIPT_NAME"
 
 if [ "$TEST_MODE" = "yes" ] && [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
     printf 'Test Mode Notice: running without sudo; privileged-only files and commands may show not available.\n'
+fi
+
+if [ -n "$APP_DIRECTORIES" ]; then
+    printf 'Application Directories Selected for Recursive Listing:\n'
+    printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r app_dir_header_entry; do
+        if [ -n "$app_dir_header_entry" ]; then
+            printf '  - %s\n' "$app_dir_header_entry"
+        fi
+    done
+else
+    printf 'Application Directories Selected for Recursive Listing: none\n'
 fi
 
 # Evidence section execution:
@@ -1581,6 +1764,19 @@ print_additional_scheduler_content
 
 section_with_explanation "22. Critical File Integrity and Sensitive File Permissions" "Explanation: This section shows metadata and checksums for selected sensitive operating-system files, using an operating-system-specific file list so the output stays relevant to the detected platform."
 print_critical_file_integrity
+
+section_with_explanation "23. Application Installation Directory Recursive Listing" "Explanation: This section captures a recursive directory listing for one or more application installation directories specified by the operator at runtime. It supports SOX / ITGC reviews of application file inventories by recording filenames, ownership, permissions, sizes, and modification times for every file under the supplied roots. The ls command is read-only and does not change file content, ownership, or permissions. The flags are adjusted per operating system because the desired Linux flag set ls -RlthBA includes GNU extensions (-h human-readable sizes and -B ignore backups) that are not present, or that have different meanings, on AIX, Solaris, HP-UX, and BSD. Equivalent flag sets are used on those platforms so the resulting evidence remains comparable across hosts."
+if [ -z "$APP_DIRECTORIES" ]; then
+    printf 'No application directories were specified.\n'
+    printf 'Application directories can be supplied with the --app-dir flag,\n'
+    printf 'or by responding to the interactive prompt at script startup.\n'
+else
+    printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r app_path_entry; do
+        if [ -n "$app_path_entry" ]; then
+            print_application_directory_listing "$app_path_entry"
+        fi
+    done
+fi
 
 create_collection_archive
 
