@@ -2,16 +2,122 @@
 
 # SOX ITGC Audit Data Collection Script
 # Shell-only version intended to be run as:
-#   sudo sh linux-unix-evidence-gathering-script.txt
+#   sudo sh linux-unix-evidence-gathering-script.sh
+#
+# Client review statement:
+# This script is intended for controlled SOX ITGC evidence collection on
+# Unix-like operating systems, including Linux, AIX, Solaris / Illumos, HP-UX,
+# BSD, and related platforms. It gathers configuration, access, logging,
+# scheduling, service, network, patch, backup, time synchronization, and file
+# integrity evidence that is commonly requested during operating-system control
+# reviews.
+#
+# Operating model:
+# - The script performs observation and evidence packaging only.
+# - It does not create, modify, delete, enable, disable, restart, or reconfigure
+#   operating-system users, groups, services, jobs, permissions, packages,
+#   network settings, logging settings, or authentication settings.
+# - Source files from the host are read and, where appropriate, copied into the
+#   evidence package. The original source files are not modified.
+# - The script writes only to the evidence directory that it creates in the
+#   current working directory selected by the operator, plus the resulting
+#   archive file in that same working directory.
+# - Sensitive files, such as password shadow files, private keys, keytabs, and
+#   SSH key material, are not printed or copied in full. The script records
+#   metadata or safe summaries for those files instead.
+#
+# Evidence outputs:
+# - report/ contains the narrative audit report.
+# - raw_files/ contains copied non-sensitive source files.
+# - metadata/ contains the manifest and sensitive-file tracking log.
+# - commands/ contains a local command-output style artifact.
+# - SOX-ITGC-AUDIT-LINUX-UNIX-<hostname>-<timestamp>.* is the packaged archive.
 
+# Restrict command lookup to standard administrative paths. This reduces the
+# chance that a shell alias, user-local wrapper, or non-standard executable is
+# used during evidence collection.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 readonly PATH
 
+# Restrict permissions on generated evidence artifacts. This applies only to
+# files and directories created by this script under the working directory.
 umask 077
 
+# Resolve the invoked script name for report text and usage instructions.
+# This is informational and does not affect host configuration.
+SCRIPT_NAME=`basename "$0" 2>/dev/null || echo linux-unix-evidence-gathering-script.sh`
+readonly SCRIPT_NAME
+
+# Supported execution modes:
+# - default privileged collection, normally invoked with sudo
+# - non-root dry-run mode for pre-execution review and output-format testing
+# - help output
+# Dry-run mode is provided so a client can inspect structure and behavior
+# without granting elevated access. Privileged-only evidence may be unavailable
+# during that mode.
+#
+# Application directory listing:
+# - --app-dir PATH or --app-dir=PATH selects an application installation
+#   directory to be included in the recursive directory-listing section.
+# - The flag may be provided multiple times to capture more than one
+#   directory.
+# - When no --app-dir flags are provided and stdin is connected to a
+#   terminal, the script will interactively prompt the operator for one or
+#   more directories before evidence collection starts.
+TEST_MODE=no
+SHOW_HELP=no
+ARGUMENT_ERROR=no
+APP_DIRECTORIES=""
+expect_app_dir_value=no
+
+for argument in "$@"; do
+    if [ "$expect_app_dir_value" = "yes" ]; then
+        APP_DIRECTORIES="$APP_DIRECTORIES
+$argument"
+        expect_app_dir_value=no
+        continue
+    fi
+    case "$argument" in
+        --dry-run|--no-sudo-test)
+            TEST_MODE=yes
+            ;;
+        -h|--help)
+            SHOW_HELP=yes
+            ;;
+        --app-dir)
+            expect_app_dir_value=yes
+            ;;
+        --app-dir=*)
+            app_dir_value=${argument#--app-dir=}
+            if [ -n "$app_dir_value" ]; then
+                APP_DIRECTORIES="$APP_DIRECTORIES
+$app_dir_value"
+            fi
+            ;;
+        *)
+            printf 'Unknown option: %s\n' "$argument" >&2
+            ARGUMENT_ERROR=yes
+            SHOW_HELP=yes
+            ;;
+    esac
+done
+
+if [ "$expect_app_dir_value" = "yes" ]; then
+    printf 'Missing value for --app-dir option.\n' >&2
+    ARGUMENT_ERROR=yes
+    SHOW_HELP=yes
+fi
+
+# The report records whether the execution was a full privileged collection or
+# a non-root test. This supports evidence traceability and reviewer context.
 SCRIPT_MODE="read-only source collection with local packaging"
+if [ "$TEST_MODE" = "yes" ]; then
+    SCRIPT_MODE="$SCRIPT_MODE (non-root test mode enabled)"
+fi
 readonly SCRIPT_MODE
 
+# Capture runtime context once at startup so the report header and archive name
+# remain consistent throughout the evidence collection session.
 OS_NAME=`uname -s 2>/dev/null || echo unknown`
 readonly OS_NAME
 
@@ -27,9 +133,16 @@ readonly ARCHIVE_TIMESTAMP
 SAFE_HOSTNAME=`printf '%s' "$HOSTNAME_VALUE" | tr -c 'A-Za-z0-9._-' '_'`
 readonly SAFE_HOSTNAME
 
+# Use the operator's current working directory as the evidence output location.
+# This is the only location where the script creates files or directories.
 WORKING_DIRECTORY=`pwd 2>/dev/null || echo .`
 readonly WORKING_DIRECTORY
 
+# Evidence directory structure created under the working directory:
+# - report/: human-readable audit report generated by this script
+# - raw_files/: copied non-sensitive source files used as supporting evidence
+# - metadata/: manifest and sensitive-file handling records
+# - commands/: locally generated command-output style artifact
 COLLECTION_DIRECTORY="$WORKING_DIRECTORY/SOX-ITGC-AUDIT-LINUX-UNIX"
 readonly COLLECTION_DIRECTORY
 
@@ -60,10 +173,25 @@ readonly SENSITIVE_SKIPPED_FILE
 ARCHIVE_BASE_NAME="SOX-ITGC-AUDIT-LINUX-UNIX-$SAFE_HOSTNAME-$ARCHIVE_TIMESTAMP"
 readonly ARCHIVE_BASE_NAME
 
+# Runtime status values used for report and archive summary text. These values
+# describe collection status only; they are not used to change system settings.
 ARCHIVE_FILE=""
 ARCHIVE_STATUS="not created"
 COLLECTION_STATUS="pending"
+EFFECTIVE_UID_VALUE=`id -u 2>/dev/null || echo 1`
+readonly EFFECTIVE_UID_VALUE
+RUN_PRIVILEGE_MODE="elevated collection"
+if [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
+    if [ "$TEST_MODE" = "yes" ]; then
+        RUN_PRIVILEGE_MODE="non-root dry-run test"
+    else
+        RUN_PRIVILEGE_MODE="non-root execution"
+    fi
+fi
+readonly RUN_PRIVILEGE_MODE
 
+# Report-formatting helpers. These functions write text to the generated
+# report only and do not interact with host configuration.
 section() {
     printf '\n==================================================\n'
     printf '%s\n' "$1"
@@ -114,6 +242,30 @@ no_entries_found() {
     printf 'no entries found\n'
 }
 
+# Usage text distinguishes full collection from dry-run testing so the client
+# can decide which execution mode is appropriate for the review activity.
+print_usage() {
+    printf 'Usage: sh %s [--dry-run|--no-sudo-test] [--app-dir PATH ...] [--help]\n' "$SCRIPT_NAME"
+    printf '\n'
+    printf '  sudo sh %s\n' "$SCRIPT_NAME"
+    printf '      Perform the full privileged evidence collection.\n'
+    printf '\n'
+    printf '  sh %s --dry-run\n' "$SCRIPT_NAME"
+    printf '      Run a safe non-root test to generate a best-effort report,\n'
+    printf '      collection directory, and local archive without requiring sudo.\n'
+    printf '\n'
+    printf '  sudo sh %s --app-dir /opt/myapp --app-dir /var/lib/myapp\n' "$SCRIPT_NAME"
+    printf '      Include recursive directory listings for one or more\n'
+    printf '      application installation directories. The flag may be\n'
+    printf '      repeated. The form --app-dir=PATH is also accepted.\n'
+    printf '      When no --app-dir flag is given and stdin is a terminal,\n'
+    printf '      the script will interactively prompt for application\n'
+    printf '      directories before evidence collection starts.\n'
+}
+
+# Capability helpers centralize command and path checks. They allow the script
+# to report "not available" when a platform-specific tool or file is absent,
+# rather than failing the entire collection.
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -130,6 +282,12 @@ path_exists() {
     [ -e "$1" ]
 }
 
+# Sensitive-path screening:
+# Certain files can contain password hashes, private keys, Kerberos keytabs,
+# tokens, or other credential material. For those files, the script avoids
+# printing or copying full contents into the evidence package. Instead, it
+# records metadata and limited summaries that support review while reducing the
+# risk of unnecessary credential exposure.
 is_sensitive_path() {
     case "$1" in
         /etc/shadow|/etc/gshadow|/etc/sssd/sssd.conf|/etc/krb5.keytab|/etc/krb5/krb5.keytab|/etc/ldap.secret)
@@ -156,6 +314,11 @@ record_sensitive_skip() {
     fi
 }
 
+# Evidence directory preparation:
+# The script recreates its own local evidence directory before collection so
+# the output reflects one execution. This cleanup is limited to the directory
+# named by COLLECTION_DIRECTORY under the current working directory. It does
+# not remove or modify host configuration files outside that evidence folder.
 prepare_collection_directory() {
     if rm -rf "$COLLECTION_DIRECTORY" 2>/dev/null && \
        mkdir -p "$REPORTS_DIRECTORY" "$RAW_FILES_DIRECTORY" "$METADATA_DIRECTORY" "$COMMANDS_DIRECTORY" 2>/dev/null; then
@@ -167,6 +330,11 @@ prepare_collection_directory() {
     fi
 }
 
+# Source-file collection:
+# Non-sensitive files that are printed in the report are copied into raw_files/
+# using a mirrored path structure. For example, /etc/ssh/sshd_config is copied
+# under raw_files/etc/ssh/sshd_config. The source file is opened read-only and
+# copied out for evidence retention; the original file is not changed.
 copy_file_to_collection() {
     file_path=$1
 
@@ -193,6 +361,10 @@ copy_file_to_collection() {
     fi
 }
 
+# Checksum calculation:
+# The script attempts common checksum tools available across Unix-like systems.
+# These tools read file contents to calculate a reference value and do not
+# write to or alter the measured file.
 print_file_checksum() {
     file_path=$1
 
@@ -213,6 +385,11 @@ print_file_checksum() {
     fi
 }
 
+# File metadata review:
+# The script records path, permissions, ownership, timestamps, and checksums
+# where available. This information is obtained through read-only inspection
+# commands and is useful for validating sensitive file posture without changing
+# the file itself.
 print_path_metadata() {
     file_path=$1
 
@@ -234,6 +411,10 @@ print_path_metadata() {
     blank_line
 }
 
+# Active-configuration extraction:
+# This helper prints non-comment, non-blank lines from a readable file. It is
+# used where a concise summary is more useful than printing comments and
+# defaults. The source file is read only.
 print_noncomment_or_not_available() {
     file_path=$1
 
@@ -248,6 +429,9 @@ print_noncomment_or_not_available() {
     fi
 }
 
+# Pattern-based evidence extraction:
+# This helper searches readable files for security-relevant settings and prints
+# matching lines. It performs read-only text matching and does not edit files.
 print_matching_lines_or_not_available() {
     pattern=$1
     file_path=$2
@@ -263,6 +447,12 @@ print_matching_lines_or_not_available() {
     fi
 }
 
+# Sensitive-file review:
+# When a file is classified as sensitive, the script does not print or copy the
+# full file body. Instead, it reports metadata and a limited safe summary, such
+# as an authorized_keys entry count or selected non-secret SSSD settings. This
+# is intended to support audit review while avoiding broad distribution of
+# credential-bearing material.
 print_sensitive_file_review() {
     file_path=$1
 
@@ -321,6 +511,11 @@ print_sensitive_file_review() {
     record_manifest_line "SENSITIVE_METADATA_ONLY|$file_path"
 }
 
+# Full-file evidence handling:
+# This helper is used whenever the report should show a source file. Readable
+# non-sensitive files are printed and copied into raw_files/. Sensitive files
+# are diverted to the sensitive-file review path. Missing or unreadable files
+# are clearly reported as not available. No source file is modified.
 print_file_with_header() {
     file_path=$1
 
@@ -340,6 +535,10 @@ print_file_with_header() {
     blank_line
 }
 
+# Platform context:
+# Operating-system family and privilege context are printed first because later
+# evidence sources vary by platform. A "not available" result can be expected
+# when a Linux-specific file is not present on AIX, Solaris, HP-UX, or BSD.
 print_platform_details() {
     subsection "Operating System Details:"
     printf 'Platform: %s\n' "$OS_NAME"
@@ -365,9 +564,15 @@ print_platform_details() {
 
     printf 'Execution User: %s\n' "`id -un 2>/dev/null || echo unknown`"
     printf 'Effective UID: %s\n' "`id -u 2>/dev/null || echo unknown`"
-    printf 'Expected invocation: sudo sh linux-unix-evidence-gathering-script.txt\n'
+    printf 'Expected elevated invocation: sudo sh %s\n' "$SCRIPT_NAME"
+    printf 'Non-root test invocation: sh %s --dry-run\n' "$SCRIPT_NAME"
+    printf 'Run privilege mode: %s\n' "$RUN_PRIVILEGE_MODE"
 }
 
+# Privileged group summary:
+# This function identifies membership in commonly privileged administrative
+# groups such as wheel and sudo. It reads group information only and does not
+# add or remove users from any group.
 print_group_membership_summary() {
     found=no
 
@@ -391,6 +596,10 @@ print_group_membership_summary() {
     fi
 }
 
+# Duplicate identity review:
+# Duplicate UID or GID values can reduce accountability because multiple names
+# may map to the same numeric identity. This review reads account and group
+# databases only.
 print_duplicate_uid_gid_review() {
     subsection "Duplicate UID Review:"
     if file_readable /etc/passwd; then
@@ -440,6 +649,9 @@ print_duplicate_uid_gid_review() {
     fi
 }
 
+# Group membership inventory:
+# This function prints group membership information from the system's available
+# name service interface or local group file. It does not change group records.
 print_all_groups() {
     if command_exists getent; then
         getent group 2>/dev/null | awk -F: '{print $1 ": " $4}'
@@ -450,6 +662,10 @@ print_all_groups() {
     fi
 }
 
+# Password and lockout policy summary:
+# This function extracts platform-relevant password aging, complexity, and
+# lockout settings. It reads configuration files only and does not run password
+# reset, password change, or account lockout commands.
 print_auth_summary() {
     subsection "Password Aging Summary:"
     case "$OS_NAME" in
@@ -540,6 +756,10 @@ print_auth_summary() {
     esac
 }
 
+# Password policy source-file capture:
+# The specific files collected here depend on the detected operating system.
+# The files are read and copied where appropriate; no authentication settings
+# are changed.
 print_auth_full_content() {
     case "$OS_NAME" in
         Linux)
@@ -569,6 +789,10 @@ print_auth_full_content() {
     esac
 }
 
+# Authentication source summary:
+# This section identifies whether the host appears to use local files,
+# directory services, PAM modules, SSSD, LDAP, winbind, NIS, or platform-native
+# mechanisms. Commands and file reads are informational only.
 print_authentication_summary() {
     subsection "Authentication Summary:"
     case "$OS_NAME" in
@@ -619,6 +843,9 @@ print_authentication_summary() {
     esac
 }
 
+# Authentication source-file capture:
+# Platform-relevant identity and authentication files are printed or safely
+# summarized. Sensitive files are routed through the sensitive-file safeguards.
 print_authentication_full_content() {
     case "$OS_NAME" in
         Linux)
@@ -652,6 +879,10 @@ print_authentication_full_content() {
     esac
 }
 
+# Sudo authorization summary:
+# Sudo is reviewed separately from UID 0 because delegated root access may allow
+# administrative activity without direct root login. This function reads sudoers
+# rules only and does not run privileged commands through sudo.
 print_sudo_summary() {
     subsection "Summary: Active Sudoers Rules"
     if file_readable /etc/sudoers; then
@@ -679,6 +910,9 @@ print_sudo_summary() {
     fi
 }
 
+# Sudo source-file capture:
+# The sudoers file and include directory are read for evidence. The script does
+# not invoke visudo, edit sudoers, or validate / change sudo configuration.
 print_sudo_full_content() {
     subsection "Full File Content: /etc/sudoers"
     print_file_with_header /etc/sudoers
@@ -702,6 +936,10 @@ print_sudo_full_content() {
     fi
 }
 
+# SSH configuration summary:
+# SSH settings are reviewed because SSH is commonly the primary administrative
+# access path. The script reads sshd configuration and does not restart or
+# reload the SSH daemon.
 print_ssh_summary() {
     subsection "Summary: Relevant SSH Settings"
     if file_readable /etc/ssh/sshd_config; then
@@ -711,11 +949,17 @@ print_ssh_summary() {
     fi
 }
 
+# SSH source-file capture:
+# The SSH daemon configuration is printed and copied when readable. Collection
+# is read-only and does not alter access settings.
 print_sshd_full_content() {
     subsection "Full File Content: /etc/ssh/sshd_config"
     print_file_with_header /etc/ssh/sshd_config
 }
 
+# su activity log review:
+# Where present, sulog is read to provide evidence of account switching
+# activity. The log file is not truncated, rotated, or modified.
 print_sulog_content() {
     if file_readable /var/log/sulog; then
         cat /var/log/sulog
@@ -724,6 +968,9 @@ print_sulog_content() {
     fi
 }
 
+# Package inventory:
+# Native package-manager commands are used only in query/list mode. The script
+# does not install, remove, upgrade, downgrade, or reconfigure software.
 print_package_inventory() {
     if command_exists rpm; then
         rpm -qa 2>/dev/null || not_available
@@ -740,6 +987,9 @@ print_package_inventory() {
     fi
 }
 
+# Recent login activity:
+# The script queries available login history records to support review of
+# account usage. It does not alter login records or session state.
 print_recent_login_activity() {
     if command_exists last; then
         last 2>/dev/null | awk 'NR <= 50 { print }' || not_available
@@ -748,6 +998,10 @@ print_recent_login_activity() {
     fi
 }
 
+# SetUID / SetGID file review:
+# The search is intentionally limited to common binary and application paths so
+# the scan remains practical and avoids broad traversal of temporary, mounted,
+# or pseudo filesystems. The find command lists matching files only.
 print_setuid_setgid_files() {
     if ! command_exists find; then
         not_available
@@ -778,6 +1032,10 @@ print_setuid_setgid_files() {
     find $search_paths -type f \( -perm -2000 -o -perm -02000 \) -print 2>/dev/null || not_available
 }
 
+# Cron spool fallback:
+# Some Unix variants store user crontabs in spool files rather than exposing
+# them consistently through crontab command options. This function reads known
+# spool locations when available and does not create or modify scheduled jobs.
 print_user_cron_from_spool() {
     user_name=$1
 
@@ -791,6 +1049,10 @@ print_user_cron_from_spool() {
     return 1
 }
 
+# Cron and scheduled task review:
+# The script reads system crontabs, cron include directories, and user crontab
+# output where available. It does not add, remove, enable, disable, or edit
+# scheduled jobs.
 print_cron_content() {
     subsection "System-wide Cron Jobs: /etc/crontab"
     print_file_with_header /etc/crontab
@@ -838,6 +1100,9 @@ print_cron_content() {
     fi
 }
 
+# Service-account threshold:
+# UID numbering conventions vary by operating system. This helper selects a
+# conservative platform-specific threshold for likely service accounts.
 service_uid_cutoff() {
     case "$OS_NAME" in
         AIX|SunOS|HP-UX) printf '100\n' ;;
@@ -846,6 +1111,9 @@ service_uid_cutoff() {
     esac
 }
 
+# Service-account inventory:
+# Likely service accounts are identified from account metadata. This function
+# reads /etc/passwd and does not modify account state.
 print_service_accounts() {
     uid_cutoff=`service_uid_cutoff`
 
@@ -857,6 +1125,10 @@ print_service_accounts() {
     fi
 }
 
+# Account lifecycle status:
+# Tools such as passwd, chage, or lsuser are used only with status/list
+# options. The script does not reset passwords, lock accounts, unlock accounts,
+# change expiration dates, or modify login shells.
 print_account_status_summary() {
     subsection "Account Status Summary:"
     if file_readable /etc/passwd; then
@@ -879,6 +1151,9 @@ print_account_status_summary() {
     fi
 }
 
+# Password expiry detail:
+# Expiration information is queried for review purposes only. No user password
+# values or password changes are performed.
 print_password_expiry_details() {
     subsection "Password Expiry Details by Account:"
     if file_readable /etc/passwd; then
@@ -904,6 +1179,10 @@ print_password_expiry_details() {
     fi
 }
 
+# Home directory and SSH key posture:
+# The script lists ownership and permission metadata for home directories,
+# .ssh directories, and authorized_keys files. Authorized keys are summarized
+# rather than printed in full.
 print_ssh_home_permission_review() {
     subsection "Home Directory, .ssh, and authorized_keys Permission Review:"
     found=no
@@ -932,6 +1211,10 @@ print_ssh_home_permission_review() {
     fi
 }
 
+# Legacy trust-file review:
+# Files such as .rhosts, .shosts, and hosts.equiv can grant legacy trust-based
+# access. The script reviews their presence and content handling without
+# removing, editing, or disabling them.
 print_legacy_trust_content() {
     subsection "Legacy Trust Files:"
     found=no
@@ -962,6 +1245,9 @@ print_legacy_trust_content() {
     fi
 }
 
+# Shell timeout and login banner review:
+# Timeout and banner settings are read from common shell and login files. The
+# script does not enforce timeout values or change banner text.
 print_shell_timeout_and_banner_summary() {
     subsection "Shell Timeout Settings:"
     if grep -E '(^[[:space:]]*TMOUT=|^[[:space:]]*readonly[[:space:]]+TMOUT|^[[:space:]]*export[[:space:]]+TMOUT|^[[:space:]]*autologout[[:space:]]*=)' /etc/profile /etc/bashrc /etc/ksh.kshrc /etc/csh.cshrc /etc/profile.d/*.sh /etc/security/login.cfg 2>/dev/null; then
@@ -978,6 +1264,10 @@ print_shell_timeout_and_banner_summary() {
     print_file_with_header /etc/ssh/banner
 }
 
+# Audit logging and forwarding review:
+# Logging configuration supports SOX / ITGC detective-control review. The
+# script reads audit, journaling, syslog, and sudo logging settings only. It
+# does not enable, disable, restart, rotate, or forward logs.
 print_audit_logging_summary() {
     subsection "Audit / Logging Configuration Summary:"
     case "$OS_NAME" in
@@ -1007,6 +1297,9 @@ print_audit_logging_summary() {
     grep -E '(logfile=|log_input|log_output|iolog_dir)' /etc/sudoers /etc/sudoers.d/* 2>/dev/null || not_available
 }
 
+# Service and startup review:
+# Native service-framework commands are used in list/query mode. The script
+# does not start, stop, enable, disable, restart, or reload services.
 print_service_startup_summary() {
     case "$OS_NAME" in
         Linux)
@@ -1040,6 +1333,10 @@ print_service_startup_summary() {
     esac
 }
 
+# Network exposure review:
+# Listener and network configuration evidence is collected through read-only
+# commands and file reads. The script does not open ports, close ports, modify
+# firewall rules, or change network services.
 print_network_exposure_summary() {
     if command_exists ss; then
         ss -lntup 2>/dev/null || not_available
@@ -1058,6 +1355,10 @@ print_network_exposure_summary() {
     grep -E '(telnet|rlogin|rexec|rsh|ftp)' /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/* /etc/services 2>/dev/null || not_available
 }
 
+# Patch and update indicators:
+# Package metadata and history are queried to support change and maintenance
+# review. The script performs no patching, installation, removal, or update
+# action.
 print_patch_update_summary() {
     if command_exists rpm; then
         rpm -qa --last 2>/dev/null || not_available
@@ -1072,6 +1373,10 @@ print_patch_update_summary() {
     fi
 }
 
+# Backup, capacity, and operational indicators:
+# This section reads capacity information and selected operations-related
+# configuration files. It does not initiate backups, restore data, rotate logs,
+# or change monitoring configuration.
 print_backup_operational_summary() {
     if command_exists df; then
         df -k 2>/dev/null || not_available
@@ -1085,6 +1390,10 @@ print_backup_operational_summary() {
     print_file_with_header /opt/tivoli/tsm/client/ba/bin/dsm.opt
 }
 
+# Time synchronization configuration:
+# Time settings are important for reliable log correlation. The script reads
+# common NTP and chrony configuration files only and does not change time,
+# restart time services, or alter time sources.
 print_time_sync_summary() {
     print_file_with_header /etc/chrony.conf
     print_file_with_header /etc/chrony/chrony.conf
@@ -1092,12 +1401,19 @@ print_time_sync_summary() {
     print_file_with_header /etc/inet/ntp.conf
 }
 
+# Supplemental scheduler evidence:
+# This function reads additional scheduler files and logs where available. It
+# does not schedule, reschedule, or execute tasks.
 print_additional_scheduler_content() {
     print_file_with_header /etc/anacrontab
     print_file_with_header /var/log/cron
     print_file_with_header /var/log/cron.log
 }
 
+# Critical file integrity review:
+# This section records metadata and checksums for selected operating-system
+# files. Checksums provide a point-in-time reference for review without editing
+# or replacing the files being measured.
 print_critical_file_integrity() {
     subsection "Sensitive File Metadata and Checksums:"
     case "$OS_NAME" in
@@ -1123,6 +1439,11 @@ print_critical_file_integrity() {
     done
 }
 
+# Evidence archive creation:
+# The archive step packages the locally generated evidence directory into a
+# single file for retention or transfer. It operates only on the evidence
+# directory created by this script and writes the archive to the current working
+# directory.
 create_collection_archive() {
     archive_base=$WORKING_DIRECTORY/$ARCHIVE_BASE_NAME
 
@@ -1149,14 +1470,174 @@ create_collection_archive() {
     ARCHIVE_STATUS="failed"
 }
 
-prepare_collection_directory
+# Application directory listing flags:
+# The desired listing on Linux is `ls -RlthBA`, which produces a recursive,
+# long-format, time-sorted, human-readable, hidden-files-included view that
+# omits backup files (`-B`). Several of those flags are GNU extensions and do
+# not exist on every Unix family, and some have different meanings on BSD ls
+# (for example, BSD `-B` forces printing of non-printable characters rather
+# than ignoring backup files). This helper selects a comparable flag set per
+# detected operating system so the resulting evidence has consistent meaning.
+application_listing_ls_flags() {
+    case "$OS_NAME" in
+        Linux)
+            printf '%s\n' '-RlthBA'
+            ;;
+        Darwin|FreeBSD|OpenBSD|NetBSD)
+            printf '%s\n' '-RlthA'
+            ;;
+        AIX|SunOS|HP-UX)
+            printf '%s\n' '-RltA'
+            ;;
+        *)
+            printf '%s\n' '-RltA'
+            ;;
+    esac
+}
 
-if [ "`id -u 2>/dev/null || echo 1`" != "0" ]; then
+# Recursive listing of an application installation directory:
+# This helper validates the supplied path and runs a recursive ls listing on
+# it. The listing is read-only metadata: filenames, permissions, ownership,
+# size, and modification time. No file contents are read, modified, copied,
+# or removed by this helper. Errors during traversal (for example, an
+# unreadable subdirectory under the supplied root) are suppressed so a single
+# unreadable element does not abort the listing of the rest of the tree.
+print_application_directory_listing() {
+    app_path=$1
+
+    printf 'Application directory: %s\n' "$app_path"
+
+    if [ -z "$app_path" ]; then
+        printf 'Result: no path provided\n'
+        blank_line
+        return
+    fi
+
+    if ! path_exists "$app_path"; then
+        printf 'Result: path does not exist\n'
+        record_manifest_line "APP_DIR_MISSING|$app_path"
+        blank_line
+        return
+    fi
+
+    if ! directory_exists "$app_path"; then
+        printf 'Result: path is not a directory\n'
+        record_manifest_line "APP_DIR_NOT_DIRECTORY|$app_path"
+        blank_line
+        return
+    fi
+
+    if ! [ -r "$app_path" ]; then
+        printf 'Result: directory is not readable by the current user\n'
+        record_manifest_line "APP_DIR_UNREADABLE|$app_path"
+        blank_line
+        return
+    fi
+
+    if ! command_exists ls; then
+        printf 'Result: ls command not available on this host\n'
+        blank_line
+        return
+    fi
+
+    listing_flags=`application_listing_ls_flags`
+    printf 'Operating system family: %s\n' "$OS_NAME"
+    printf 'ls flags applied: %s\n' "$listing_flags"
+    blank_line
+
+    subsection "Recursive Listing:"
+    ls $listing_flags "$app_path" 2>/dev/null || not_available
+    record_manifest_line "APP_DIR_LISTED|$app_path|flags=$listing_flags"
+    blank_line
+}
+
+# Interactive application directory prompt:
+# When the operator does not pass --app-dir flags on the command line and
+# stdin is connected to a terminal, the script asks the operator for one or
+# more application installation directories. The prompt runs before stdout is
+# redirected into the report file so the questions appear directly on the
+# operator's terminal. If stdin is not a terminal, the prompt is skipped so
+# non-interactive runs (for example, scheduled or piped invocations) do not
+# block waiting for input.
+prompt_for_app_directories() {
+    if [ -n "$APP_DIRECTORIES" ]; then
+        return
+    fi
+    if [ ! -t 0 ]; then
+        return
+    fi
+
+    printf '\n'
+    printf 'Application Installation Directory Listing\n'
+    printf '------------------------------------------\n'
+    printf 'You may include one or more application installation directories\n'
+    printf 'in the evidence collection. The script will run a recursive\n'
+    printf 'directory listing on each directory you provide.\n'
+    printf '\n'
+    printf 'Enter one absolute path per line.\n'
+    printf 'Press Enter on an empty line to finish.\n'
+    printf 'Press Enter immediately to skip this section.\n'
+    printf '\n'
+
+    while :; do
+        printf 'Application directory path: '
+        if ! IFS= read -r entered_path; then
+            printf '\n'
+            break
+        fi
+        if [ -z "$entered_path" ]; then
+            break
+        fi
+        APP_DIRECTORIES="$APP_DIRECTORIES
+$entered_path"
+    done
+    printf '\n'
+}
+
+# Main execution sequence:
+# 1. Display help and exit if requested. No filesystem changes occur on this
+#    path so --help and argument errors leave the working directory untouched.
+# 2. Require elevated privileges for full collection unless dry-run mode is
+#    explicitly selected. The sudo check exits before any directory is
+#    created or removed.
+# 3. Interactively prompt for application installation directories when no
+#    --app-dir flag was provided and stdin is a terminal.
+# 4. Prepare the local evidence directory. This step removes any prior
+#    evidence directory at the same path, so it is intentionally deferred
+#    until after help, sudo, and prompt handling so that early-exit paths
+#    do not disturb a previously generated collection in the working
+#    directory.
+# 5. Redirect report output into the local report file.
+# 6. Execute the evidence sections in a consistent order.
+# 7. Package the evidence directory into a local archive.
+
+if [ "$SHOW_HELP" = "yes" ]; then
+    print_usage
+    if [ "$ARGUMENT_ERROR" = "yes" ]; then
+        exit 1
+    fi
+    exit 0
+fi
+
+if [ "$EFFECTIVE_UID_VALUE" != "0" ] && [ "$TEST_MODE" != "yes" ]; then
     printf '%s\n' 'This script must be run with sudo.'
-    printf '%s\n' 'Use: sudo sh linux-unix-evidence-gathering-script.txt'
+    printf 'Use: sudo sh %s\n' "$SCRIPT_NAME"
+    printf 'Safe local test mode: sh %s --dry-run\n' "$SCRIPT_NAME"
     exit 1
 fi
 
+# Interactive collection of application installation directories. This runs
+# before stdout is redirected into the report file so the prompts appear on
+# the operator's terminal. When --app-dir flags were passed on the command
+# line or stdin is not a terminal, this returns immediately and the section
+# uses whatever was supplied (or none, if nothing was supplied).
+prompt_for_app_directories
+
+prepare_collection_directory
+
+# Preserve the original stdout on file descriptor 3. The script writes the
+# report to the report file first, then replays the completed report to the
+# operator at the end of the run.
 exec 3>&1
 if [ "$COLLECTION_STATUS" = "ready" ]; then
     exec > "$REPORT_FILE"
@@ -1166,13 +1647,34 @@ printf 'SOX ITGC Audit Data Collection\n'
 printf 'Generated: %s\n' "$TIMESTAMP"
 printf 'Hostname: %s\n' "$HOSTNAME_VALUE"
 printf 'Script Mode: %s\n' "$SCRIPT_MODE"
+printf 'Run Privilege Mode: %s\n' "$RUN_PRIVILEGE_MODE"
 printf 'Output Destination: report file with stdout replay at completion\n'
 printf 'Evidence Collection Directory: %s\n' "$COLLECTION_DIRECTORY"
 printf 'Report File: %s\n' "$REPORT_FILE"
 printf 'Manifest File: %s\n' "$MANIFEST_FILE"
 printf 'Sensitive Skip File: %s\n' "$SENSITIVE_SKIPPED_FILE"
-printf 'Client Run Instruction: sudo sh linux-unix-evidence-gathering-script.txt\n'
+printf 'Client Elevated Run Instruction: sudo sh %s\n' "$SCRIPT_NAME"
+printf 'Client Non-Root Test Instruction: sh %s --dry-run\n' "$SCRIPT_NAME"
 
+if [ "$TEST_MODE" = "yes" ] && [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
+    printf 'Test Mode Notice: running without sudo; privileged-only files and commands may show not available.\n'
+fi
+
+if [ -n "$APP_DIRECTORIES" ]; then
+    printf 'Application Directories Selected for Recursive Listing:\n'
+    printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r app_dir_header_entry; do
+        if [ -n "$app_dir_header_entry" ]; then
+            printf '  - %s\n' "$app_dir_header_entry"
+        fi
+    done
+else
+    printf 'Application Directories Selected for Recursive Listing: none\n'
+fi
+
+# Evidence section execution:
+# Each section prints explanatory context followed by the relevant read-only
+# evidence. Sections may query commands or read files, but they do not perform
+# configuration changes on the host.
 section_with_explanation "Platform Details" "Explanation: This section identifies the operating system family, kernel details, execution user, and privilege context for the host where the script was run. It provides the baseline context needed to interpret the remaining sections and confirms that the script was executed with elevated privileges as expected."
 print_platform_details
 
@@ -1271,6 +1773,19 @@ print_additional_scheduler_content
 
 section_with_explanation "22. Critical File Integrity and Sensitive File Permissions" "Explanation: This section shows metadata and checksums for selected sensitive operating-system files, using an operating-system-specific file list so the output stays relevant to the detected platform."
 print_critical_file_integrity
+
+section_with_explanation "23. Application Installation Directory Recursive Listing" "Explanation: This section captures a recursive directory listing for one or more application installation directories specified by the operator at runtime. It supports SOX / ITGC reviews of application file inventories by recording filenames, ownership, permissions, sizes, and modification times for every file under the supplied roots. The ls command is read-only and does not change file content, ownership, or permissions. The flags are adjusted per operating system because the desired Linux flag set ls -RlthBA includes GNU extensions (-h human-readable sizes and -B ignore backups) that are not present, or that have different meanings, on AIX, Solaris, HP-UX, and BSD. Equivalent flag sets are used on those platforms so the resulting evidence remains comparable across hosts."
+if [ -z "$APP_DIRECTORIES" ]; then
+    printf 'No application directories were specified.\n'
+    printf 'Application directories can be supplied with the --app-dir flag,\n'
+    printf 'or by responding to the interactive prompt at script startup.\n'
+else
+    printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r app_path_entry; do
+        if [ -n "$app_path_entry" ]; then
+            print_application_directory_listing "$app_path_entry"
+        fi
+    done
+fi
 
 create_collection_archive
 
