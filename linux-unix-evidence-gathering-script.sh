@@ -1481,16 +1481,16 @@ create_collection_archive() {
 application_listing_ls_flags() {
     case "$OS_NAME" in
         Linux)
-            printf -- '-RlthBA\n'
+            printf '%s\n' '-RlthBA'
             ;;
         Darwin|FreeBSD|OpenBSD|NetBSD)
-            printf -- '-RlthA\n'
+            printf '%s\n' '-RlthA'
             ;;
         AIX|SunOS|HP-UX)
-            printf -- '-RltA\n'
+            printf '%s\n' '-RltA'
             ;;
         *)
-            printf -- '-RltA\n'
+            printf '%s\n' '-RltA'
             ;;
     esac
 }
