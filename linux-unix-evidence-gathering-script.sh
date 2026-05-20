@@ -223,6 +223,14 @@ section_with_explanation() {
     printf '\n==================================================\n'
     printf '%s\n' "$1"
     wrap_text "$2"
+    if [ -n "${3:-}" ]; then
+        printf '\n'
+        printf '%s\n' "$3" | while IFS= read -r _sec_path; do
+            if [ -n "$_sec_path" ]; then
+                printf 'File Path: %s\n' "$_sec_path"
+            fi
+        done
+    fi
     printf '==================================================\n\n'
 }
 
@@ -311,6 +319,12 @@ record_manifest_line() {
 record_sensitive_skip() {
     if [ -f "$SENSITIVE_SKIPPED_FILE" ]; then
         printf '%s\n' "$1" >> "$SENSITIVE_SKIPPED_FILE"
+    fi
+}
+
+record_file_reference() {
+    if [ -f "$1" ] && [ -r "$1" ]; then
+        record_manifest_line "REFERENCED|$1"
     fi
 }
 
@@ -590,6 +604,7 @@ print_group_membership_summary() {
             printf '%s\n' '- sudo: not available'
         fi
     elif file_readable /etc/group; then
+        record_file_reference /etc/group
         awk -F: '$1 == "wheel" || $1 == "sudo" { print "- " $1 ": " $4; found = 1 } END { if (!found) exit 1 }' /etc/group 2>/dev/null || no_entries_found
     else
         not_available
@@ -603,6 +618,7 @@ print_group_membership_summary() {
 print_duplicate_uid_gid_review() {
     subsection "Duplicate UID Review:"
     if file_readable /etc/passwd; then
+        record_file_reference /etc/passwd
         if awk -F: '
             { uid_count[$3]++; users[$3] = users[$3] " " $1 }
             END {
@@ -627,6 +643,7 @@ print_duplicate_uid_gid_review() {
 
     subsection "Duplicate GID Review:"
     if file_readable /etc/group; then
+        record_file_reference /etc/group
         if awk -F: '
             { gid_count[$3]++; groups[$3] = groups[$3] " " $1 }
             END {
@@ -671,6 +688,7 @@ print_auth_summary() {
     case "$OS_NAME" in
         Linux)
             if file_readable /etc/login.defs; then
+                record_file_reference /etc/login.defs
                 grep -E '^(PASS_MIN_LEN|PASS_MAX_DAYS|PASS_MIN_DAYS|PASS_WARN_AGE)' /etc/login.defs 2>/dev/null || not_available
             else
                 not_available
@@ -678,6 +696,7 @@ print_auth_summary() {
             ;;
         AIX)
             if file_readable /etc/security/user; then
+                record_file_reference /etc/security/user
                 awk '/^default:/{flag=1} flag && /^[[:space:]]*(minage|maxage|pwdwarntime|loginretries)[[:space:]]*=/{print}' /etc/security/user 2>/dev/null || not_available
             else
                 not_available
@@ -685,6 +704,7 @@ print_auth_summary() {
             ;;
         SunOS|HP-UX)
             if file_readable /etc/default/passwd; then
+                record_file_reference /etc/default/passwd
                 grep -E '^(PASSLENGTH|MINLENGTH|MINDIFF|MAXWEEKS|MINWEEKS|WARNWEEKS)' /etc/default/passwd 2>/dev/null || not_available
             else
                 not_available
@@ -700,8 +720,10 @@ print_auth_summary() {
     case "$OS_NAME" in
         Linux)
             if file_readable /etc/security/pwquality.conf; then
+                record_file_reference /etc/security/pwquality.conf
                 grep -E '^(minlen|minclass|dcredit|ucredit|lcredit|ocredit)' /etc/security/pwquality.conf 2>/dev/null || not_available
             elif file_readable /etc/pam.d/system-auth; then
+                record_file_reference /etc/pam.d/system-auth
                 grep -E 'pam_cracklib\.so|pam_pwquality\.so' /etc/pam.d/system-auth 2>/dev/null || not_available
             else
                 not_available
@@ -709,6 +731,7 @@ print_auth_summary() {
             ;;
         AIX)
             if file_readable /etc/security/user; then
+                record_file_reference /etc/security/user
                 awk '/^default:/{flag=1} flag && /^[[:space:]]*(minlen|minother|minalpha|maxrepeats|mindiff|pwdchecks)[[:space:]]*=/{print}' /etc/security/user 2>/dev/null || not_available
             else
                 not_available
@@ -716,6 +739,7 @@ print_auth_summary() {
             ;;
         SunOS|HP-UX)
             if file_readable /etc/default/passwd; then
+                record_file_reference /etc/default/passwd
                 grep -E '^(MINLENGTH|MINDIFF|MAXREPEATS|PASSLENGTH)' /etc/default/passwd 2>/dev/null || not_available
             else
                 not_available
@@ -738,6 +762,7 @@ print_auth_summary() {
             ;;
         AIX)
             if file_readable /etc/security/user; then
+                record_file_reference /etc/security/user
                 awk '/^default:/{flag=1} flag && /^[[:space:]]*(loginretries|account_locked)[[:space:]]*=/{print}' /etc/security/user 2>/dev/null || not_available
             else
                 not_available
@@ -745,6 +770,7 @@ print_auth_summary() {
             ;;
         SunOS|HP-UX)
             if file_readable /etc/default/login; then
+                record_file_reference /etc/default/login
                 grep -E '^(RETRIES|LOCK_AFTER_RETRIES)' /etc/default/login 2>/dev/null || not_available
             else
                 not_available
@@ -799,12 +825,14 @@ print_authentication_summary() {
         Linux)
             printf 'nsswitch passwd entry with ldap/sss/winbind: '
             if file_readable /etc/nsswitch.conf; then
+                record_file_reference /etc/nsswitch.conf
                 grep -E 'passwd:.*(ldap|sss|winbind|nis|compat)' /etc/nsswitch.conf 2>/dev/null || not_available
             else
                 not_available
             fi
             printf 'SSSD configuration present: '
             if file_readable /etc/sssd/sssd.conf; then
+                record_file_reference /etc/sssd/sssd.conf
                 printf 'yes\n'
             else
                 printf 'no\n'
@@ -818,6 +846,7 @@ print_authentication_summary() {
             ;;
         AIX)
             if file_readable /etc/security/user; then
+                record_file_reference /etc/security/user
                 awk '/^[^[:space:]].*:$/ {user=$0} /^[[:space:]]*SYSTEM[[:space:]]*=/{print user " " $0; found=1} END { if (!found) exit 1 }' /etc/security/user 2>/dev/null || not_available
             else
                 not_available
@@ -825,6 +854,7 @@ print_authentication_summary() {
             ;;
         SunOS)
             if file_readable /etc/nsswitch.conf; then
+                record_file_reference /etc/nsswitch.conf
                 grep -E '^(passwd|group):' /etc/nsswitch.conf 2>/dev/null || not_available
             else
                 not_available
@@ -832,6 +862,7 @@ print_authentication_summary() {
             ;;
         HP-UX)
             if file_readable /etc/pam.conf; then
+                record_file_reference /etc/pam.conf
                 grep -E 'pam_ldap|pam_unix|pam_krb5' /etc/pam.conf 2>/dev/null || not_available
             else
                 not_available
@@ -886,6 +917,7 @@ print_authentication_full_content() {
 print_sudo_summary() {
     subsection "Summary: Active Sudoers Rules"
     if file_readable /etc/sudoers; then
+        record_file_reference /etc/sudoers
         print_noncomment_or_not_available /etc/sudoers
     else
         not_available
@@ -943,6 +975,7 @@ print_sudo_full_content() {
 print_ssh_summary() {
     subsection "Summary: Relevant SSH Settings"
     if file_readable /etc/ssh/sshd_config; then
+        record_file_reference /etc/ssh/sshd_config
         grep -E '^[[:space:]]*(PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|PermitEmptyPasswords|X11Forwarding|Protocol|AllowUsers|AllowGroups|DenyUsers|DenyGroups|LoginGraceTime|MaxAuthTries)[[:space:]]+' /etc/ssh/sshd_config 2>/dev/null || not_available
     else
         not_available
@@ -1118,6 +1151,7 @@ print_service_accounts() {
     uid_cutoff=`service_uid_cutoff`
 
     if file_readable /etc/passwd; then
+        record_file_reference /etc/passwd
         printf 'Service account UID threshold: %s\n' "$uid_cutoff"
         awk -F: -v cutoff="$uid_cutoff" '($3 < cutoff) { print $1 ":" $3 ":" $4 ":" $6 ":" $7; found = 1 } END { if (!found) exit 1 }' /etc/passwd 2>/dev/null || no_entries_found
     else
@@ -1132,6 +1166,7 @@ print_service_accounts() {
 print_account_status_summary() {
     subsection "Account Status Summary:"
     if file_readable /etc/passwd; then
+        record_file_reference /etc/passwd
         found=no
         if command_exists passwd; then
             while IFS=: read -r user _rest; do
@@ -1157,6 +1192,7 @@ print_account_status_summary() {
 print_password_expiry_details() {
     subsection "Password Expiry Details by Account:"
     if file_readable /etc/passwd; then
+        record_file_reference /etc/passwd
         found=no
         if command_exists chage; then
             while IFS=: read -r user _rest; do
@@ -1188,6 +1224,7 @@ print_ssh_home_permission_review() {
     found=no
 
     if file_readable /etc/passwd; then
+        record_file_reference /etc/passwd
         while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
             if [ -n "$home_dir" ] && [ "$home_dir" != "/" ] && [ -d "$home_dir" ]; then
                 printf 'User: %s\n' "$user"
@@ -1221,12 +1258,14 @@ print_legacy_trust_content() {
 
     for trust_path in /etc/hosts.equiv /etc/shosts.equiv; do
         if [ -f "$trust_path" ]; then
+            record_file_reference "$trust_path"
             print_file_with_header "$trust_path"
             found=yes
         fi
     done
 
     if file_readable /etc/passwd; then
+        record_file_reference /etc/passwd
         while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
             if [ -n "$home_dir" ] && [ "$home_dir" != "/" ]; then
                 for trust_file in "$home_dir/.rhosts" "$home_dir/.shosts"; do
@@ -1250,6 +1289,8 @@ print_legacy_trust_content() {
 # script does not enforce timeout values or change banner text.
 print_shell_timeout_and_banner_summary() {
     subsection "Shell Timeout Settings:"
+    record_file_reference /etc/profile
+    record_file_reference /etc/bashrc
     if grep -E '(^[[:space:]]*TMOUT=|^[[:space:]]*readonly[[:space:]]+TMOUT|^[[:space:]]*export[[:space:]]+TMOUT|^[[:space:]]*autologout[[:space:]]*=)' /etc/profile /etc/bashrc /etc/ksh.kshrc /etc/csh.cshrc /etc/profile.d/*.sh /etc/security/login.cfg 2>/dev/null; then
         :
     else
@@ -1272,6 +1313,8 @@ print_audit_logging_summary() {
     subsection "Audit / Logging Configuration Summary:"
     case "$OS_NAME" in
         Linux)
+            record_file_reference /etc/audit/auditd.conf
+            record_file_reference /etc/systemd/journald.conf
             grep -E '^[[:space:]]*(max_log_file|max_log_file_action|num_logs|space_left_action|admin_space_left_action|disk_full_action|Storage|ForwardToSyslog|Compress|SystemMaxUse|SystemKeepFree)[[:space:]]*[= ]' /etc/audit/auditd.conf /etc/systemd/journald.conf 2>/dev/null || not_available
             ;;
         AIX)
@@ -1290,10 +1333,13 @@ print_audit_logging_summary() {
     blank_line
 
     subsection "Remote Log Forwarding Indicators:"
+    record_file_reference /etc/rsyslog.conf
+    record_file_reference /etc/syslog.conf
     grep -E '(^[^#].*@@?[A-Za-z0-9._-]+|action\(.*omfwd|destination.*(tcp|udp)|forward_to|loghost)' /etc/rsyslog.conf /etc/rsyslog.d/*.conf /etc/syslog.conf /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/conf.d/*.conf /etc/systemd/journald.conf 2>/dev/null || not_available
     blank_line
 
     subsection "Sudo Logging Indicators:"
+    record_file_reference /etc/sudoers
     grep -E '(logfile=|log_input|log_output|iolog_dir)' /etc/sudoers /etc/sudoers.d/* 2>/dev/null || not_available
 }
 
@@ -1352,6 +1398,9 @@ print_network_exposure_summary() {
     print_file_with_header /etc/dfs/dfstab
     print_file_with_header /etc/inetd.conf
     print_file_with_header /etc/inet/inetd.conf
+    record_file_reference /etc/inetd.conf
+    record_file_reference /etc/inet/inetd.conf
+    record_file_reference /etc/services
     grep -E '(telnet|rlogin|rexec|rsh|ftp)' /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/* /etc/services 2>/dev/null || not_available
 }
 
@@ -1594,6 +1643,67 @@ $entered_path"
     printf '\n'
 }
 
+# Section source file helpers: each returns the newline-delimited list of
+# files that the corresponding section references on the detected OS. These
+# are passed to section_with_explanation so the report header records where
+# the evidence was drawn from.
+section1_source_files()  { printf '/etc/passwd\n/etc/group\n'; }
+section2_source_files()  {
+    case "$OS_NAME" in
+        Linux)   printf '/etc/login.defs\n/etc/security/pwquality.conf\n/etc/pam.d/system-auth\n/etc/pam.d/password-auth\n' ;;
+        AIX)     printf '/etc/security/user\n' ;;
+        SunOS|HP-UX) printf '/etc/default/passwd\n/etc/default/login\n' ;;
+    esac
+}
+section3_source_files()  {
+    case "$OS_NAME" in
+        Linux)   printf '/etc/nsswitch.conf\n/etc/sssd/sssd.conf\n/etc/pam.d/\n' ;;
+        AIX)     printf '/etc/security/user\n' ;;
+        SunOS)   printf '/etc/nsswitch.conf\n/etc/user_attr\n/etc/security/prof_attr\n/etc/security/exec_attr\n' ;;
+        HP-UX)   printf '/etc/pam.conf\n' ;;
+    esac
+}
+section4_source_files()  { printf '/etc/sudoers\n/etc/sudoers.d/\n'; }
+section5_source_files()  { printf '/etc/group\n'; }
+section6_source_files()  { printf '/var/log/sulog\n'; }
+section7_source_files()  { printf '/etc/ssh/sshd_config\n'; }
+section12_source_files() { printf '/etc/crontab\n/etc/cron.d/\n/var/spool/cron/crontabs/\n'; }
+section13_source_files() { printf '/etc/passwd\n'; }
+section14_source_files() { printf '/etc/passwd\n/etc/hosts.equiv\n/etc/issue\n/etc/issue.net\n/etc/motd\n/etc/ssh/banner\n/etc/profile\n'; }
+section15_source_files() {
+    case "$OS_NAME" in
+        Linux)   printf '/etc/audit/auditd.conf\n/etc/systemd/journald.conf\n/etc/rsyslog.conf\n/etc/rsyslog.d/\n/etc/syslog-ng/syslog-ng.conf\n/etc/sudoers\n/etc/sudoers.d/\n' ;;
+        AIX)     printf '/etc/security/audit/config\n/etc/syslog.conf\n' ;;
+        SunOS)   printf '/etc/security/audit_control\n' ;;
+        HP-UX)   printf '/etc/syslog.conf\n' ;;
+    esac
+}
+section16_source_files() {
+    case "$OS_NAME" in
+        HP-UX)   printf '/etc/rc.config\n/etc/inittab\n' ;;
+        Linux)   printf '' ;;
+        *)       printf '/etc/inittab\n' ;;
+    esac
+}
+section17_source_files() { printf '/etc/exports\n/etc/inetd.conf\n/etc/inet/inetd.conf\n/etc/services\n'; }
+section18_source_files() {
+    case "$OS_NAME" in
+        Linux) if command_exists dpkg; then printf '/var/log/dpkg.log\n'; fi ;;
+    esac
+}
+section19_source_files() { printf '/etc/logrotate.conf\n/etc/newsyslog.conf\n'; }
+section20_source_files() { printf '/etc/chrony.conf\n/etc/chrony/chrony.conf\n/etc/ntp.conf\n/etc/inet/ntp.conf\n'; }
+section21_source_files() { printf '/etc/anacrontab\n/var/log/cron\n/var/log/cron.log\n'; }
+section22_source_files() {
+    case "$OS_NAME" in
+        Linux)   printf '/etc/passwd\n/etc/shadow\n/etc/group\n/etc/sudoers\n/etc/ssh/sshd_config\n/etc/login.defs\n/etc/audit/auditd.conf\n/etc/rsyslog.conf\n/etc/chrony.conf\n' ;;
+        AIX)     printf '/etc/passwd\n/etc/security/passwd\n/etc/security/user\n/etc/security/audit/config\n/etc/syslog.conf\n/etc/inittab\n' ;;
+        SunOS)   printf '/etc/passwd\n/etc/shadow\n/etc/user_attr\n/etc/ssh/sshd_config\n/etc/system\n' ;;
+        HP-UX)   printf '/etc/passwd\n/etc/shadow\n/etc/pam.conf\n/etc/syslog.conf\n/etc/inittab\n' ;;
+        *)       printf '/etc/passwd\n/etc/group\n/etc/ssh/sshd_config\n' ;;
+    esac
+}
+
 # Main execution sequence:
 # 1. Display help and exit if requested. No filesystem changes occur on this
 #    path so --help and argument errors leave the working directory untouched.
@@ -1675,10 +1785,11 @@ fi
 # Each section prints explanatory context followed by the relevant read-only
 # evidence. Sections may query commands or read files, but they do not perform
 # configuration changes on the host.
-section_with_explanation "Platform Details" "Explanation: This section identifies the operating system family, kernel details, execution user, and privilege context for the host where the script was run. It provides the baseline context needed to interpret the remaining sections and confirms that the script was executed with elevated privileges as expected."
+section_with_explanation "Platform Details" "Explanation: This section identifies the operating system family, kernel details, execution user, and privilege context for the host where the script was run. It provides the baseline context needed to interpret the remaining sections and confirms that the script was executed with elevated privileges as expected." ""
 print_platform_details
 
-section_with_explanation "1. Accounts and Groups with Root or Root Equivalent Access" "Explanation: This section identifies accounts with UID 0, users in key privileged groups, and duplicate UID or GID conditions. For a SOX IT audit, this helps determine who has root-equivalent access and whether identity administration appears clean and accountable."
+_sec1_files=`section1_source_files`
+section_with_explanation "1. Accounts and Groups with Root or Root Equivalent Access" "Explanation: This section identifies accounts with UID 0, users in key privileged groups, and duplicate UID or GID conditions. For a SOX IT audit, this helps determine who has root-equivalent access and whether identity administration appears clean and accountable." "$_sec1_files"
 subsection "Users with UID 0 (Root Equivalent Accounts):"
 if file_readable /etc/passwd; then
     awk -F: '($3 == 0) { print $1; found = 1 } END { if (!found) exit 1 }' /etc/passwd 2>/dev/null || no_entries_found
@@ -1691,55 +1802,64 @@ print_group_membership_summary
 blank_line
 print_duplicate_uid_gid_review
 
-section_with_explanation "2. Password Parameters / Requirements" "Explanation: This section gathers password aging, password quality, and account lockout settings from platform-relevant configuration files only. It avoids clutter from irrelevant operating-system files and helps show whether logical access requirements are configured on the host."
+_sec2_files=`section2_source_files`
+section_with_explanation "2. Password Parameters / Requirements" "Explanation: This section gathers password aging, password quality, and account lockout settings from platform-relevant configuration files only. It avoids clutter from irrelevant operating-system files and helps show whether logical access requirements are configured on the host." "$_sec2_files"
 print_auth_summary
 blank_line
 subsection "Full Content Review Files"
 print_auth_full_content
 
-section_with_explanation "3. Authentication Configuration" "Explanation: This section identifies the primary authentication sources and supporting configuration for the detected operating system. It is designed to show whether authentication is local, centralized, or mixed without printing irrelevant files for other Unix families."
+_sec3_files=`section3_source_files`
+section_with_explanation "3. Authentication Configuration" "Explanation: This section identifies the primary authentication sources and supporting configuration for the detected operating system. It is designed to show whether authentication is local, centralized, or mixed without printing irrelevant files for other Unix families." "$_sec3_files"
 print_authentication_summary
 blank_line
 subsection "Full Content Review Files"
 print_authentication_full_content
 
-section_with_explanation "4. Accounts and Groups Able to Sudo to Root" "Explanation: This section focuses on delegated privileged access through sudo where present. For a SOX IT audit, sudo rights are highly relevant because they allow a user to perform root-level activity even when the user does not log in directly as root."
+_sec4_files=`section4_source_files`
+section_with_explanation "4. Accounts and Groups Able to Sudo to Root" "Explanation: This section focuses on delegated privileged access through sudo where present. For a SOX IT audit, sudo rights are highly relevant because they allow a user to perform root-level activity even when the user does not log in directly as root." "$_sec4_files"
 print_sudo_summary
 blank_line
 subsection "Full Content Review Files"
 print_sudo_full_content
 
-section_with_explanation "5. Groups and Their Members" "Explanation: This section lists group memberships recorded on the host. Group-based access often grants administrative, operational, or application-related capabilities and is therefore important when evaluating logical access for financially relevant systems."
+_sec5_files=`section5_source_files`
+section_with_explanation "5. Groups and Their Members" "Explanation: This section lists group memberships recorded on the host. Group-based access often grants administrative, operational, or application-related capabilities and is therefore important when evaluating logical access for financially relevant systems." "$_sec5_files"
 print_all_groups
 
-section_with_explanation "6. sulog Contents" "Explanation: This section looks for su activity logs where available. These records can help trace privilege escalation through su and support detective controls over administrator activity."
+_sec6_files=`section6_source_files`
+section_with_explanation "6. sulog Contents" "Explanation: This section looks for su activity logs where available. These records can help trace privilege escalation through su and support detective controls over administrator activity." "$_sec6_files"
 print_sulog_content
 
-section_with_explanation "7. SSH Configuration" "Explanation: This section shows security-relevant SSH settings and the SSH daemon configuration file. It helps assess whether remote administrative access appears to be restricted in a reasonable manner."
+_sec7_files=`section7_source_files`
+section_with_explanation "7. SSH Configuration" "Explanation: This section shows security-relevant SSH settings and the SSH daemon configuration file. It helps assess whether remote administrative access appears to be restricted in a reasonable manner." "$_sec7_files"
 print_ssh_summary
 blank_line
 subsection "Full Content Review Files"
 print_sshd_full_content
 
-section_with_explanation "8. Installed Packages" "Explanation: This section provides the installed software inventory as reported by the platform package management tools. It can help identify security agents, administration tools, database clients, and unexpected software that may affect the control environment."
+section_with_explanation "8. Installed Packages" "Explanation: This section provides the installed software inventory as reported by the platform package management tools. It can help identify security agents, administration tools, database clients, and unexpected software that may affect the control environment." ""
 print_package_inventory
 
-section_with_explanation "9. Recent Login Activity" "Explanation: This section shows recent login history using the system's available login records. It is limited to a manageable amount of output to reduce noise while still supporting review of privileged and unusual logins."
+section_with_explanation "9. Recent Login Activity" "Explanation: This section shows recent login history using the system's available login records. It is limited to a manageable amount of output to reduce noise while still supporting review of privileged and unusual logins." ""
 print_recent_login_activity
 
-section_with_explanation "10. World-Writable Files" "Explanation: This section remains intentionally omitted in this version."
+section_with_explanation "10. World-Writable Files" "Explanation: This section remains intentionally omitted in this version." ""
 printf 'intentionally omitted\n'
 
-section_with_explanation "11. SetUID and SetGID Files" "Explanation: This section identifies SetUID and SetGID files, but the scan is intentionally pruned to standard system and application binary paths rather than the entire filesystem. This reduces runtime and avoids broad traversal of mounted, pseudo, and temporary filesystems while still capturing the most relevant binaries."
+section_with_explanation "11. SetUID and SetGID Files" "Explanation: This section identifies SetUID and SetGID files, but the scan is intentionally pruned to standard system and application binary paths rather than the entire filesystem. This reduces runtime and avoids broad traversal of mounted, pseudo, and temporary filesystems while still capturing the most relevant binaries." ""
 print_setuid_setgid_files
 
-section_with_explanation "12. Scheduled Cron Jobs" "Explanation: This section shows system-wide and user cron jobs where available. Scheduled jobs matter because they can run automatically with elevated or application-specific permissions and can therefore affect controlled processing."
+_sec12_files=`section12_source_files`
+section_with_explanation "12. Scheduled Cron Jobs" "Explanation: This section shows system-wide and user cron jobs where available. Scheduled jobs matter because they can run automatically with elevated or application-specific permissions and can therefore affect controlled processing." "$_sec12_files"
 print_cron_content
 
-section_with_explanation "13. Service Accounts" "Explanation: This section lists lower-UID accounts that are commonly used for system services, background processes, or applications rather than normal human users."
+_sec13_files=`section13_source_files`
+section_with_explanation "13. Service Accounts" "Explanation: This section lists lower-UID accounts that are commonly used for system services, background processes, or applications rather than normal human users." "$_sec13_files"
 print_service_accounts
 
-section_with_explanation "14. Account Status, SSH Keys, and Legacy Trust" "Explanation: This section summarizes account status, password expiry, home directory and SSH permission posture, and legacy trust files. Sensitive files such as authorized_keys and trust files are reviewed through metadata and safe summaries rather than full content output."
+_sec14_files=`section14_source_files`
+section_with_explanation "14. Account Status, SSH Keys, and Legacy Trust" "Explanation: This section summarizes account status, password expiry, home directory and SSH permission posture, and legacy trust files. Sensitive files such as authorized_keys and trust files are reviewed through metadata and safe summaries rather than full content output." "$_sec14_files"
 print_account_status_summary
 blank_line
 print_password_expiry_details
@@ -1750,31 +1870,39 @@ print_legacy_trust_content
 blank_line
 print_shell_timeout_and_banner_summary
 
-section_with_explanation "15. Audit Logging and Log Forwarding" "Explanation: This section captures platform-relevant logging configuration, indicators of log forwarding, and sudo logging settings. It avoids printing large amounts of irrelevant logging configuration for other operating systems."
+_sec15_files=`section15_source_files`
+section_with_explanation "15. Audit Logging and Log Forwarding" "Explanation: This section captures platform-relevant logging configuration, indicators of log forwarding, and sudo logging settings. It avoids printing large amounts of irrelevant logging configuration for other operating systems." "$_sec15_files"
 print_audit_logging_summary
 
-section_with_explanation "16. Service and Startup Configuration" "Explanation: This section captures service and startup information using the native service model for the detected operating system, such as systemd, SRC, SMF, or traditional startup files."
+_sec16_files=`section16_source_files`
+section_with_explanation "16. Service and Startup Configuration" "Explanation: This section captures service and startup information using the native service model for the detected operating system, such as systemd, SRC, SMF, or traditional startup files." "$_sec16_files"
 print_service_startup_summary
 
-section_with_explanation "17. Network Exposure and Firewall Configuration" "Explanation: This section shows listening network services, selected firewall or export configuration, and indicators of older insecure network services."
+_sec17_files=`section17_source_files`
+section_with_explanation "17. Network Exposure and Firewall Configuration" "Explanation: This section shows listening network services, selected firewall or export configuration, and indicators of older insecure network services." "$_sec17_files"
 print_network_exposure_summary
 
-section_with_explanation "18. Patch, Update, and Change Indicators" "Explanation: This section captures host-level evidence of package or patch maintenance using the native package history or package listing tools available on the detected operating system."
+_sec18_files=`section18_source_files`
+section_with_explanation "18. Patch, Update, and Change Indicators" "Explanation: This section captures host-level evidence of package or patch maintenance using the native package history or package listing tools available on the detected operating system." "$_sec18_files"
 print_patch_update_summary
 
-section_with_explanation "19. Backup, Capacity, and Operational Indicators" "Explanation: This section gathers practical operations evidence such as filesystem capacity and selected backup or log rotation configuration files."
+_sec19_files=`section19_source_files`
+section_with_explanation "19. Backup, Capacity, and Operational Indicators" "Explanation: This section gathers practical operations evidence such as filesystem capacity and selected backup or log rotation configuration files." "$_sec19_files"
 print_backup_operational_summary
 
-section_with_explanation "20. Time Synchronization" "Explanation: This section captures available time synchronization configuration files such as chrony or NTP."
+_sec20_files=`section20_source_files`
+section_with_explanation "20. Time Synchronization" "Explanation: This section captures available time synchronization configuration files such as chrony or NTP." "$_sec20_files"
 print_time_sync_summary
 
-section_with_explanation "21. Additional Scheduled Tasks and Timers" "Explanation: This section captures supplemental scheduler files such as anacron and cron log files where present."
+_sec21_files=`section21_source_files`
+section_with_explanation "21. Additional Scheduled Tasks and Timers" "Explanation: This section captures supplemental scheduler files such as anacron and cron log files where present." "$_sec21_files"
 print_additional_scheduler_content
 
-section_with_explanation "22. Critical File Integrity and Sensitive File Permissions" "Explanation: This section shows metadata and checksums for selected sensitive operating-system files, using an operating-system-specific file list so the output stays relevant to the detected platform."
+_sec22_files=`section22_source_files`
+section_with_explanation "22. Critical File Integrity and Sensitive File Permissions" "Explanation: This section shows metadata and checksums for selected sensitive operating-system files, using an operating-system-specific file list so the output stays relevant to the detected platform." "$_sec22_files"
 print_critical_file_integrity
 
-section_with_explanation "23. Application Installation Directory Recursive Listing" "Explanation: This section captures a recursive directory listing for one or more application installation directories specified by the operator at runtime. It supports SOX / ITGC reviews of application file inventories by recording filenames, ownership, permissions, sizes, and modification times for every file under the supplied roots. The ls command is read-only and does not change file content, ownership, or permissions. The flags are adjusted per operating system because the desired Linux flag set ls -RlthBA includes GNU extensions (-h human-readable sizes and -B ignore backups) that are not present, or that have different meanings, on AIX, Solaris, HP-UX, and BSD. Equivalent flag sets are used on those platforms so the resulting evidence remains comparable across hosts."
+section_with_explanation "23. Application Installation Directory Recursive Listing" "Explanation: This section captures a recursive directory listing for one or more application installation directories specified by the operator at runtime. It supports SOX / ITGC reviews of application file inventories by recording filenames, ownership, permissions, sizes, and modification times for every file under the supplied roots. The ls command is read-only and does not change file content, ownership, or permissions. The flags are adjusted per operating system because the desired Linux flag set ls -RlthBA includes GNU extensions (-h human-readable sizes and -B ignore backups) that are not present, or that have different meanings, on AIX, Solaris, HP-UX, and BSD. Equivalent flag sets are used on those platforms so the resulting evidence remains comparable across hosts." "$APP_DIRECTORIES"
 if [ -z "$APP_DIRECTORIES" ]; then
     printf 'No application directories were specified.\n'
     printf 'Application directories can be supplied with the --app-dir flag,\n'
