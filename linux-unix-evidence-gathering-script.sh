@@ -220,6 +220,7 @@ wrap_text() {
 }
 
 section_with_explanation() {
+    _sec_copy_mode=${4:-yes}
     printf '\n==================================================\n'
     printf '%s\n' "$1"
     wrap_text "$2"
@@ -228,6 +229,9 @@ section_with_explanation() {
         printf '%s\n' "$3" | while IFS= read -r _sec_path; do
             if [ -n "$_sec_path" ]; then
                 printf 'File Path: %s\n' "$_sec_path"
+                if [ "$_sec_copy_mode" = "yes" ]; then
+                    record_file_reference "$_sec_path"
+                fi
             fi
         done
     fi
@@ -323,8 +327,18 @@ record_sensitive_skip() {
 }
 
 record_file_reference() {
-    if [ -f "$1" ] && [ -r "$1" ]; then
-        record_manifest_line "REFERENCED|$1"
+    ref_path=$1
+    if [ -z "$ref_path" ]; then
+        return
+    fi
+    if [ -f "$ref_path" ]; then
+        copy_file_to_collection "$ref_path"
+    elif [ -d "$ref_path" ]; then
+        for ref_entry in "$ref_path"/*; do
+            if [ -f "$ref_entry" ]; then
+                copy_file_to_collection "$ref_entry"
+            fi
+        done
     fi
 }
 
@@ -1902,7 +1916,7 @@ _sec22_files=`section22_source_files`
 section_with_explanation "22. Critical File Integrity and Sensitive File Permissions" "Explanation: This section shows metadata and checksums for selected sensitive operating-system files, using an operating-system-specific file list so the output stays relevant to the detected platform." "$_sec22_files"
 print_critical_file_integrity
 
-section_with_explanation "23. Application Installation Directory Recursive Listing" "Explanation: This section captures a recursive directory listing for one or more application installation directories specified by the operator at runtime. It supports SOX / ITGC reviews of application file inventories by recording filenames, ownership, permissions, sizes, and modification times for every file under the supplied roots. The ls command is read-only and does not change file content, ownership, or permissions. The flags are adjusted per operating system because the desired Linux flag set ls -RlthBA includes GNU extensions (-h human-readable sizes and -B ignore backups) that are not present, or that have different meanings, on AIX, Solaris, HP-UX, and BSD. Equivalent flag sets are used on those platforms so the resulting evidence remains comparable across hosts." "$APP_DIRECTORIES"
+section_with_explanation "23. Application Installation Directory Recursive Listing" "Explanation: This section captures a recursive directory listing for one or more application installation directories specified by the operator at runtime. It supports SOX / ITGC reviews of application file inventories by recording filenames, ownership, permissions, sizes, and modification times for every file under the supplied roots. The ls command is read-only and does not change file content, ownership, or permissions. The flags are adjusted per operating system because the desired Linux flag set ls -RlthBA includes GNU extensions (-h human-readable sizes and -B ignore backups) that are not present, or that have different meanings, on AIX, Solaris, HP-UX, and BSD. Equivalent flag sets are used on those platforms so the resulting evidence remains comparable across hosts. Application directories are listed as metadata only; the script does not copy the contents of these directories into the evidence package." "$APP_DIRECTORIES" "no"
 if [ -z "$APP_DIRECTORIES" ]; then
     printf 'No application directories were specified.\n'
     printf 'Application directories can be supplied with the --app-dir flag,\n'
