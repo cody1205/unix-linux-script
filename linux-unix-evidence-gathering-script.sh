@@ -406,6 +406,14 @@ copy_file_to_collection() {
     target_path=$RAW_FILES_DIRECTORY$file_path
     target_directory=`dirname "$target_path" 2>/dev/null || echo "$RAW_FILES_DIRECTORY"`
 
+    # The collection directory is recreated at the start of each run, so an
+    # existing copy means this file was already captured during this run.
+    # Skipping the re-copy keeps MANIFEST.txt free of duplicate COPIED lines
+    # when a file is reached through more than one section.
+    if [ -f "$target_path" ]; then
+        return
+    fi
+
     if mkdir -p "$target_directory" 2>/dev/null; then
         if cp -p "$file_path" "$target_path" 2>/dev/null || cp "$file_path" "$target_path" 2>/dev/null; then
             record_manifest_line "COPIED|$file_path"
@@ -629,6 +637,8 @@ print_group_membership_summary() {
     found=no
 
     if command_exists getent; then
+        record_manifest_line "GETENT_QUERY|group wheel,sudo|source=name_service"
+        record_file_reference /etc/group
         if getent group wheel >/dev/null 2>&1; then
             getent group wheel | awk -F: '{print "- wheel: " $4}'
             found=yes
@@ -709,8 +719,11 @@ print_duplicate_uid_gid_review() {
 # name service interface or local group file. It does not change group records.
 print_all_groups() {
     if command_exists getent; then
+        record_manifest_line "GETENT_QUERY|group ALL|source=name_service"
+        record_file_reference /etc/group
         getent group 2>/dev/null | awk -F: '{print $1 ": " $4}'
     elif file_readable /etc/group; then
+        record_file_reference /etc/group
         awk -F: '{print $1 ": " $4}' /etc/group 2>/dev/null
     else
         not_available
@@ -793,6 +806,7 @@ print_auth_summary() {
     case "$OS_NAME" in
         Linux)
             if directory_exists /etc/pam.d; then
+                record_file_reference /etc/pam.d
                 grep -E 'pam_tally2\.so|pam_faillock\.so' /etc/pam.d/* 2>/dev/null || not_available
             else
                 not_available
@@ -877,6 +891,7 @@ print_authentication_summary() {
             fi
             subsection "PAM Authentication Module References:"
             if directory_exists /etc/pam.d; then
+                record_file_reference /etc/pam.d
                 grep -E 'pam_ldap\.so|pam_sss\.so|pam_winbind\.so' /etc/pam.d/* 2>/dev/null || not_available
             else
                 not_available
@@ -1032,11 +1047,7 @@ print_sshd_full_content() {
 # Where present, sulog is read to provide evidence of account switching
 # activity. The log file is not truncated, rotated, or modified.
 print_sulog_content() {
-    if file_readable /var/log/sulog; then
-        cat /var/log/sulog
-    else
-        not_available
-    fi
+    print_file_with_header /var/log/sulog
 }
 
 # Package inventory:
@@ -1329,6 +1340,10 @@ print_shell_timeout_and_banner_summary() {
     subsection "Shell Timeout Settings:"
     record_file_reference /etc/profile
     record_file_reference /etc/bashrc
+    record_file_reference /etc/ksh.kshrc
+    record_file_reference /etc/csh.cshrc
+    record_file_reference /etc/profile.d
+    record_file_reference /etc/security/login.cfg
     if grep -E '(^[[:space:]]*TMOUT=|^[[:space:]]*readonly[[:space:]]+TMOUT|^[[:space:]]*export[[:space:]]+TMOUT|^[[:space:]]*autologout[[:space:]]*=)' /etc/profile /etc/bashrc /etc/ksh.kshrc /etc/csh.cshrc /etc/profile.d/*.sh /etc/security/login.cfg 2>/dev/null; then
         :
     else
@@ -1372,12 +1387,17 @@ print_audit_logging_summary() {
 
     subsection "Remote Log Forwarding Indicators:"
     record_file_reference /etc/rsyslog.conf
+    record_file_reference /etc/rsyslog.d
     record_file_reference /etc/syslog.conf
+    record_file_reference /etc/syslog-ng/syslog-ng.conf
+    record_file_reference /etc/syslog-ng/conf.d
+    record_file_reference /etc/systemd/journald.conf
     grep -E '(^[^#].*@@?[A-Za-z0-9._-]+|action\(.*omfwd|destination.*(tcp|udp)|forward_to|loghost)' /etc/rsyslog.conf /etc/rsyslog.d/*.conf /etc/syslog.conf /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/conf.d/*.conf /etc/systemd/journald.conf 2>/dev/null || not_available
     blank_line
 
     subsection "Sudo Logging Indicators:"
     record_file_reference /etc/sudoers
+    record_file_reference /etc/sudoers.d
     grep -E '(logfile=|log_input|log_output|iolog_dir)' /etc/sudoers /etc/sudoers.d/* 2>/dev/null || not_available
 }
 
@@ -1436,9 +1456,8 @@ print_network_exposure_summary() {
     print_file_with_header /etc/dfs/dfstab
     print_file_with_header /etc/inetd.conf
     print_file_with_header /etc/inet/inetd.conf
-    record_file_reference /etc/inetd.conf
-    record_file_reference /etc/inet/inetd.conf
     record_file_reference /etc/services
+    record_file_reference /etc/xinetd.d
     grep -E '(telnet|rlogin|rexec|rsh|ftp)' /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/* /etc/services 2>/dev/null || not_available
 }
 
@@ -1524,6 +1543,78 @@ print_critical_file_integrity() {
     for sensitive_path in $sensitive_paths; do
         print_path_metadata "$sensitive_path"
     done
+}
+
+# Interactive user account inventory:
+# Service accounts (Section 13) and UID 0 accounts (Section 1) are reviewed
+# elsewhere. This function lists the remaining accounts that a person could
+# plausibly log in with: UID 0 accounts plus accounts at or above the
+# platform service-account threshold whose login shell is not a known
+# non-interactive shell (nologin or false). This reads /etc/passwd only and
+# does not modify any account.
+print_interactive_user_accounts() {
+    uid_cutoff=`service_uid_cutoff`
+
+    if file_readable /etc/passwd; then
+        printf 'Criteria: UID 0, or UID >= %s with a login shell other than nologin/false\n' "$uid_cutoff"
+        printf 'Format: user:uid:gid:home:shell\n'
+        blank_line
+        awk -F: -v cutoff="$uid_cutoff" '
+            $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= cutoff) {
+                print $1 ":" $3 ":" $4 ":" $6 ":" $7
+                found = 1
+            }
+            END { if (!found) exit 1 }
+        ' /etc/passwd 2>/dev/null || no_entries_found
+    else
+        not_available
+    fi
+}
+
+# Authentication log sampling:
+# Logging configuration alone does not show that logging is operating. This
+# function prints the most recent lines from common authentication logs so
+# the evidence shows login and privilege activity was actually being
+# recorded at collection time. Only the displayed sample lines leave the
+# host; the full log file is intentionally not copied because production
+# authentication logs can be very large and may contain unrelated user
+# activity. Each sampled log is recorded in the manifest as LOG_SAMPLED.
+# The log files are read only and are not truncated, rotated, or modified.
+AUTH_LOG_SAMPLE_LINES=50
+readonly AUTH_LOG_SAMPLE_LINES
+
+auth_log_candidates() {
+    printf '/var/log/auth.log\n/var/log/secure\n/var/log/authlog\n/var/adm/authlog\n'
+}
+
+print_auth_log_samples() {
+    found=no
+
+    for log_path in `auth_log_candidates`; do
+        if [ -f "$log_path" ] && [ -r "$log_path" ]; then
+            printf 'Log file: %s (last %s lines)\n' "$log_path" "$AUTH_LOG_SAMPLE_LINES"
+            if tail -n "$AUTH_LOG_SAMPLE_LINES" "$log_path" 2>/dev/null; then
+                record_manifest_line "LOG_SAMPLED|$log_path|lines=$AUTH_LOG_SAMPLE_LINES"
+                found=yes
+            else
+                not_available
+            fi
+            blank_line
+        fi
+    done
+
+    if [ "$found" = no ] && command_exists journalctl; then
+        printf 'No authentication log files found; sampling systemd journal (last %s lines)\n' "$AUTH_LOG_SAMPLE_LINES"
+        if journalctl -n "$AUTH_LOG_SAMPLE_LINES" --no-pager 2>/dev/null; then
+            record_manifest_line "LOG_SAMPLED|journalctl|lines=$AUTH_LOG_SAMPLE_LINES"
+            found=yes
+        fi
+        blank_line
+    fi
+
+    if [ "$found" = no ]; then
+        not_available
+    fi
 }
 
 # Evidence archive creation:
@@ -1850,6 +1941,14 @@ section22_source_files() {
         *)       printf '/etc/passwd\n/etc/group\n/etc/ssh/sshd_config\n' ;;
     esac
 }
+section24_source_files() { printf '/etc/passwd\n'; }
+section25_source_files() {
+    for log_candidate in `auth_log_candidates`; do
+        if [ -f "$log_candidate" ]; then
+            printf '%s\n' "$log_candidate"
+        fi
+    done
+}
 
 # Main execution sequence:
 # 1. Display help and exit if requested. No filesystem changes occur on this
@@ -2080,6 +2179,14 @@ else
         fi
     done
 fi
+
+_sec24_files=`section24_source_files`
+section_with_explanation "24. Interactive User Accounts" "Explanation: This section lists the accounts that a person could plausibly use to log in to this host: UID 0 accounts plus accounts at or above the platform service-account threshold whose login shell is not a known non-interactive shell. For a SOX IT audit, this provides the population of named human users for logical access review, complementing the UID 0 review in Section 1 and the service-account inventory in Section 13." "$_sec24_files"
+print_interactive_user_accounts
+
+_sec25_files=`section25_source_files`
+section_with_explanation "25. Authentication Log Samples" "Explanation: This section shows the most recent entries from the host's authentication logs to demonstrate that login and privilege activity was actually being recorded at the time of collection. It complements Section 15, which shows how logging is configured, by providing evidence that logging is operating. Only the sampled lines shown here are included in the evidence; the full log files are intentionally not copied because production authentication logs can be very large. Each sampled log is recorded in the manifest as LOG_SAMPLED." "$_sec25_files" "no"
+print_auth_log_samples
 
 create_collection_archive
 
