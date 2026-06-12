@@ -1555,17 +1555,39 @@ print_critical_file_integrity() {
 print_interactive_user_accounts() {
     uid_cutoff=`service_uid_cutoff`
 
-    if file_readable /etc/passwd; then
-        printf 'Criteria: UID 0, or UID >= %s with a login shell other than nologin/false\n' "$uid_cutoff"
-        printf 'Format: user:uid:gid:home:shell\n'
-        blank_line
-        awk -F: -v cutoff="$uid_cutoff" '
+    printf 'Criteria: UID 0, or UID >= %s with a login shell other than nologin/false\n' "$uid_cutoff"
+    printf 'Format: user:uid:gid:home:shell\n'
+    blank_line
+
+    # Use getent passwd so that accounts sourced from LDAP, SSSD, NIS, or
+    # Active Directory are included alongside local /etc/passwd entries.
+    # Falling back to /etc/passwd only when getent is absent.
+    if command_exists getent; then
+        record_manifest_line "GETENT_QUERY|passwd ALL|source=name_service"
+        record_file_reference /etc/passwd
+        if getent passwd 2>/dev/null | awk -F: -v cutoff="$uid_cutoff" '
             $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= cutoff) {
                 print $1 ":" $3 ":" $4 ":" $6 ":" $7
                 found = 1
             }
             END { if (!found) exit 1 }
-        ' /etc/passwd 2>/dev/null || no_entries_found
+        '; then
+            :
+        else
+            no_entries_found
+        fi
+    elif file_readable /etc/passwd; then
+        if awk -F: -v cutoff="$uid_cutoff" '
+            $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= cutoff) {
+                print $1 ":" $3 ":" $4 ":" $6 ":" $7
+                found = 1
+            }
+            END { if (!found) exit 1 }
+        ' /etc/passwd 2>/dev/null; then
+            :
+        else
+            no_entries_found
+        fi
     else
         not_available
     fi
@@ -1604,9 +1626,12 @@ print_auth_log_samples() {
     done
 
     if [ "$found" = no ] && command_exists journalctl; then
-        printf 'No authentication log files found; sampling systemd journal (last %s lines)\n' "$AUTH_LOG_SAMPLE_LINES"
-        if journalctl -n "$AUTH_LOG_SAMPLE_LINES" --no-pager 2>/dev/null; then
-            record_manifest_line "LOG_SAMPLED|journalctl|lines=$AUTH_LOG_SAMPLE_LINES"
+        printf 'No authentication log files found; sampling systemd journal auth/authpriv facilities (last %s lines)\n' "$AUTH_LOG_SAMPLE_LINES"
+        # Restrict to syslog facilities auth (4) and authpriv (10) so the
+        # sample contains SSH, sudo, su, and PAM events rather than
+        # unrelated kernel or application noise.
+        if journalctl -n "$AUTH_LOG_SAMPLE_LINES" --no-pager --facility=auth,authpriv 2>/dev/null; then
+            record_manifest_line "LOG_SAMPLED|journalctl|facility=auth,authpriv|lines=$AUTH_LOG_SAMPLE_LINES"
             found=yes
         fi
         blank_line
