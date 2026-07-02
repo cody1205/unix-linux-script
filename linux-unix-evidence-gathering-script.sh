@@ -326,6 +326,13 @@ is_sensitive_path() {
         /etc/shadow|/etc/gshadow|/etc/sssd/sssd.conf|/etc/krb5.keytab|/etc/krb5/krb5.keytab|/etc/ldap.secret)
             return 0
             ;;
+        /etc/security/passwd|/etc/security/opasswd|/etc/opasswd|/etc/security/ldap/ldap.cfg|/etc/security/passwd.conf)
+            # AIX stores password hashes in /etc/security/passwd; opasswd holds
+            # password history hashes; the AIX LDAP client config embeds a bind
+            # password. Treat these like /etc/shadow: metadata and safe summaries
+            # only, never copy the full file into the evidence package.
+            return 0
+            ;;
         /root/.ssh/*|/home/*/.ssh/*|*/.ssh/id_*|*/authorized_keys|*/.rhosts|*/.shosts|*.pem|*.key)
             return 0
             ;;
