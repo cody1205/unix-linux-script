@@ -183,6 +183,16 @@ EOF
     # /usr tree and add minutes to every simulation.
     cat > "$RSHIMS/find" <<'EOF'
 #!/bin/sh
+# Record the arguments each permission scan was invoked with, one per line, so a
+# fixture can assert that the scan roots arrived as intended. Without this the
+# shim would answer from a canned list regardless of what it was passed, making
+# argument-passing faults - such as a path with a space being word-split into two
+# nonexistent roots - completely invisible to these tests.
+case "$*" in
+  *0002*|*4000*|*2000*)
+    for _a in "$@"; do printf '%s\n' "$_a"; done > /tmp/.sim_find_argv
+    ;;
+esac
 case "$*" in
   *0002*)
     case "$*" in
@@ -250,6 +260,9 @@ sim_extract() {
     rm -rf "$OUT/evidence"
     mkdir -p "$OUT/evidence"
     cp -a "$R/out/." "$OUT/evidence/" 2>/dev/null || true
+    # Kept outside the evidence tree so the delivered package stays clean.
+    FIND_ARGV="$OUT/find-argv.txt"
+    cp "$R/tmp/.sim_find_argv" "$FIND_ARGV" 2>/dev/null || : > "$FIND_ARGV"
     E="$OUT/evidence/SOX-ITGC-AUDIT-LINUX-UNIX"
     REPORT="$E/report/SOX-ITGC-AUDIT-REPORT.txt"
     MANIFEST="$E/metadata/MANIFEST.txt"

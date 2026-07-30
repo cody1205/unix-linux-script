@@ -12,7 +12,7 @@ UNAME_R=4.18.0-553.16.1.el8_10.x86_64
 UNAME_V='#1 SMP Thu Jun 20 12:38:14 EDT 2024'
 UNAME_M=x86_64
 NODENAME=rhel-fin-app01.corp.acmefinancial.com
-APPDIR=/opt/finapp
+APPDIR="/srv/Finance App"
 BLOCKERS=""
 
 write_os_shims() {
@@ -482,6 +482,11 @@ EOF
 
     mkdir -p "$R/opt/finapp/bin" "$R/opt/finapp/conf" "$R/opt/finapp/logs" \
              "$R/opt/finapp/lib" "$R/var/log/finapp"
+    # An application root whose path contains a space, deliberately outside the
+    # standard scanned paths so it is reachable ONLY as an --app-dir root. If the
+    # roots are ever word-split again, find gets "/srv/Finance" and "App", scans
+    # neither, and the report shows a clean result for a tree it never examined.
+    mkdir -p "$R/srv/Finance App/bin"
     printf '#!/bin/bash\n# FinApp deploy hook\nexit 0\n' > "$R/opt/finapp/bin/deploy.sh"
     chmod 755 "$R/opt/finapp/bin/deploy.sh"
     printf 'app.env=PROD\ndb.url=jdbc:oracle:thin:@db01:1521/FINPDB\n' > "$R/opt/finapp/conf/app.properties"
@@ -528,9 +533,12 @@ EOF
     chmod 0777 "$R/opt/finapp/bin/nightly-close.sh" 2>/dev/null || \
         { printf '#!/bin/bash\nexit 0\n' > "$R/opt/finapp/bin/nightly-close.sh"; chmod 0777 "$R/opt/finapp/bin/nightly-close.sh"; }
     chmod 0777 "$R/opt/finapp/logs"
+    printf '#!/bin/sh\nexit 0\n' > "$R/srv/Finance App/bin/rating.sh"
+    chmod 0666 "$R/srv/Finance App/bin/rating.sh"
     cat > "$R/etc/.sim_ww_files" <<'EOF'
 /opt/finapp/bin/nightly-close.sh
 /etc/finapp-shared.conf
+/srv/Finance App/bin/rating.sh
 EOF
     cat > "$R/etc/.sim_ww_dirs" <<'EOF'
 /opt/finapp/logs
@@ -585,7 +593,27 @@ verify_os() {
     fi
     # The operator-supplied application root is scanned in its own right, which is
     # what stops -xdev skipping an application tree that sits on its own mount.
-    assert_report_matches 'Paths scanned:.*/opt/finapp' 'application root scanned as a root in its own right'
+    # An application root containing a space must survive as one argument. If the
+    # roots are word-split again, find gets "/srv/Finance" and "App" and this tree
+    # is silently skipped while the report still lists it.
+    # The scan root must reach find as ONE argument. Asserted against the
+    # arguments find was actually invoked with, not against the report text: the
+    # report prints the roots from the same list, so a report-only check would
+    # pass even while find received two nonexistent paths.
+    sim_check
+    if grep -qx '/srv/Finance App' "$FIND_ARGV" 2>/dev/null; then
+        sim_pass "app root containing a space reached find as a single argument"
+    else
+        sim_fail "app root was split before reaching find; got: `tr '\n' ' ' < "$FIND_ARGV" 2>/dev/null`"
+    fi
+    # The word-split artefact must not appear anywhere in the report either.
+    sim_check
+    if grep -qE '^  App$|^  /srv/Finance$' "$REPORT" 2>/dev/null; then
+        sim_fail "scan scope shows a word-split path fragment"
+    else
+        sim_pass "no word-split path fragments in the scan scope"
+    fi
+    assert_report_matches '/srv/Finance App/bin/rating\.sh' 'world-writable file inside the spaced app root found'
     # The same script must also appear as a scheduled job, so the two sections can
     # be joined during the review.
     assert_report_matches 'svc_deploy  /opt/finapp/bin/nightly-close\.sh' 'cron job referencing that script captured'

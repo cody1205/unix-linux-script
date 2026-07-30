@@ -1275,6 +1275,17 @@ operator_app_scan_roots() {
     done
 }
 
+# Scope of the SetUID/SetGID scan: binary paths, plus any application roots the
+# operator supplied. Emitted one per line so callers can split on newlines only.
+setuid_search_paths() {
+    for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
+        if [ -d "$candidate" ]; then
+            printf '%s\n' "$candidate"
+        fi
+    done
+    operator_app_scan_roots
+}
+
 # Scope of the world-writable scan: system binary and configuration paths, plus
 # any application roots the operator supplied.
 world_writable_search_paths() {
@@ -1292,19 +1303,36 @@ print_world_writable_review() {
         return
     fi
 
-    ww_search_paths=""
-    for _ww_path in `world_writable_search_paths`; do
-        ww_search_paths="$ww_search_paths $_ww_path"
-    done
+    # The scan roots are held in the positional parameters rather than in a
+    # space-separated string, and IFS is narrowed to a newline while the list is
+    # split.
+    #
+    # This is not stylistic. An application root supplied with --app-dir can
+    # legitimately contain spaces, for example /srv/Finance App. Collecting the
+    # roots into one string and passing it to find unquoted lets the shell split
+    # it on spaces, so find receives /srv/Finance and App, neither of which
+    # exists, and silently scans neither. The report would still print the intact
+    # path under "Paths scanned" and show no findings, which reads as a clean
+    # result for a directory that was never examined - the worst possible
+    # outcome, and for exactly the tree the operator asked about. Holding the
+    # roots as separate arguments and expanding them as "$@" keeps each path
+    # whole. A path containing a newline is not supported.
+    _ww_saved_ifs=$IFS
+    IFS='
+'
+    set -- `world_writable_search_paths`
+    IFS=$_ww_saved_ifs
 
-    ww_search_paths=${ww_search_paths# }
-    if [ -z "$ww_search_paths" ]; then
+    if [ "$#" -eq 0 ]; then
         not_available
         return
     fi
 
     subsection "Scan Scope and Limits:"
-    printf 'Paths scanned: %s\n' "$ww_search_paths"
+    printf 'Paths scanned:\n'
+    for _ww_path in "$@"; do
+        printf '  %s\n' "$_ww_path"
+    done
     printf 'Filesystem boundary: not crossed (find -xdev). Separately mounted\n'
     printf '  subdirectories beneath the paths above are not traversed, so this\n'
     printf '  population may under-report. This bound is deliberate: it prevents\n'
@@ -1321,7 +1349,7 @@ print_world_writable_review() {
     ww_limit_probe=`expr "$WORLD_WRITABLE_MAX_ENTRIES" + 1`
 
     subsection "World-Writable Files:"
-    ww_files=`find $ww_search_paths -xdev -type f -perm -0002 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
+    ww_files=`find "$@" -xdev -type f -perm -0002 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
     # grep -c always prints a count but exits 1 when that count is zero, so it
     # must not be guarded with "|| echo 0" - that would emit the count twice and
     # break the numeric comparison below, leaving a clean host with a blank
@@ -1348,14 +1376,14 @@ print_world_writable_review() {
             fi
         done
     fi
-    record_manifest_line "WORLD_WRITABLE_SCAN|files|scope=$ww_search_paths|xdev=yes|$ww_file_tally"
+    record_manifest_line "WORLD_WRITABLE_SCAN|files|roots=$#|xdev=yes|$ww_file_tally"
     blank_line
 
     # A world-writable directory without the sticky bit is often worse than a
     # world-writable file: any user can delete or replace files they do not own
     # inside it, including files owned by root.
     subsection "World-Writable Directories Without the Sticky Bit:"
-    ww_dirs=`find $ww_search_paths -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
+    ww_dirs=`find "$@" -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
     ww_dir_count=`printf '%s' "$ww_dirs" | grep -c . 2>/dev/null`
     [ -n "$ww_dir_count" ] || ww_dir_count=0
     ww_dir_tally="entries=$ww_dir_count|truncated=no"
@@ -1375,7 +1403,7 @@ print_world_writable_review() {
             fi
         done
     fi
-    record_manifest_line "WORLD_WRITABLE_SCAN|directories_without_sticky|scope=$ww_search_paths|xdev=yes|$ww_dir_tally"
+    record_manifest_line "WORLD_WRITABLE_SCAN|directories_without_sticky|roots=$#|xdev=yes|$ww_dir_tally"
     blank_line
 
     # The control test for the by-design shared directories.
@@ -1437,24 +1465,25 @@ print_setuid_setgid_files() {
         return
     fi
 
-    search_paths=""
-    for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
-        if [ -d "$candidate" ]; then
-            search_paths="$search_paths $candidate"
-        fi
-    done
-    for _suid_app_root in `operator_app_scan_roots`; do
-        search_paths="$search_paths $_suid_app_root"
-    done
-    search_paths=${search_paths# }
+    # Roots are held as positional parameters so that an application path
+    # containing spaces survives as a single argument; see the equivalent comment
+    # in print_world_writable_review for why this matters.
+    _suid_saved_ifs=$IFS
+    IFS='
+'
+    set -- `setuid_search_paths`
+    IFS=$_suid_saved_ifs
 
-    if [ -z "$search_paths" ]; then
+    if [ "$#" -eq 0 ]; then
         not_available
         return
     fi
 
     subsection "Scan Scope and Limits:"
-    printf 'Paths scanned: %s\n' "$search_paths"
+    printf 'Paths scanned:\n'
+    for _suid_path in "$@"; do
+        printf '  %s\n' "$_suid_path"
+    done
     printf 'Filesystem boundary: not crossed (find -xdev). Separately mounted\n'
     printf '  subdirectories beneath the paths above are not traversed, so this\n'
     printf '  population may under-report. This bound is deliberate: it prevents\n'
@@ -1464,7 +1493,7 @@ print_setuid_setgid_files() {
     blank_line
 
     subsection "SetUID Files:"
-    _suid_list=`find $search_paths -xdev -type f \( -perm -4000 -o -perm -04000 \) -print 2>/dev/null | sort -u`
+    _suid_list=`find "$@" -xdev -type f \( -perm -4000 -o -perm -04000 \) -print 2>/dev/null | sort -u`
     if [ -n "$_suid_list" ]; then
         printf '%s\n' "$_suid_list"
     else
@@ -1473,7 +1502,7 @@ print_setuid_setgid_files() {
     blank_line
 
     subsection "SetGID Files:"
-    _sgid_list=`find $search_paths -xdev -type f \( -perm -2000 -o -perm -02000 \) -print 2>/dev/null | sort -u`
+    _sgid_list=`find "$@" -xdev -type f \( -perm -2000 -o -perm -02000 \) -print 2>/dev/null | sort -u`
     if [ -n "$_sgid_list" ]; then
         printf '%s\n' "$_sgid_list"
     else
