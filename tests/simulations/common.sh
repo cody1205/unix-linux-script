@@ -21,6 +21,13 @@
 
 set -u
 
+# chroot lives in /usr/sbin and mount/umount may live in /sbin, but sudo does not
+# always pass those directories down (GitHub Actions runners hand over a PATH
+# without /usr/sbin, which makes chroot fail with a bare "not found"). Prepend the
+# administrative directories so the harness does not depend on the caller's PATH.
+PATH=/usr/local/sbin:/usr/sbin:/sbin:$PATH
+export PATH
+
 SIM_DIR=`CDPATH= cd -- "\`dirname -- "$0"\`" && pwd`
 REPO_ROOT=`CDPATH= cd -- "$SIM_DIR/../.." && pwd`
 COLLECTOR=${COLLECTOR:-$REPO_ROOT/linux-unix-evidence-gathering-script.sh}
@@ -322,6 +329,14 @@ sim_main() {
         printf 'FAIL: collector not found at %s\n' "$COLLECTOR" >&2
         exit 1
     fi
+    # Preflight the tools the harness itself needs. Without this a missing
+    # binary surfaces as every assertion failing at once, which hides the cause.
+    for _tool in chroot mount umount; do
+        if ! command -v "$_tool" >/dev/null 2>&1; then
+            printf 'FAIL: required tool "%s" not found in PATH (%s)\n' "$_tool" "$PATH" >&2
+            exit 1
+        fi
+    done
 
     printf '=== %s (%s) ===\n' "$OS_LABEL" "$NODENAME"
 
