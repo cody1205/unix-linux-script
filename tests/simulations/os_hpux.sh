@@ -19,8 +19,12 @@ UNAME_V=U
 UNAME_M=ia64
 NODENAME=hpux-ins-app01
 APPDIR=/opt/policyadmin
-# HP-UX ships none of these. Blocking getent forces the file-read fallback.
-BLOCKERS="dpkg chage getent"
+# HP-UX ships none of these. Blocking getent forces the file-read fallback that a
+# real HP-UX host takes. rpm, dpkg, and ss must also appear absent because the
+# collector probes them before the HP-UX natives (swlist for software, netstat for
+# listeners), and CI runners have all three installed. Names the host lacks are
+# skipped harmlessly.
+BLOCKERS="dpkg chage getent rpm ss systemctl journalctl pkginfo lslpp"
 
 write_os_shims() {
     cat > "$RSHIMS/swlist" <<'EOF'

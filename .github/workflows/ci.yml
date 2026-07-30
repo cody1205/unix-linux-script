@@ -96,6 +96,13 @@ jobs:
       - name: Simulate ${{ matrix.platform }} and verify the evidence package
         run: sudo sh tests/simulations/os_${{ matrix.platform }}.sh
 
+      # The collector runs under umask 077 as root, so the evidence tree is
+      # unreadable to the runner user and upload-artifact fails with EACCES.
+      # Relax read permissions on the copy only; the fixture is already gone.
+      - name: Make evidence readable for upload
+        if: failure()
+        run: sudo chmod -R a+rX /tmp/sox-itgc-sim/out || true
+
       - name: Upload evidence package on failure
         if: failure()
         uses: actions/upload-artifact@v4

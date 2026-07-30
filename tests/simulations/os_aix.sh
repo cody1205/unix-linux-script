@@ -20,8 +20,13 @@ UNAME_V=7
 UNAME_M=00F8A24C4C00
 NODENAME=aix-fin-batch01
 APPDIR=/usr/lpp/corebank
-# AIX ships none of these; it uses lslpp/lsuser instead.
-BLOCKERS="dpkg chage"
+# AIX ships none of these, and the collector probes for them BEFORE the AIX
+# natives: rpm and dpkg come before lslpp in the package inventory, and ss comes
+# before netstat for listeners. If the host has them (CI runners ship rpm, dpkg,
+# and iproute2) the fixture would silently exercise the Linux path instead of the
+# AIX one, so they must be made to appear absent. Names the host lacks are
+# skipped harmlessly.
+BLOCKERS="dpkg chage rpm ss systemctl journalctl pkginfo swlist"
 
 write_os_shims() {
     cat > "$RSHIMS/lslpp" <<'EOF'
