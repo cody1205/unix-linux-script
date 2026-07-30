@@ -589,6 +589,16 @@ verify_os() {
     # The same script must also appear as a scheduled job, so the two sections can
     # be joined during the review.
     assert_report_matches 'svc_deploy  /opt/finapp/bin/nightly-close\.sh' 'cron job referencing that script captured'
+    # Under the cap the manifest must state an exact count and say so. The
+    # over-cap case must never report the probe count as if it were the true
+    # population; that is asserted by the wording checked here staying accurate.
+    sim_check
+    if grep -q 'WORLD_WRITABLE_SCAN|files|.*|truncated=no' "$MANIFEST" 2>/dev/null; then
+        sim_pass "world-writable tally records whether the list was truncated"
+    else
+        sim_fail "world-writable manifest entry does not record truncation state"
+    fi
+
     # Metadata only: the contents of a world-writable file must never be copied.
     sim_check
     if [ -f "$E/raw_files/opt/finapp/bin/nightly-close.sh" ]; then

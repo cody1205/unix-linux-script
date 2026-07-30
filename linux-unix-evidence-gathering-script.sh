@@ -1328,6 +1328,7 @@ print_world_writable_review() {
     # section instead of an explicit "no entries found".
     ww_file_count=`printf '%s' "$ww_files" | grep -c . 2>/dev/null`
     [ -n "$ww_file_count" ] || ww_file_count=0
+    ww_file_tally="entries=$ww_file_count|truncated=no"
     if [ "$ww_file_count" -eq 0 ]; then
         no_entries_found
     else
@@ -1336,6 +1337,10 @@ print_world_writable_review() {
             printf 'is truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
             blank_line
             ww_files=`printf '%s\n' "$ww_files" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+            # The scan stops one past the cap, so the exact population is not
+            # known once the cap is exceeded. Record that honestly rather than
+            # reporting the probe count as if it were the true total.
+            ww_file_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
         fi
         printf '%s\n' "$ww_files" | while IFS= read -r _ww_entry; do
             if [ -n "$_ww_entry" ]; then
@@ -1343,7 +1348,7 @@ print_world_writable_review() {
             fi
         done
     fi
-    record_manifest_line "WORLD_WRITABLE_SCAN|files|scope=$ww_search_paths|xdev=yes|entries=$ww_file_count"
+    record_manifest_line "WORLD_WRITABLE_SCAN|files|scope=$ww_search_paths|xdev=yes|$ww_file_tally"
     blank_line
 
     # A world-writable directory without the sticky bit is often worse than a
@@ -1353,6 +1358,7 @@ print_world_writable_review() {
     ww_dirs=`find $ww_search_paths -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
     ww_dir_count=`printf '%s' "$ww_dirs" | grep -c . 2>/dev/null`
     [ -n "$ww_dir_count" ] || ww_dir_count=0
+    ww_dir_tally="entries=$ww_dir_count|truncated=no"
     if [ "$ww_dir_count" -eq 0 ]; then
         no_entries_found
     else
@@ -1361,6 +1367,7 @@ print_world_writable_review() {
             printf 'truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
             blank_line
             ww_dirs=`printf '%s\n' "$ww_dirs" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+            ww_dir_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
         fi
         printf '%s\n' "$ww_dirs" | while IFS= read -r _ww_entry; do
             if [ -n "$_ww_entry" ]; then
@@ -1368,7 +1375,7 @@ print_world_writable_review() {
             fi
         done
     fi
-    record_manifest_line "WORLD_WRITABLE_SCAN|directories_without_sticky|scope=$ww_search_paths|xdev=yes|entries=$ww_dir_count"
+    record_manifest_line "WORLD_WRITABLE_SCAN|directories_without_sticky|scope=$ww_search_paths|xdev=yes|$ww_dir_tally"
     blank_line
 
     # The control test for the by-design shared directories.
