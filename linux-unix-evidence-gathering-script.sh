@@ -1109,6 +1109,207 @@ print_recent_login_activity() {
     fi
 }
 
+# World-writable file and directory review:
+#
+# Why this matters for the audit:
+# A world-writable file can be modified by any account on the host. Two control
+# failures follow from that. If the file is a script or binary executed by a
+# privileged account (from cron, from a startup script, or through a sudo rule),
+# any user can obtain privileged execution, which defeats the restriction of
+# administrative access. If the file is application configuration or data in
+# financial-reporting scope, unauthorized modification of that data is possible,
+# which defeats the integrity of the reported figures. The findings here are
+# intended to be read together with the cron evidence in Sections 12 and 21, the
+# startup evidence in Section 16, and the sudo evidence in Section 4, so a
+# reviewer can determine whether anything privileged actually executes a
+# world-writable path.
+#
+# Why the scan is scoped rather than filesystem-wide:
+# This script runs on live client production systems, and an unbounded scan is
+# the one part of the collection that could plausibly affect service. A find
+# across a whole root filesystem on a host with large data volumes can run for a
+# very long time and generate sustained metadata I/O while it does. The scan is
+# therefore restricted to the directories where world-write is a genuine control
+# failure - system binaries, system configuration, and application install roots
+# - and skips data volumes entirely. This mirrors the pruning already applied to
+# the SetUID scan below.
+#
+# Why -xdev is used, and what it costs:
+# -xdev stops find at filesystem boundaries. Without it the scan can descend into
+# NFS or SAN mounts that happen to live under a scoped path, which pushes load
+# onto a remote filer, can stall on an unresponsive mount, and can take an
+# unpredictable amount of time. That is an unacceptable risk on a production
+# host. The cost of -xdev is that a separately mounted subdirectory beneath a
+# scoped path is not traversed, so the population can under-report. That trade is
+# made deliberately in favour of not disturbing the client, and the report
+# discloses the boundary explicitly so a reviewer knows the limit of the
+# evidence rather than assuming completeness.
+#
+# Why /tmp, /var/tmp, and /dev/shm are excluded:
+# Those directories are world-writable by design. Listing their contents would
+# produce a large volume of expected findings and bury the ones that matter. The
+# actual control on a shared temporary directory is the sticky bit, which stops
+# one user deleting or renaming another user's files, so the script verifies the
+# sticky bit on those directories instead of enumerating them.
+#
+# Why only metadata is recorded:
+# The script reports path, permissions, and ownership. It never prints or copies
+# the contents of a world-writable file. Contents are not needed to evidence the
+# control, and a world-writable file can hold anything, including client data
+# that has no business leaving the host inside an audit package.
+#
+# Output is capped, and the cap is disclosed when it is reached, because silent
+# truncation would make a host with thousands of findings look the same as a
+# clean one.
+WORLD_WRITABLE_MAX_ENTRIES=500
+readonly WORLD_WRITABLE_MAX_ENTRIES
+
+# Directories that are world-writable by design; the sticky bit is the control.
+world_writable_expected_shared_dirs() {
+    printf '/tmp\n/var/tmp\n/dev/shm\n/var/lock\n'
+}
+
+# Scope of the scan: system binary and configuration paths, plus any application
+# roots the operator supplied with --app-dir. Application roots already covered by
+# a standard path are skipped so find does not traverse the same tree twice.
+world_writable_search_paths() {
+    for candidate in /etc /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt; do
+        if [ -d "$candidate" ]; then
+            printf '%s\n' "$candidate"
+        fi
+    done
+
+    if [ -n "$APP_DIRECTORIES" ]; then
+        printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r _ww_app_dir; do
+            if [ -z "$_ww_app_dir" ] || [ ! -d "$_ww_app_dir" ]; then
+                continue
+            fi
+            case "$_ww_app_dir" in
+                /etc|/etc/*|/bin|/bin/*|/sbin|/sbin/*|/usr|/usr/*|/opt|/opt/*)
+                    ;;
+                *)
+                    printf '%s\n' "$_ww_app_dir"
+                    ;;
+            esac
+        done
+    fi
+}
+
+print_world_writable_review() {
+    if ! command_exists find; then
+        not_available
+        return
+    fi
+
+    ww_search_paths=""
+    for _ww_path in `world_writable_search_paths`; do
+        ww_search_paths="$ww_search_paths $_ww_path"
+    done
+
+    ww_search_paths=${ww_search_paths# }
+    if [ -z "$ww_search_paths" ]; then
+        not_available
+        return
+    fi
+
+    subsection "Scan Scope and Limits:"
+    printf 'Paths scanned: %s\n' "$ww_search_paths"
+    printf 'Filesystem boundary: not crossed (find -xdev). Separately mounted\n'
+    printf '  subdirectories beneath the paths above are not traversed, so this\n'
+    printf '  population may under-report. This bound is deliberate: it prevents\n'
+    printf '  the scan from loading NFS or SAN mounts on a production host.\n'
+    printf 'Excluded by design: %s\n' "`world_writable_expected_shared_dirs | tr '\n' ' '`"
+    printf '  (world-writable by design; the sticky bit is verified below instead)\n'
+    printf 'Recorded per finding: path, permissions, ownership. File contents are\n'
+    printf '  never printed or copied into this evidence package.\n'
+    printf 'Maximum entries listed per category: %s\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+    blank_line
+
+    # Fetch one more than the cap so an exceeded cap can be detected and stated
+    # rather than silently truncating the population.
+    ww_limit_probe=`expr "$WORLD_WRITABLE_MAX_ENTRIES" + 1`
+
+    subsection "World-Writable Files:"
+    ww_files=`find $ww_search_paths -xdev -type f -perm -0002 -print 2>/dev/null | head -n "$ww_limit_probe"`
+    # grep -c always prints a count but exits 1 when that count is zero, so it
+    # must not be guarded with "|| echo 0" - that would emit the count twice and
+    # break the numeric comparison below, leaving a clean host with a blank
+    # section instead of an explicit "no entries found".
+    ww_file_count=`printf '%s' "$ww_files" | grep -c . 2>/dev/null`
+    [ -n "$ww_file_count" ] || ww_file_count=0
+    if [ "$ww_file_count" -eq 0 ]; then
+        no_entries_found
+    else
+        if [ "$ww_file_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
+            printf 'NOTE: more than %s world-writable files were found. The list below\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+            printf 'is truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+            blank_line
+            ww_files=`printf '%s\n' "$ww_files" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+        fi
+        printf '%s\n' "$ww_files" | while IFS= read -r _ww_entry; do
+            if [ -n "$_ww_entry" ]; then
+                ls -ld "$_ww_entry" 2>/dev/null || printf '%s (metadata not available)\n' "$_ww_entry"
+            fi
+        done
+    fi
+    record_manifest_line "WORLD_WRITABLE_SCAN|files|scope=$ww_search_paths|xdev=yes|entries=$ww_file_count"
+    blank_line
+
+    # A world-writable directory without the sticky bit is often worse than a
+    # world-writable file: any user can delete or replace files they do not own
+    # inside it, including files owned by root.
+    subsection "World-Writable Directories Without the Sticky Bit:"
+    ww_dirs=`find $ww_search_paths -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | head -n "$ww_limit_probe"`
+    ww_dir_count=`printf '%s' "$ww_dirs" | grep -c . 2>/dev/null`
+    [ -n "$ww_dir_count" ] || ww_dir_count=0
+    if [ "$ww_dir_count" -eq 0 ]; then
+        no_entries_found
+    else
+        if [ "$ww_dir_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
+            printf 'NOTE: more than %s such directories were found. The list below is\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+            printf 'truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+            blank_line
+            ww_dirs=`printf '%s\n' "$ww_dirs" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+        fi
+        printf '%s\n' "$ww_dirs" | while IFS= read -r _ww_entry; do
+            if [ -n "$_ww_entry" ]; then
+                ls -ld "$_ww_entry" 2>/dev/null || printf '%s (metadata not available)\n' "$_ww_entry"
+            fi
+        done
+    fi
+    record_manifest_line "WORLD_WRITABLE_SCAN|directories_without_sticky|scope=$ww_search_paths|xdev=yes|entries=$ww_dir_count"
+    blank_line
+
+    # The control test for the by-design shared directories.
+    subsection "Sticky Bit Verification for Shared Temporary Directories:"
+    for _ww_shared in `world_writable_expected_shared_dirs`; do
+        if [ -d "$_ww_shared" ]; then
+            printf 'Directory: %s\n' "$_ww_shared"
+            ls -ld "$_ww_shared" 2>/dev/null || not_available
+
+            # The sticky bit only matters where the directory is actually
+            # world-writable. Reporting a missing sticky bit on a directory that
+            # is not world-writable would be a false positive the client would
+            # have to rebut, so the two conditions are distinguished here. The
+            # other-write bit is read from the ls mode string (character 9)
+            # because POSIX test has no world-writable predicate.
+            _ww_mode=`ls -ld "$_ww_shared" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            _ww_other_write=`printf '%s' "$_ww_mode" | cut -c9 2>/dev/null`
+
+            if [ -k "$_ww_shared" ]; then
+                printf 'Sticky bit: present (expected)\n'
+            elif [ "$_ww_other_write" = "w" ]; then
+                printf 'Sticky bit: ABSENT - this directory is world-writable, so any user\n'
+                printf '  can delete or rename files owned by others here\n'
+            else
+                printf 'Sticky bit: absent, but this directory is not world-writable, so the\n'
+                printf '  sticky bit is not required\n'
+            fi
+            blank_line
+        fi
+    done
+}
+
 # SetUID / SetGID file review:
 # The search is intentionally limited to common binary and application paths so
 # the scan remains practical and avoids broad traversal of temporary, mounted,
@@ -2209,8 +2410,8 @@ print_package_inventory
 section_with_explanation "9. Recent Login Activity" "Explanation: This section shows recent login history using the system's available login records. It is limited to a manageable amount of output to reduce noise while still supporting review of privileged and unusual logins." ""
 print_recent_login_activity
 
-section_with_explanation "10. World-Writable Files" "Explanation: World-writable file review was not included in the scope of this engagement." ""
-printf 'Not in scope for this engagement.\n'
+section_with_explanation "10. World-Writable Files and Directories" "Explanation: This section identifies files and directories that any account on the host can modify. A world-writable file that is executed by a privileged account allows an unprivileged user to obtain privileged execution, and a world-writable application file allows unauthorized modification of data or programs in financial-reporting scope. Read this together with the cron evidence in Sections 12 and 21, the startup evidence in Section 16, and the sudo evidence in Section 4 to determine whether anything privileged executes a world-writable path. The scan is deliberately pruned to system binary, system configuration, and application installation paths, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host; the resulting limits are stated in the output. Directories that are world-writable by design, such as /tmp, are not enumerated. Instead their sticky bit is verified, which is the actual control on a shared temporary directory. Only path, permission, and ownership metadata is recorded. The contents of a world-writable file are never printed or copied into this evidence package." ""
+print_world_writable_review
 
 section_with_explanation "11. SetUID and SetGID Files" "Explanation: This section identifies SetUID and SetGID files, but the scan is intentionally pruned to standard system and application binary paths rather than the entire filesystem. This reduces runtime and avoids broad traversal of mounted, pseudo, and temporary filesystems while still capturing the most relevant binaries." ""
 print_setuid_setgid_files

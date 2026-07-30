@@ -521,6 +521,22 @@ EOF
 /usr/bin/ssh-agent
 /usr/sbin/postdrop
 EOF
+    # The finding that matters most: nightly-close.sh is executed by the
+    # svc_deploy cron job in /etc/cron.d/finapp-batch AND is world-writable, so
+    # any account on the host can alter what that scheduled job runs. Section 10
+    # must surface it so it can be cross-referenced against the cron evidence.
+    chmod 0777 "$R/opt/finapp/bin/nightly-close.sh" 2>/dev/null || \
+        { printf '#!/bin/bash\nexit 0\n' > "$R/opt/finapp/bin/nightly-close.sh"; chmod 0777 "$R/opt/finapp/bin/nightly-close.sh"; }
+    chmod 0777 "$R/opt/finapp/logs"
+    cat > "$R/etc/.sim_ww_files" <<'EOF'
+/opt/finapp/bin/nightly-close.sh
+/etc/finapp-shared.conf
+EOF
+    cat > "$R/etc/.sim_ww_dirs" <<'EOF'
+/opt/finapp/logs
+EOF
+    printf 'shared.mode=rw\n' > "$R/etc/finapp-shared.conf"
+    chmod 0666 "$R/etc/finapp-shared.conf"
 
     cat > "$R/var/log/secure" <<'EOF'
 Jun 16 14:02:11 rhel-fin-app01 sshd[20441]: Accepted publickey for jdoe from 10.20.4.15 port 51122 ssh2: ED25519 SHA256:abc123
@@ -552,6 +568,23 @@ verify_os() {
     assert_report_matches 'Command: ss -lntup' 'listener enumeration labelled'
     assert_report_matches 'PASS_MAX_DAYS   90' 'password aging policy captured'
     assert_report_matches 'Authorized key entries: 2' 'authorized_keys summarized not printed'
+
+    # Section 10: a world-writable script that a cron job executes is the finding
+    # this section exists for, and it must be cross-referenceable with Section 12.
+    assert_report_matches '/opt/finapp/bin/nightly-close\.sh' 'world-writable cron-executed script surfaced'
+    assert_report_matches '/opt/finapp/logs' 'world-writable directory without sticky bit surfaced'
+    assert_report_matches 'Sticky bit: present \(expected\)' 'sticky bit verified on shared temp directories'
+    assert_report_matches 'Filesystem boundary: not crossed' 'scan limits disclosed in the report'
+    # The same script must also appear as a scheduled job, so the two sections can
+    # be joined during the review.
+    assert_report_matches 'svc_deploy  /opt/finapp/bin/nightly-close\.sh' 'cron job referencing that script captured'
+    # Metadata only: the contents of a world-writable file must never be copied.
+    sim_check
+    if [ -f "$E/raw_files/opt/finapp/bin/nightly-close.sh" ]; then
+        sim_fail "world-writable file contents copied into raw_files/"
+    else
+        sim_pass "world-writable file contents not copied"
+    fi
     # /etc/shadow must be withheld
     sim_check
     if grep -q '^/etc/shadow$' "$SKIPPED" 2>/dev/null; then

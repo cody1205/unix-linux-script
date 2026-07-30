@@ -39,6 +39,18 @@ keytabs, LDAP bind secrets) are never printed or copied. The script records
 their metadata and a safe summary instead, and logs them as
 `SENSITIVE_METADATA_ONLY`.
 
+## Impact on the target host
+
+The script is read-only: it does not create, modify, delete, enable, disable,
+restart, or reconfigure anything on the host. Two sections walk the filesystem
+(Section 10 world-writable, Section 11 SetUID/SetGID) and are the only parts with
+a meaningful runtime cost. Both are pruned to system binary, system
+configuration, and application installation paths rather than scanning whole
+filesystems, and Section 10 additionally uses `find -xdev` so it cannot descend
+into NFS or SAN mounts and place load on a remote filer. Section 10 states its
+own scope and limits in the report, so a reviewer can see the bound on the
+evidence rather than assuming the population is complete.
+
 ## Tests
 
 ```sh

@@ -130,6 +130,11 @@ sim_new_root() {
              "$R"/etc/default "$R"/etc/sssd "$R"/etc/audit "$R"/etc/systemd \
              "$R"/etc/syslog-ng/conf.d "$R"/etc/alternatives
     chmod 700 "$R/root/.ssh"
+    # Shared temporary directories carry the sticky bit on a real host, which is
+    # the control Section 10 verifies. A fixture can override these to exercise
+    # the missing-sticky-bit finding.
+    mkdir -p "$R/var/tmp" "$R/dev/shm"
+    chmod 1777 "$R/tmp" "$R/var/tmp" "$R/dev/shm"
 
     # usr-merged layout, matching a modern distro
     ln -s usr/bin "$R/bin"
@@ -172,10 +177,18 @@ EOF
 if [ -f /etc/.sim_df ]; then cat /etc/.sim_df; else echo 'Filesystem 1K-blocks Used Available Use% Mounted on'; fi
 EOF
 
-    # Themed setuid/setgid answers; anything else falls through to real find.
+    # Themed answers for the permission scans; anything else falls through to the
+    # real find. The fixture's /usr is a read-only bind of the host's /usr, so an
+    # unshimmed scan of the standard binary paths would walk the host's entire
+    # /usr tree and add minutes to every simulation.
     cat > "$RSHIMS/find" <<'EOF'
 #!/bin/sh
 case "$*" in
+  *0002*)
+    case "$*" in
+      *"-type d"*) [ -f /etc/.sim_ww_dirs ]  && cat /etc/.sim_ww_dirs;  exit 0;;
+      *)           [ -f /etc/.sim_ww_files ] && cat /etc/.sim_ww_files; exit 0;;
+    esac ;;
   *4000*) [ -f /etc/.sim_setuid ] && cat /etc/.sim_setuid; exit 0;;
   *2000*) [ -f /etc/.sim_setgid ] && cat /etc/.sim_setgid; exit 0;;
   *) exec /usr/bin/find "$@";;
