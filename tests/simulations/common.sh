@@ -43,7 +43,9 @@ UNAME_V=""
 UNAME_M=""
 NODENAME=""
 APPDIR=""      # application directory passed via --app-dir
+APPDIR2=""     # optional second --app-dir; may deliberately not exist
 BLOCKERS=""    # commands that must appear ABSENT on this OS
+EXPECTED_RESULT=COMPLETED_CLEAN   # the collection log verdict this fixture should produce
 
 # Each os_*.sh must define:
 #   write_os_shims   - OS-specific shim executables into $RSHIMS
@@ -252,6 +254,7 @@ sim_run_collector() {
     chroot "$R" /usr/bin/env -i \
         PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C HOME=/root TERM=dumb \
         /usr/bin/sh /collect.sh --output-dir /out --app-dir "$APPDIR" \
+        ${APPDIR2:+--app-dir} ${APPDIR2:+"$APPDIR2"} \
         </dev/null >"$OUT/console.txt" 2>&1
     COLLECTOR_RC=$?
 }
@@ -366,11 +369,28 @@ sim_verify_common() {
     fi
     sim_check
     _sim_result=`sed -n 's/^RESULT: //p' "$LOGFILE" 2>/dev/null | head -1`
-    if [ "$_sim_result" = "COMPLETED_CLEAN" ]; then
-        sim_pass "healthy fixture reports COMPLETED_CLEAN"
+    if [ "$_sim_result" = "$EXPECTED_RESULT" ]; then
+        sim_pass "collection log verdict is $EXPECTED_RESULT as this fixture expects"
     else
-        sim_fail "expected COMPLETED_CLEAN on a healthy fixture, got '${_sim_result:-none}'"
+        sim_fail "expected $EXPECTED_RESULT, got '${_sim_result:-none}'"
         grep '| WARN \|| ERROR' "$LOGFILE" 2>/dev/null | sed 's/^/            /' >&2
+    fi
+    # The verdict must agree with the log's own lines. The counters behind the
+    # verdict were once kept in shell variables, and log_event calls made inside
+    # pipeline subshells lost their increments - producing COMPLETED_CLEAN
+    # verdicts above WARN lines. Counting the lines here catches any return of
+    # that class of bug regardless of which call site regresses.
+    sim_check
+    _sim_warn_lines=`grep -c ' | WARN  | ' "$LOGFILE" 2>/dev/null`
+    [ -n "$_sim_warn_lines" ] || _sim_warn_lines=0
+    _sim_err_lines=`grep -c ' | ERROR | ' "$LOGFILE" 2>/dev/null`
+    [ -n "$_sim_err_lines" ] || _sim_err_lines=0
+    _sim_final_warn=`sed -n 's/^FINAL_WARNINGS: //p' "$LOGFILE" 2>/dev/null | tail -1`
+    _sim_final_err=`sed -n 's/^FINAL_ERRORS: //p' "$LOGFILE" 2>/dev/null | tail -1`
+    if [ "$_sim_final_warn" = "$_sim_warn_lines" ] && [ "$_sim_final_err" = "$_sim_err_lines" ]; then
+        sim_pass "verdict counts match the log lines ($_sim_warn_lines WARN, $_sim_err_lines ERROR)"
+    else
+        sim_fail "verdict counts disagree with the log: FINAL says ${_sim_final_warn:-?}W/${_sim_final_err:-?}E, lines say ${_sim_warn_lines}W/${_sim_err_lines}E"
     fi
     sim_check
     if grep -q 'read-only and makes no configuration changes' "$LOGFILE" 2>/dev/null; then

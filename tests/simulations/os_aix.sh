@@ -19,7 +19,13 @@ UNAME_R=2
 UNAME_V=7
 UNAME_M=00F8A24C4C00
 NODENAME=aix-fin-batch01
-APPDIR=/usr/lpp/corebank
+# NOT /usr/lpp/corebank, although that is where a real AIX licensed program
+# product would live. The harness bind-mounts the host's /usr over the fixture's,
+# so any fixture tree under /usr is shadowed and invisible inside the chroot -
+# this fixture's application directory was silently missing for every prior run,
+# and only surfaced when the collection-log verdict became honest about the WARN.
+# The application root therefore lives under /opt, which is fixture-local.
+APPDIR=/opt/corebank
 # AIX ships none of these, and the collector probes for them BEFORE the AIX
 # natives: rpm and dpkg come before lslpp in the package inventory, and ss comes
 # before netstat for listeners. If the host has them (CI runners ship rpm, dpkg,
@@ -323,7 +329,7 @@ SYSADMINS       ALL=(ALL) NOPASSWD: ALL
 %dba            ALL=(DBRUN) NOPASSWD: DB2ADMIN
 %aixadmin       ALL=(root)  SRCCTL, LVM
 rpatel          ALL=(db2inst1) NOPASSWD: /usr/bin/db2
-svcbatch        ALL=(root)  NOPASSWD: /usr/lpp/corebank/bin/run_nightly.ksh
+svcbatch        ALL=(root)  NOPASSWD: /opt/corebank/bin/run_nightly.ksh
 # contractor - broad access, flagged by audit for removal after 06/30
 contract1       ALL=(ALL) NOPASSWD: ALL
 
@@ -360,7 +366,7 @@ EOF
 
     # AIX has no crontab -l for other users here; spool files are the source.
     cat > "$R/var/spool/cron/crontabs/root" <<'EOF'
-0 2 * * * /usr/lpp/corebank/bin/eod_settlement.ksh >/var/log/corebank/eod.log 2>&1
+0 2 * * * /opt/corebank/bin/eod_settlement.ksh >/var/log/corebank/eod.log 2>&1
 30 3 * * * /usr/sbin/mksysb -i /backup/mksysb.img
 0 5 * * 1 /usr/local/sbin/user_recert.ksh
 EOF
@@ -368,7 +374,7 @@ EOF
 0 1 * * * /home/db2inst1/scripts/db2_backup.ksh online
 0 */6 * * * /home/db2inst1/scripts/db2_archive.ksh
 EOF
-    printf '15 0 * * * /usr/lpp/corebank/bin/run_nightly.ksh\n' > "$R/var/spool/cron/crontabs/svcbatch"
+    printf '15 0 * * * /opt/corebank/bin/run_nightly.ksh\n' > "$R/var/spool/cron/crontabs/svcbatch"
 
     cat > "$R/etc/syslog.conf" <<'EOF'
 # Default AIX routing: everything, including auth and authpriv, lands in the
@@ -420,7 +426,7 @@ secldapclntd:2:once:/usr/bin/startsrc -s secldapclntd > /dev/console 2>&1
 xntpd:2:once:/usr/bin/startsrc -s xntpd > /dev/console 2>&1
 qdaemon:23456789:wait:/usr/bin/startsrc -sqdaemon
 cron:23456789:respawn:/usr/sbin/cron
-corebank:2:once:/usr/lpp/corebank/bin/start_listener.ksh > /dev/console 2>&1
+corebank:2:once:/opt/corebank/bin/start_listener.ksh > /dev/console 2>&1
 EOF
 
     cat > "$R/etc/motd" <<'EOF'
@@ -461,17 +467,17 @@ EOF
 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCjuliaBanksAIXAdminKeyRotated2024Q2 jbanks@admin-jump
 EOF
     cat > "$R/home/svcbatch/.ssh/authorized_keys" <<'EOF'
-command="/usr/lpp/corebank/bin/run_nightly.ksh",no-pty ssh-rsa AAAAB3NzaC1yc2EAAAABatchSchedulerKeyFromControlM svcbatch@ctrlm
+command="/opt/corebank/bin/run_nightly.ksh",no-pty ssh-rsa AAAAB3NzaC1yc2EAAAABatchSchedulerKeyFromControlM svcbatch@ctrlm
 EOF
     chmod 600 "$R/home/jbanks/.ssh/authorized_keys" "$R/home/svcbatch/.ssh/authorized_keys"
 
-    mkdir -p "$R/usr/lpp/corebank/bin" "$R/usr/lpp/corebank/cfg" \
-             "$R/usr/lpp/corebank/log" "$R/var/log/corebank"
-    printf '#!/usr/bin/ksh\n# Core banking nightly batch\nexit 0\n' > "$R/usr/lpp/corebank/bin/run_nightly.ksh"
-    chmod 755 "$R/usr/lpp/corebank/bin/run_nightly.ksh"
-    printf 'env=PROD\ndb=DB2:COREPRD\n' > "$R/usr/lpp/corebank/cfg/corebank.cfg"
-    : > "$R/usr/lpp/corebank/bin/setid_helper"
-    chmod 4755 "$R/usr/lpp/corebank/bin/setid_helper"
+    mkdir -p "$R/opt/corebank/bin" "$R/opt/corebank/cfg" \
+             "$R/opt/corebank/log" "$R/var/log/corebank"
+    printf '#!/usr/bin/ksh\n# Core banking nightly batch\nexit 0\n' > "$R/opt/corebank/bin/run_nightly.ksh"
+    chmod 755 "$R/opt/corebank/bin/run_nightly.ksh"
+    printf 'env=PROD\ndb=DB2:COREPRD\n' > "$R/opt/corebank/cfg/corebank.cfg"
+    : > "$R/opt/corebank/bin/setid_helper"
+    chmod 4755 "$R/opt/corebank/bin/setid_helper"
 
     # AIX records su history at /var/adm/sulog (SULOG in /etc/default/su), not
     # /var/log/sulog. The RHEL fixture covers the /var/log/sulog location.
@@ -502,7 +508,7 @@ Filesystem    1024-blocks      Used      Free %Used Mounted on
 /dev/hd2         10485760   7340032   3145728   70% /usr
 /dev/hd9var       4194304   2621440   1572864   63% /var
 /dev/hd3          2097152    524288   1572864   25% /tmp
-/dev/corelv      52428800  36700160  15728640   70% /usr/lpp/corebank
+/dev/corelv      52428800  36700160  15728640   70% /opt/corebank
 /dev/db2lv      209715200 146800640  62914560   70% /home/db2inst1
 /dev/auditlv     10485760   5242880   5242880   50% /audit
 EOF
@@ -524,7 +530,7 @@ EOF
 /usr/sbin/sendmail
 /usr/bin/rlogin
 /usr/bin/rsh
-/usr/lpp/corebank/bin/setid_helper
+/opt/corebank/bin/setid_helper
 EOF
     cat > "$R/etc/.sim_setgid" <<'EOF'
 /usr/bin/ipcs
@@ -557,6 +563,17 @@ verify_os() {
     else
         sim_fail "/etc/inittab not delivered in raw_files/"
     fi
+
+    # The application tree must ACTUALLY have been listed. This fixture's app dir
+    # was silently absent for every prior run (shadowed by the /usr bind), and no
+    # assertion noticed; this one closes that hole.
+    sim_check
+    if grep -q '^APP_DIR_LISTED|/opt/corebank' "$MANIFEST" 2>/dev/null; then
+        sim_pass "application directory listing genuinely ran against /opt/corebank"
+    else
+        sim_fail "no APP_DIR_LISTED manifest entry for /opt/corebank; the app tree was not visible in the fixture"
+    fi
+    assert_report_matches 'run_nightly\.ksh' 'application tree contents appear in the report listing'
 
     # su history lives at /var/adm/sulog on AIX, so Section 6 must find it there.
     assert_report_matches 'File: /var/adm/sulog' 'su history located at the AIX path'

@@ -592,6 +592,7 @@ close_log_addendum() {
     if [ "$LOG_READY" != "yes" ] || [ -z "$LOG_FILE" ]; then
         return
     fi
+    recount_log_levels
     {
         printf '\n'
         printf 'ARCHIVE_RESULT: %s\n' "$ARCHIVE_STATUS"
@@ -605,8 +606,31 @@ close_log_addendum() {
     } >> "$LOG_FILE" 2>/dev/null
 }
 
+# Recompute the WARN and ERROR tallies from the log file itself.
+#
+# The in-memory counters undercount, and the reason is structural: log_event runs
+# inside pipeline subshells - the "printf | while read" loops that walk section
+# file lists and the --app-dir validation - and a counter incremented in a
+# subshell is lost when that subshell exits. The log LINE is not lost, because it
+# is appended directly to the file. So the file is the authoritative record, and
+# every verdict and count is derived from it; the in-memory counters remain only
+# as a fallback for the case where no log file could be created at all.
+#
+# The grep patterns match the padded column layout log_event writes
+# (" | WARN  | ", " | ERROR | ") and cannot match the prose in the header or
+# summary, which never carries the surrounding pipe columns.
+recount_log_levels() {
+    if [ "$LOG_READY" = "yes" ] && [ -f "$LOG_FILE" ]; then
+        LOG_WARN_COUNT=`grep -c ' | WARN  | ' "$LOG_FILE" 2>/dev/null`
+        [ -n "$LOG_WARN_COUNT" ] || LOG_WARN_COUNT=0
+        LOG_ERROR_COUNT=`grep -c ' | ERROR | ' "$LOG_FILE" 2>/dev/null`
+        [ -n "$LOG_ERROR_COUNT" ] || LOG_ERROR_COUNT=0
+    fi
+}
+
 # Overall verdict for the run, as a single stable token.
 collection_log_result() {
+    recount_log_levels
     if [ "$COLLECTION_STATUS" != "ready" ]; then
         printf 'FAILED'
     elif [ "$LOG_ERROR_COUNT" -gt 0 ]; then
@@ -648,6 +672,7 @@ finalize_collection_log() {
         return
     fi
 
+    recount_log_levels
     _log_result=`collection_log_result`
     _log_meaning=`collection_log_result_meaning "$_log_result"`
     _log_files_collected=0
