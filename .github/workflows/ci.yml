@@ -79,3 +79,28 @@ jobs:
       # Safe here because the runner is ephemeral and the test restores /etc.
       - name: Run collector and inspect the evidence package
         run: sudo sh tests/test-no-credential-leak.sh
+
+  multi-os-simulation:
+    name: Multi-OS simulation (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [rhel, opensuse, aix, hpux]
+    steps:
+      - uses: actions/checkout@v4
+      # Runs the collector against a themed chroot for each target OS. AIX and
+      # HP-UX cannot boot on x86, so those fixtures simulate the file and
+      # command layer to exercise their code paths - which is how the AIX
+      # password-hash leak was found. See tests/simulations/README.md.
+      - name: Simulate ${{ matrix.platform }} and verify the evidence package
+        run: sudo sh tests/simulations/os_${{ matrix.platform }}.sh
+
+      - name: Upload evidence package on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ matrix.platform }}
+          path: /tmp/sox-itgc-sim/out/${{ matrix.platform }}
+          retention-days: 7
+          if-no-files-found: ignore

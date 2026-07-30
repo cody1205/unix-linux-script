@@ -42,8 +42,9 @@ their metadata and a safe summary instead, and logs them as
 ## Tests
 
 ```sh
-sh tests/test-sensitive-paths.sh          # no root needed
-sudo sh tests/test-no-credential-leak.sh  # runs a real collection
+sh tests/test-sensitive-paths.sh           # no root needed
+sudo sh tests/test-no-credential-leak.sh   # runs a real collection
+sudo sh tests/simulations/run-all.sh       # all four simulated platforms
 ```
 
 - **`test-sensitive-paths.sh`** asserts the `is_sensitive_path()` classification
@@ -57,5 +58,17 @@ sudo sh tests/test-no-credential-leak.sh  # runs a real collection
   manifest claims a `COPIED` file that is not present. It restores `/etc` on
   exit and is intended for ephemeral CI runners.
 
-CI (`.github/workflows/ci.yml`) runs both tests plus `sh`/`dash`/`bash` parse
-checks, `checkbashisms`, and advisory ShellCheck on every push and pull request.
+### Multi-OS simulation
+
+`tests/simulations/` runs the collector against four themed "lived-in" servers —
+RHEL 8 (SSSD/LDAP+Kerberos), openSUSE Leap 15.6 (AD via winbind), AIX 7.2
+(`SYSTEM=LDAP`), and HP-UX 11i v3 (PAM + LDAP-UX) — and asserts what lands in
+the evidence package. AIX and HP-UX cannot boot on x86, so those are
+file- and command-layer simulations of their code paths; the two Linux fixtures
+run for real. This is how the AIX password-hash leak was found. See
+[`tests/simulations/README.md`](tests/simulations/README.md) for fidelity
+caveats and how to add a platform.
+
+CI (`.github/workflows/ci.yml`) runs both unit tests, all four simulations in
+parallel, plus `sh`/`dash`/`bash` parse checks, `checkbashisms`, and advisory
+ShellCheck on every push and pull request.
