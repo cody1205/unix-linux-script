@@ -561,6 +561,50 @@ initialize_collection_log() {
     return 0
 }
 
+# The archive is created after the log is closed, so nothing about it can appear
+# in the summary above, and none of it can appear inside the archived copy of this
+# log at all - an archive cannot record whether it was created.
+#
+# The addendum is opened BEFORE the archive is built so that everything the
+# archive step reports lands beneath its heading rather than loose under the
+# summary, and closed afterwards with the outcome and the final counts. This
+# matters beyond tidiness: an archive failure raises an ERROR after the verdict
+# has already been written, so without the addendum the log could read
+# "COMPLETED_CLEAN" with an error logged underneath it. The closing counts here
+# are the ones that account for the archive.
+open_log_addendum() {
+    if [ "$LOG_READY" != "yes" ] || [ -z "$LOG_FILE" ]; then
+        return
+    fi
+    {
+        printf '\n'
+        printf '%s\n' '---------------------------------------------------------------'
+        printf 'ADDENDUM: the archive step, which runs after the log is closed\n'
+        printf '%s\n' '---------------------------------------------------------------'
+        printf 'This section is absent from the copy of this log inside the archive,\n'
+        printf 'because the archive was already sealed when it was written. The\n'
+        printf 'RESULT above covers the collection; the archive outcome is below.\n'
+        printf '\n'
+    } >> "$LOG_FILE" 2>/dev/null
+}
+
+close_log_addendum() {
+    if [ "$LOG_READY" != "yes" ] || [ -z "$LOG_FILE" ]; then
+        return
+    fi
+    {
+        printf '\n'
+        printf 'ARCHIVE_RESULT: %s\n' "$ARCHIVE_STATUS"
+        printf 'ARCHIVE_FILE: %s\n' "${ARCHIVE_FILE:-none}"
+        printf 'FINAL_ERRORS: %s\n' "$LOG_ERROR_COUNT"
+        printf 'FINAL_WARNINGS: %s\n' "$LOG_WARN_COUNT"
+        printf 'FINAL_RESULT: %s\n' "`collection_log_result`"
+        printf '\n'
+        printf 'FINAL_RESULT supersedes the RESULT above when they differ, which\n'
+        printf 'happens only when the archive step itself reported a problem.\n'
+    } >> "$LOG_FILE" 2>/dev/null
+}
+
 # Overall verdict for the run, as a single stable token.
 collection_log_result() {
     if [ "$COLLECTION_STATUS" != "ready" ]; then
@@ -627,7 +671,8 @@ finalize_collection_log() {
         printf 'STARTED: %s\n' "$TIMESTAMP"
         printf 'FINISHED: %s\n' "`log_timestamp`"
         printf 'OUTPUT_DIRECTORY: %s\n' "$COLLECTION_DIRECTORY"
-        printf 'ARCHIVE: %s\n' "${ARCHIVE_FILE:-none}"
+        printf 'ARCHIVE_PLANNED: %s\n' "$WORKING_DIRECTORY/$ARCHIVE_BASE_NAME"
+        printf 'ARCHIVE_RESULT: reported in the addendum below, if present\n'
         printf 'CONFIGURATION_CHANGES_MADE: none\n'
         printf '\n'
         printf 'What this means\n'
@@ -3086,7 +3131,8 @@ printf 'Behavior: report file plus local evidence packaging\n'
 printf 'Output directory: %s\n' "$WORKING_DIRECTORY"
 printf 'Files created in output directory: %s\n' "$COLLECTION_DIRECTORY"
 printf 'Collection directory status: %s\n' "$COLLECTION_STATUS"
-printf 'Archive file (planned): %s\n' "$WORKING_DIRECTORY/$ARCHIVE_BASE_NAME.tar.gz"
+printf 'Archive file (planned): %s.tar.gz\n' "$WORKING_DIRECTORY/$ARCHIVE_BASE_NAME"
+printf '  (or .tar if gzip is unavailable on this host)\n'
 printf 'Archive note: the archive is created after this report and the collection\n'
 printf '  log are finalized, so that both are complete inside it. An archive cannot\n'
 printf '  record the outcome of its own creation; that result is printed on the\n'
@@ -3137,15 +3183,18 @@ record_manifest_line "COLLECTION_LOG|${LOG_FILE:-not created}"
 #
 # Permissions and ownership are also applied before archiving, because the modes
 # recorded inside a tar are the modes the recipient gets.
-finalize_collection_log
 write_handling_instructions
 normalize_package_permissions
 apply_ownership_to_evidence
+
+# The summary block closes the log, so everything that has something to report
+# must have run by now. Only the archive follows, and it appends an addendum.
+finalize_collection_log
+
+open_log_addendum
 create_collection_archive
 apply_ownership_to_archive
-
-# The archive result cannot be inside the archive, so it goes to the on-disk log.
-log_event INFO archive "archive status: $ARCHIVE_STATUS"
+close_log_addendum
 
 if [ -r "$REPORT_FILE" ]; then
     cat "$REPORT_FILE" >&3
