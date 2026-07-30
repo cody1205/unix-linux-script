@@ -421,8 +421,8 @@ EOF
 /usr/sbin/lpsched
 EOF
 
-    # HP-UX writes su history to /var/adm/sulog, which the collector does not
-    # check (it looks only at /var/log/sulog) - a known portability gap.
+    # HP-UX writes su history to /var/adm/sulog, so this fixture covers that
+    # location while the RHEL fixture covers /var/log/sulog.
     cat > "$R/var/adm/sulog" <<'EOF'
 SU 06/16 08:15 + pts/0 awright-root
 SU 06/15 22:40 - pts/3 gmoore-root
@@ -451,6 +451,9 @@ verify_os() {
     assert_report_matches 'Service account UID threshold: 100' 'HP-UX service-account cutoff applied'
     # No getent on HP-UX: the collector must still resolve accounts from files.
     assert_report_matches '^root$' 'UID 0 account resolved without getent'
+    # HP-UX records su history at /var/adm/sulog.
+    assert_report_matches 'File: /var/adm/sulog' 'su history located at the HP-UX path'
+    assert_report_matches 'awright-root' 'su events captured'
 
     sim_check
     if grep -q '^/etc/shadow$' "$SKIPPED" 2>/dev/null; then
