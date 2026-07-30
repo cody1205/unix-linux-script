@@ -95,16 +95,18 @@ sim_teardown() {
     [ -d "$_r" ] || return 0
 
     umount -R "$_r" 2>/dev/null || true
-    # Deepest-first second pass for anything umount -R could not detach.
-    awk -v r="$_r/" 'index($2, r) == 1 { print $2 }' /proc/mounts 2>/dev/null \
+    # Deepest-first second pass for anything umount -R could not detach. The
+    # fixture root is itself a mount point (see sim_mount_all), so match both the
+    # exact path and everything below it.
+    awk -v r="$_r" -v rs="$_r/" '$2 == r || index($2, rs) == 1 { print $2 }' /proc/mounts 2>/dev/null \
         | sort -r \
         | while read -r _m; do
             umount -l "$_m" 2>/dev/null || true
         done
 
-    if awk -v r="$_r/" 'index($2, r) == 1 { f = 1 } END { exit !f }' /proc/mounts 2>/dev/null; then
+    if awk -v r="$_r" -v rs="$_r/" '$2 == r || index($2, rs) == 1 { f = 1 } END { exit !f }' /proc/mounts 2>/dev/null; then
         printf 'REFUSING to remove %s - mounts still present:\n' "$_r" >&2
-        awk -v r="$_r/" 'index($2, r) == 1 { print "    " $2 }' /proc/mounts >&2
+        awk -v r="$_r" -v rs="$_r/" '$2 == r || index($2, rs) == 1 { print "    " $2 }' /proc/mounts >&2
         return 1
     fi
 
@@ -185,16 +187,33 @@ EOF
 }
 
 sim_mount_all() {
+    # Make the fixture root a mount point of its own, then pull in the host paths
+    # the chroot needs.
+    mount --bind "$R" "$R"
+
     mount --bind /usr "$R/usr"
     mount -o remount,bind,ro "$R/usr" 2>/dev/null || true
-    # Shims shadow /usr/sbin, which the collector's fixed PATH searches first.
-    mount --bind "$RSHIMS" "$R/usr/sbin"
     mount --bind /dev "$R/dev"
     # The host reaches awk and friends through /etc/alternatives symlinks. The
     # themed /etc replaces the host's, so without this bind those symlinks
     # dangle and every awk-based section silently reports "no entries found".
     mount --bind /etc/alternatives "$R/etc/alternatives"
     mount -o remount,bind,ro "$R/etc/alternatives" 2>/dev/null || true
+
+    # Sever the fixture from host mount propagation before mounting anything
+    # INSIDE it. This is load-bearing, and the ordering is the subtle part: a
+    # bind mount inherits its SOURCE's peer group, so $R/usr arrived shared with
+    # the host's /usr even though $R itself is private. Mounting the shims onto
+    # $R/usr/sbin would then propagate back out and shadow the real /usr/sbin,
+    # stripping the host of every binary there - including chroot, which is why
+    # this failed on systemd hosts and GitHub runners with "chroot: not found"
+    # while passing in containers where / is private. Recursively marking the
+    # subtree private after the host binds, and before the shim binds, confines
+    # everything below to this fixture.
+    mount --make-rprivate "$R"
+
+    # Shims shadow /usr/sbin, which the collector's fixed PATH searches first.
+    mount --bind "$RSHIMS" "$R/usr/sbin"
 
     # Make commands that this OS does not ship appear absent.
     for _c in $BLOCKERS; do
