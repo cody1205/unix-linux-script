@@ -1,0 +1,81 @@
+name: CI
+
+# The collector runs as root on client production systems and hands its output
+# to external auditors, so CI focuses on the two properties that matter most:
+#   - it stays portable POSIX sh (it must run on Linux, AIX, Solaris, HP-UX)
+#   - it never ships credential material in the evidence package
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Syntax and portability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Parse under several shells. dash is the strictest common POSIX sh and
+      # catches bashisms that would break on AIX ksh or Solaris /bin/sh.
+      - name: Parse with sh, dash, and bash
+        run: |
+          for shell in sh dash bash; do
+            printf '== %s -n ==\n' "$shell"
+            "$shell" -n linux-unix-evidence-gathering-script.sh
+          done
+          for t in tests/*.sh; do
+            printf '== dash -n %s ==\n' "$t"
+            dash -n "$t"
+          done
+
+      - name: Flag bashisms
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq devscripts
+          checkbashisms linux-unix-evidence-gathering-script.sh tests/*.sh
+
+      - name: ShellCheck (advisory)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -s sh linux-unix-evidence-gathering-script.sh tests/*.sh
+
+      - name: Help and dry-run must not fail
+        run: |
+          sh linux-unix-evidence-gathering-script.sh --help >/dev/null
+          sh linux-unix-evidence-gathering-script.sh --dry-run \
+            --output-dir "$RUNNER_TEMP/dryrun" </dev/null >/dev/null
+          test -s "$RUNNER_TEMP/dryrun/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+
+      - name: Reject unknown options
+        run: |
+          if sh linux-unix-evidence-gathering-script.sh --not-a-real-flag >/dev/null 2>&1; then
+            echo "expected a non-zero exit for an unknown option" >&2
+            exit 1
+          fi
+
+  sensitive-paths:
+    name: Sensitive-path classification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Hermetic: checks AIX and HP-UX paths even though CI runs on Linux, so a
+      # platform-specific hash store cannot regress unnoticed.
+      - name: Assert credential stores are protected
+        run: sh tests/test-sensitive-paths.sh
+
+  credential-leak:
+    name: End-to-end credential leak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Plants sentinel credentials, runs a real collection as root, and fails
+      # if anything sensitive reaches raw_files/ or the manifest overclaims.
+      # Safe here because the runner is ephemeral and the test restores /etc.
+      - name: Run collector and inspect the evidence package
+        run: sudo sh tests/test-no-credential-leak.sh
