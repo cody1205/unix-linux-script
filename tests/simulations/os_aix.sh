@@ -567,6 +567,18 @@ verify_os() {
     assert_report_matches 'sampling general syslog /var/adm/messages' 'general syslog fallback used as last resort'
     assert_report_matches 'Accepted publickey for svcbatch' 'authentication events captured from general syslog'
 
+    # Section 10 on a clean host: no world-writable findings, but the scan limits
+    # and the sticky-bit verification must still be reported rather than omitted,
+    # so a reviewer can tell a clean result from a scan that did not run.
+    assert_report_matches 'Filesystem boundary: not crossed' 'scan limits disclosed even with no findings'
+    assert_report_matches 'Sticky bit: present \(expected\)' 'sticky bit verified on shared temp directories'
+    sim_check
+    if awk '/^10\. World-Writable/{f=1} f&&/World-Writable Files:/{g=1;next} g{print;exit}' "$REPORT" 2>/dev/null | grep -q 'no entries found'; then
+        sim_pass "clean host reports no world-writable files"
+    else
+        sim_fail "expected 'no entries found' for world-writable files on this host"
+    fi
+
     # The regression this fixture exists to catch.
     sim_check
     if grep -q '^/etc/security/passwd$' "$SKIPPED" 2>/dev/null; then

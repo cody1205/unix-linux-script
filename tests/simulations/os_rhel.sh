@@ -12,7 +12,7 @@ UNAME_R=4.18.0-553.16.1.el8_10.x86_64
 UNAME_V='#1 SMP Thu Jun 20 12:38:14 EDT 2024'
 UNAME_M=x86_64
 NODENAME=rhel-fin-app01.corp.acmefinancial.com
-APPDIR=/opt/finapp
+APPDIR="/srv/Finance App"
 BLOCKERS=""
 
 write_os_shims() {
@@ -482,6 +482,11 @@ EOF
 
     mkdir -p "$R/opt/finapp/bin" "$R/opt/finapp/conf" "$R/opt/finapp/logs" \
              "$R/opt/finapp/lib" "$R/var/log/finapp"
+    # An application root whose path contains a space, deliberately outside the
+    # standard scanned paths so it is reachable ONLY as an --app-dir root. If the
+    # roots are ever word-split again, find gets "/srv/Finance" and "App", scans
+    # neither, and the report shows a clean result for a tree it never examined.
+    mkdir -p "$R/srv/Finance App/bin"
     printf '#!/bin/bash\n# FinApp deploy hook\nexit 0\n' > "$R/opt/finapp/bin/deploy.sh"
     chmod 755 "$R/opt/finapp/bin/deploy.sh"
     printf 'app.env=PROD\ndb.url=jdbc:oracle:thin:@db01:1521/FINPDB\n' > "$R/opt/finapp/conf/app.properties"
@@ -521,6 +526,25 @@ EOF
 /usr/bin/ssh-agent
 /usr/sbin/postdrop
 EOF
+    # The finding that matters most: nightly-close.sh is executed by the
+    # svc_deploy cron job in /etc/cron.d/finapp-batch AND is world-writable, so
+    # any account on the host can alter what that scheduled job runs. Section 10
+    # must surface it so it can be cross-referenced against the cron evidence.
+    chmod 0777 "$R/opt/finapp/bin/nightly-close.sh" 2>/dev/null || \
+        { printf '#!/bin/bash\nexit 0\n' > "$R/opt/finapp/bin/nightly-close.sh"; chmod 0777 "$R/opt/finapp/bin/nightly-close.sh"; }
+    chmod 0777 "$R/opt/finapp/logs"
+    printf '#!/bin/sh\nexit 0\n' > "$R/srv/Finance App/bin/rating.sh"
+    chmod 0666 "$R/srv/Finance App/bin/rating.sh"
+    cat > "$R/etc/.sim_ww_files" <<'EOF'
+/opt/finapp/bin/nightly-close.sh
+/etc/finapp-shared.conf
+/srv/Finance App/bin/rating.sh
+EOF
+    cat > "$R/etc/.sim_ww_dirs" <<'EOF'
+/opt/finapp/logs
+EOF
+    printf 'shared.mode=rw\n' > "$R/etc/finapp-shared.conf"
+    chmod 0666 "$R/etc/finapp-shared.conf"
 
     cat > "$R/var/log/secure" <<'EOF'
 Jun 16 14:02:11 rhel-fin-app01 sshd[20441]: Accepted publickey for jdoe from 10.20.4.15 port 51122 ssh2: ED25519 SHA256:abc123
@@ -552,6 +576,64 @@ verify_os() {
     assert_report_matches 'Command: ss -lntup' 'listener enumeration labelled'
     assert_report_matches 'PASS_MAX_DAYS   90' 'password aging policy captured'
     assert_report_matches 'Authorized key entries: 2' 'authorized_keys summarized not printed'
+
+    # Section 10: a world-writable script that a cron job executes is the finding
+    # this section exists for, and it must be cross-referenceable with Section 12.
+    assert_report_matches '/opt/finapp/bin/nightly-close\.sh' 'world-writable cron-executed script surfaced'
+    assert_report_matches '/opt/finapp/logs' 'world-writable directory without sticky bit surfaced'
+    assert_report_matches 'Sticky bit: present \(expected\)' 'sticky bit verified on shared temp directories'
+    assert_report_matches 'Filesystem boundary: not crossed' 'scan limits disclosed in the report'
+    # Both filesystem-walking scans must disclose the boundary, not just Section 10.
+    sim_check
+    _boundary_disclosures=`grep -c 'Filesystem boundary: not crossed' "$REPORT" 2>/dev/null`
+    if [ "${_boundary_disclosures:-0}" -ge 2 ]; then
+        sim_pass "both world-writable and SetUID scans disclose the boundary"
+    else
+        sim_fail "expected boundary disclosure in both scan sections, found ${_boundary_disclosures:-0}"
+    fi
+    # The operator-supplied application root is scanned in its own right, which is
+    # what stops -xdev skipping an application tree that sits on its own mount.
+    # An application root containing a space must survive as one argument. If the
+    # roots are word-split again, find gets "/srv/Finance" and "App" and this tree
+    # is silently skipped while the report still lists it.
+    # The scan root must reach find as ONE argument. Asserted against the
+    # arguments find was actually invoked with, not against the report text: the
+    # report prints the roots from the same list, so a report-only check would
+    # pass even while find received two nonexistent paths.
+    sim_check
+    if grep -qx '/srv/Finance App' "$FIND_ARGV" 2>/dev/null; then
+        sim_pass "app root containing a space reached find as a single argument"
+    else
+        sim_fail "app root was split before reaching find; got: `tr '\n' ' ' < "$FIND_ARGV" 2>/dev/null`"
+    fi
+    # The word-split artefact must not appear anywhere in the report either.
+    sim_check
+    if grep -qE '^  App$|^  /srv/Finance$' "$REPORT" 2>/dev/null; then
+        sim_fail "scan scope shows a word-split path fragment"
+    else
+        sim_pass "no word-split path fragments in the scan scope"
+    fi
+    assert_report_matches '/srv/Finance App/bin/rating\.sh' 'world-writable file inside the spaced app root found'
+    # The same script must also appear as a scheduled job, so the two sections can
+    # be joined during the review.
+    assert_report_matches 'svc_deploy  /opt/finapp/bin/nightly-close\.sh' 'cron job referencing that script captured'
+    # Under the cap the manifest must state an exact count and say so. The
+    # over-cap case must never report the probe count as if it were the true
+    # population; that is asserted by the wording checked here staying accurate.
+    sim_check
+    if grep -q 'WORLD_WRITABLE_SCAN|files|.*|truncated=no' "$MANIFEST" 2>/dev/null; then
+        sim_pass "world-writable tally records whether the list was truncated"
+    else
+        sim_fail "world-writable manifest entry does not record truncation state"
+    fi
+
+    # Metadata only: the contents of a world-writable file must never be copied.
+    sim_check
+    if [ -f "$E/raw_files/opt/finapp/bin/nightly-close.sh" ]; then
+        sim_fail "world-writable file contents copied into raw_files/"
+    else
+        sim_pass "world-writable file contents not copied"
+    fi
     # /etc/shadow must be withheld
     sim_check
     if grep -q '^/etc/shadow$' "$SKIPPED" 2>/dev/null; then

@@ -39,6 +39,34 @@ keytabs, LDAP bind secrets) are never printed or copied. The script records
 their metadata and a safe summary instead, and logs them as
 `SENSITIVE_METADATA_ONLY`.
 
+## Impact on the target host
+
+The script is read-only: it does not create, modify, delete, enable, disable,
+restart, or reconfigure anything on the host. Everything else is effectively
+instantaneous, but three sections walk the filesystem and carry a real runtime
+cost. Each announces itself and reports its elapsed time on the operator's
+terminal, and records start and end timestamps in the report and manifest.
+
+| Section | Cost | Bounded how |
+| --- | --- | --- |
+| 10 — world-writable | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per category |
+| 11 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev` |
+| 23 — application directory listing | **unbounded**; only runs when `--app-dir` is given | not capped and not `-xdev`; the operator chooses the roots |
+
+Sections 10 and 11 are pruned to system binary, system configuration, and
+application installation paths rather than scanning whole filesystems, and both
+use `find -xdev` so they cannot descend into NFS or SAN mounts and place load on
+a remote filer. Both state their scope and limits in the report, so a reviewer
+can see the bound on the evidence rather than assuming the population is
+complete.
+
+Section 23 is the one to watch on a large estate. It is opt-in, but when a root
+is supplied it recursively lists **every** file beneath it with no cap and
+without stopping at filesystem boundaries, so a root that is network-mounted or
+holds millions of files will be slow and will produce a correspondingly large
+report. That is intentional — the operator named the directory and the listing is
+the evidence — but it should be a considered choice rather than a surprise.
+
 ## Tests
 
 ```sh

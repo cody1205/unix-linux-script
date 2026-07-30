@@ -266,6 +266,90 @@ no_entries_found() {
     printf 'no entries found\n'
 }
 
+# Scan timing and operator feedback:
+#
+# Most of this collection is instantaneous file reads, but the sections that walk
+# the filesystem (world-writable, SetUID/SetGID, and the recursive application
+# directory listing) can each run for minutes on a large host. Two different
+# audiences need to know about that.
+#
+# The operator running the script needs to see that it is still working. Without
+# any output, several minutes of silence looks like a hang, and the reasonable
+# reaction to a hung script on a production box is to interrupt it. Progress
+# messages are therefore written to the operator's terminal on file descriptor 3,
+# which holds the original stdout while the report itself is being written to the
+# report file. A progress bar is deliberately not used: find produces no
+# incremental output to derive progress from, so any bar would be decorative, and
+# terminal control codes would corrupt the output of a non-interactive run.
+#
+# The reviewer reading the evidence needs the timings recorded in the package
+# itself. Start and end wall-clock times let the collection be correlated against
+# the client's own monitoring and change records, which is the answer to "what was
+# this script doing on our server for five minutes".
+#
+# Portability: date +%s is not in POSIX and is missing on older HP-UX and some AIX
+# builds, so elapsed seconds cannot always be computed. Wall-clock start and end
+# times are therefore always recorded using plain date, which is universally
+# available, and a computed elapsed time is added only where the platform
+# supports it. For audit purposes the timestamps are the more useful of the two
+# anyway.
+SCAN_TIMING_SUMMARY=""
+SCAN_TIMER_LABEL=""
+SCAN_TIMER_START_WALL=""
+SCAN_TIMER_START_EPOCH=""
+
+# Epoch seconds when the platform supports it, empty string when it does not.
+epoch_seconds() {
+    _epoch_value=`date +%s 2>/dev/null`
+    case "$_epoch_value" in
+        ''|*[!0-9]*) printf '' ;;
+        *)           printf '%s' "$_epoch_value" ;;
+    esac
+}
+
+format_elapsed() {
+    _elapsed_secs=${1:-}
+    if [ -z "$_elapsed_secs" ]; then
+        printf 'not available on this platform'
+        return
+    fi
+    printf '%sm%02ds' "`expr "$_elapsed_secs" / 60`" "`expr "$_elapsed_secs" % 60`"
+}
+
+# Announce a long-running scan on the operator's terminal and start the clock.
+scan_timer_start() {
+    SCAN_TIMER_LABEL=$1
+    SCAN_TIMER_START_WALL=`date 2>/dev/null || echo unknown`
+    SCAN_TIMER_START_EPOCH=`epoch_seconds`
+    printf '  %s ...\n' "$SCAN_TIMER_LABEL" >&3 2>/dev/null || :
+}
+
+# Close the clock: report to the operator, into the report, and into the manifest.
+scan_timer_end() {
+    _timer_section=$1
+    _timer_end_wall=`date 2>/dev/null || echo unknown`
+    _timer_end_epoch=`epoch_seconds`
+
+    _timer_elapsed=""
+    if [ -n "$SCAN_TIMER_START_EPOCH" ] && [ -n "$_timer_end_epoch" ]; then
+        _timer_elapsed=`expr "$_timer_end_epoch" - "$SCAN_TIMER_START_EPOCH" 2>/dev/null`
+    fi
+    _timer_elapsed_text=`format_elapsed "$_timer_elapsed"`
+
+    printf '    completed in %s\n' "$_timer_elapsed_text" >&3 2>/dev/null || :
+
+    blank_line
+    subsection "Scan Timing:"
+    printf 'Started:   %s\n' "$SCAN_TIMER_START_WALL"
+    printf 'Completed: %s\n' "$_timer_end_wall"
+    printf 'Elapsed:   %s\n' "$_timer_elapsed_text"
+
+    record_manifest_line "TIMING|section=$_timer_section|started=$SCAN_TIMER_START_WALL|completed=$_timer_end_wall|elapsed=$_timer_elapsed_text"
+
+    SCAN_TIMING_SUMMARY="$SCAN_TIMING_SUMMARY
+  Section $_timer_section: $_timer_elapsed_text ($SCAN_TIMER_START_WALL to $_timer_end_wall)"
+}
+
 # Usage text distinguishes full collection from dry-run testing so the client
 # can decide which execution mode is appropriate for the review activity.
 print_usage() {
@@ -1109,38 +1193,321 @@ print_recent_login_activity() {
     fi
 }
 
+# World-writable file and directory review:
+#
+# Why this matters for the audit:
+# A world-writable file can be modified by any account on the host. Two control
+# failures follow from that. If the file is a script or binary executed by a
+# privileged account (from cron, from a startup script, or through a sudo rule),
+# any user can obtain privileged execution, which defeats the restriction of
+# administrative access. If the file is application configuration or data in
+# financial-reporting scope, unauthorized modification of that data is possible,
+# which defeats the integrity of the reported figures. The findings here are
+# intended to be read together with the cron evidence in Sections 12 and 21, the
+# startup evidence in Section 16, and the sudo evidence in Section 4, so a
+# reviewer can determine whether anything privileged actually executes a
+# world-writable path.
+#
+# Why the scan is scoped rather than filesystem-wide:
+# This script runs on live client production systems, and an unbounded scan is
+# the one part of the collection that could plausibly affect service. A find
+# across a whole root filesystem on a host with large data volumes can run for a
+# very long time and generate sustained metadata I/O while it does. The scan is
+# therefore restricted to the directories where world-write is a genuine control
+# failure - system binaries, system configuration, and application install roots
+# - and skips data volumes entirely. This mirrors the pruning already applied to
+# the SetUID scan below.
+#
+# Why -xdev is used, and what it costs:
+# -xdev stops find at filesystem boundaries. Without it the scan can descend into
+# NFS or SAN mounts that happen to live under a scoped path, which pushes load
+# onto a remote filer, can stall on an unresponsive mount, and can take an
+# unpredictable amount of time. That is an unacceptable risk on a production
+# host. The cost of -xdev is that a separately mounted subdirectory beneath a
+# scoped path is not traversed, so the population can under-report. That trade is
+# made deliberately in favour of not disturbing the client, and the report
+# discloses the boundary explicitly so a reviewer knows the limit of the
+# evidence rather than assuming completeness.
+#
+# Why /tmp, /var/tmp, and /dev/shm are excluded:
+# Those directories are world-writable by design. Listing their contents would
+# produce a large volume of expected findings and bury the ones that matter. The
+# actual control on a shared temporary directory is the sticky bit, which stops
+# one user deleting or renaming another user's files, so the script verifies the
+# sticky bit on those directories instead of enumerating them.
+#
+# Why only metadata is recorded:
+# The script reports path, permissions, and ownership. It never prints or copies
+# the contents of a world-writable file. Contents are not needed to evidence the
+# control, and a world-writable file can hold anything, including client data
+# that has no business leaving the host inside an audit package.
+#
+# Output is capped, and the cap is disclosed when it is reached, because silent
+# truncation would make a host with thousands of findings look the same as a
+# clean one.
+WORLD_WRITABLE_MAX_ENTRIES=500
+readonly WORLD_WRITABLE_MAX_ENTRIES
+
+# Directories that are world-writable by design; the sticky bit is the control.
+world_writable_expected_shared_dirs() {
+    printf '/tmp\n/var/tmp\n/dev/shm\n/var/lock\n'
+}
+
+# Application installation roots supplied by the operator with --app-dir.
+#
+# These are always listed as scan roots in their own right, even when they sit
+# underneath a directory that is already being scanned such as /opt. That looks
+# redundant but it is required once -xdev is in use: find does not cross a
+# filesystem boundary, so if /opt/someapp is a separate mount, scanning /opt stops
+# at the boundary and never enters it. Naming the application root explicitly
+# makes find start inside that filesystem, so the tree the operator specifically
+# asked about is covered either way. Where the root is not a separate mount this
+# does traverse the same files twice, which is why the callers pass their results
+# through sort -u before reporting.
+operator_app_scan_roots() {
+    if [ -z "$APP_DIRECTORIES" ]; then
+        return
+    fi
+    printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r _app_scan_root; do
+        if [ -n "$_app_scan_root" ] && [ -d "$_app_scan_root" ]; then
+            printf '%s\n' "$_app_scan_root"
+        fi
+    done
+}
+
+# Scope of the SetUID/SetGID scan: binary paths, plus any application roots the
+# operator supplied. Emitted one per line so callers can split on newlines only.
+setuid_search_paths() {
+    for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
+        if [ -d "$candidate" ]; then
+            printf '%s\n' "$candidate"
+        fi
+    done
+    operator_app_scan_roots
+}
+
+# Scope of the world-writable scan: system binary and configuration paths, plus
+# any application roots the operator supplied.
+world_writable_search_paths() {
+    for candidate in /etc /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt; do
+        if [ -d "$candidate" ]; then
+            printf '%s\n' "$candidate"
+        fi
+    done
+    operator_app_scan_roots
+}
+
+print_world_writable_review() {
+    if ! command_exists find; then
+        not_available
+        return
+    fi
+
+    # The scan roots are held in the positional parameters rather than in a
+    # space-separated string, and IFS is narrowed to a newline while the list is
+    # split.
+    #
+    # This is not stylistic. An application root supplied with --app-dir can
+    # legitimately contain spaces, for example /srv/Finance App. Collecting the
+    # roots into one string and passing it to find unquoted lets the shell split
+    # it on spaces, so find receives /srv/Finance and App, neither of which
+    # exists, and silently scans neither. The report would still print the intact
+    # path under "Paths scanned" and show no findings, which reads as a clean
+    # result for a directory that was never examined - the worst possible
+    # outcome, and for exactly the tree the operator asked about. Holding the
+    # roots as separate arguments and expanding them as "$@" keeps each path
+    # whole. A path containing a newline is not supported.
+    _ww_saved_ifs=$IFS
+    IFS='
+'
+    set -- `world_writable_search_paths`
+    IFS=$_ww_saved_ifs
+
+    if [ "$#" -eq 0 ]; then
+        not_available
+        return
+    fi
+
+    subsection "Scan Scope and Limits:"
+    printf 'Paths scanned:\n'
+    for _ww_path in "$@"; do
+        printf '  %s\n' "$_ww_path"
+    done
+    printf 'Filesystem boundary: not crossed (find -xdev). Separately mounted\n'
+    printf '  subdirectories beneath the paths above are not traversed, so this\n'
+    printf '  population may under-report. This bound is deliberate: it prevents\n'
+    printf '  the scan from loading NFS or SAN mounts on a production host.\n'
+    printf 'Excluded by design: %s\n' "`world_writable_expected_shared_dirs | tr '\n' ' '`"
+    printf '  (world-writable by design; the sticky bit is verified below instead)\n'
+    printf 'Recorded per finding: path, permissions, ownership. File contents are\n'
+    printf '  never printed or copied into this evidence package.\n'
+    printf 'Maximum entries listed per category: %s\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+    blank_line
+
+    # Fetch one more than the cap so an exceeded cap can be detected and stated
+    # rather than silently truncating the population.
+    ww_limit_probe=`expr "$WORLD_WRITABLE_MAX_ENTRIES" + 1`
+
+    subsection "World-Writable Files:"
+    ww_files=`find "$@" -xdev -type f -perm -0002 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
+    # grep -c always prints a count but exits 1 when that count is zero, so it
+    # must not be guarded with "|| echo 0" - that would emit the count twice and
+    # break the numeric comparison below, leaving a clean host with a blank
+    # section instead of an explicit "no entries found".
+    ww_file_count=`printf '%s' "$ww_files" | grep -c . 2>/dev/null`
+    [ -n "$ww_file_count" ] || ww_file_count=0
+    ww_file_tally="entries=$ww_file_count|truncated=no"
+    if [ "$ww_file_count" -eq 0 ]; then
+        no_entries_found
+    else
+        if [ "$ww_file_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
+            printf 'NOTE: more than %s world-writable files were found. The list below\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+            printf 'is truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+            blank_line
+            ww_files=`printf '%s\n' "$ww_files" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+            # The scan stops one past the cap, so the exact population is not
+            # known once the cap is exceeded. Record that honestly rather than
+            # reporting the probe count as if it were the true total.
+            ww_file_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+        fi
+        printf '%s\n' "$ww_files" | while IFS= read -r _ww_entry; do
+            if [ -n "$_ww_entry" ]; then
+                ls -ld "$_ww_entry" 2>/dev/null || printf '%s (metadata not available)\n' "$_ww_entry"
+            fi
+        done
+    fi
+    record_manifest_line "WORLD_WRITABLE_SCAN|files|roots=$#|xdev=yes|$ww_file_tally"
+    blank_line
+
+    # A world-writable directory without the sticky bit is often worse than a
+    # world-writable file: any user can delete or replace files they do not own
+    # inside it, including files owned by root.
+    subsection "World-Writable Directories Without the Sticky Bit:"
+    ww_dirs=`find "$@" -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
+    ww_dir_count=`printf '%s' "$ww_dirs" | grep -c . 2>/dev/null`
+    [ -n "$ww_dir_count" ] || ww_dir_count=0
+    ww_dir_tally="entries=$ww_dir_count|truncated=no"
+    if [ "$ww_dir_count" -eq 0 ]; then
+        no_entries_found
+    else
+        if [ "$ww_dir_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
+            printf 'NOTE: more than %s such directories were found. The list below is\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+            printf 'truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+            blank_line
+            ww_dirs=`printf '%s\n' "$ww_dirs" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+            ww_dir_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+        fi
+        printf '%s\n' "$ww_dirs" | while IFS= read -r _ww_entry; do
+            if [ -n "$_ww_entry" ]; then
+                ls -ld "$_ww_entry" 2>/dev/null || printf '%s (metadata not available)\n' "$_ww_entry"
+            fi
+        done
+    fi
+    record_manifest_line "WORLD_WRITABLE_SCAN|directories_without_sticky|roots=$#|xdev=yes|$ww_dir_tally"
+    blank_line
+
+    # The control test for the by-design shared directories.
+    subsection "Sticky Bit Verification for Shared Temporary Directories:"
+    for _ww_shared in `world_writable_expected_shared_dirs`; do
+        if [ -d "$_ww_shared" ]; then
+            printf 'Directory: %s\n' "$_ww_shared"
+            ls -ld "$_ww_shared" 2>/dev/null || not_available
+
+            # The sticky bit only matters where the directory is actually
+            # world-writable. Reporting a missing sticky bit on a directory that
+            # is not world-writable would be a false positive the client would
+            # have to rebut, so the two conditions are distinguished here. The
+            # other-write bit is read from the ls mode string (character 9)
+            # because POSIX test has no world-writable predicate.
+            _ww_mode=`ls -ld "$_ww_shared" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            _ww_other_write=`printf '%s' "$_ww_mode" | cut -c9 2>/dev/null`
+
+            if [ -k "$_ww_shared" ]; then
+                printf 'Sticky bit: present (expected)\n'
+            elif [ "$_ww_other_write" = "w" ]; then
+                printf 'Sticky bit: ABSENT - this directory is world-writable, so any user\n'
+                printf '  can delete or rename files owned by others here\n'
+            else
+                printf 'Sticky bit: absent, but this directory is not world-writable, so the\n'
+                printf '  sticky bit is not required\n'
+            fi
+            blank_line
+        fi
+    done
+}
+
 # SetUID / SetGID file review:
-# The search is intentionally limited to common binary and application paths so
-# the scan remains practical and avoids broad traversal of temporary, mounted,
-# or pseudo filesystems. The find command lists matching files only.
+#
+# A SetUID program runs with the privileges of the file's owner rather than those
+# of the user who started it, so a SetUID root binary lets an unprivileged user
+# execute code as root. That is legitimate for a small number of system tools, but
+# each one is a potential privilege-escalation path, so the population is
+# inventoried for review. SetGID behaves the same way for group privileges.
+#
+# The scan is bounded exactly as the world-writable scan in Section 10 is, and for
+# the same reason: this runs on live client production systems.
+#
+# - Scope is pruned to binary and application paths rather than whole filesystems.
+# - find -xdev stops the scan at filesystem boundaries so it cannot descend into
+#   NFS or SAN mounts, place load on a remote filer, or stall on an unresponsive
+#   mount. The cost is that a separately mounted subdirectory beneath a scoped
+#   path is not traversed, so the population can under-report. That trade is made
+#   deliberately in favour of not disturbing the client, and the boundary is
+#   disclosed in the report so a reviewer knows the limit of the evidence rather
+#   than assuming the list is complete.
+# - Application roots supplied with --app-dir are scanned as roots in their own
+#   right, which is what keeps -xdev from skipping an application tree that lives
+#   on its own mount. Results are passed through sort -u because a root that is
+#   not a separate mount would otherwise be traversed twice.
 print_setuid_setgid_files() {
     if ! command_exists find; then
         not_available
         return
     fi
 
-    search_paths=""
-    for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
-        if [ -d "$candidate" ]; then
-            search_paths="$search_paths $candidate"
-        fi
-    done
+    # Roots are held as positional parameters so that an application path
+    # containing spaces survives as a single argument; see the equivalent comment
+    # in print_world_writable_review for why this matters.
+    _suid_saved_ifs=$IFS
+    IFS='
+'
+    set -- `setuid_search_paths`
+    IFS=$_suid_saved_ifs
 
-    if [ -z "$search_paths" ]; then
+    if [ "$#" -eq 0 ]; then
         not_available
         return
     fi
 
-    subsection "Pruned Search Scope:"
-    printf '%s\n' "$search_paths"
+    subsection "Scan Scope and Limits:"
+    printf 'Paths scanned:\n'
+    for _suid_path in "$@"; do
+        printf '  %s\n' "$_suid_path"
+    done
+    printf 'Filesystem boundary: not crossed (find -xdev). Separately mounted\n'
+    printf '  subdirectories beneath the paths above are not traversed, so this\n'
+    printf '  population may under-report. This bound is deliberate: it prevents\n'
+    printf '  the scan from loading NFS or SAN mounts on a production host.\n'
+    printf 'Recorded per finding: full path. File contents are not printed or\n'
+    printf '  copied into this evidence package.\n'
     blank_line
 
     subsection "SetUID Files:"
-    find $search_paths -type f \( -perm -4000 -o -perm -04000 \) -print 2>/dev/null || not_available
+    _suid_list=`find "$@" -xdev -type f \( -perm -4000 -o -perm -04000 \) -print 2>/dev/null | sort -u`
+    if [ -n "$_suid_list" ]; then
+        printf '%s\n' "$_suid_list"
+    else
+        no_entries_found
+    fi
     blank_line
 
     subsection "SetGID Files:"
-    find $search_paths -type f \( -perm -2000 -o -perm -02000 \) -print 2>/dev/null || not_available
+    _sgid_list=`find "$@" -xdev -type f \( -perm -2000 -o -perm -02000 \) -print 2>/dev/null | sort -u`
+    if [ -n "$_sgid_list" ]; then
+        printf '%s\n' "$_sgid_list"
+    else
+        no_entries_found
+    fi
 }
 
 # Cron spool fallback:
@@ -2209,11 +2576,15 @@ print_package_inventory
 section_with_explanation "9. Recent Login Activity" "Explanation: This section shows recent login history using the system's available login records. It is limited to a manageable amount of output to reduce noise while still supporting review of privileged and unusual logins." ""
 print_recent_login_activity
 
-section_with_explanation "10. World-Writable Files" "Explanation: World-writable file review was not included in the scope of this engagement." ""
-printf 'Not in scope for this engagement.\n'
+section_with_explanation "10. World-Writable Files and Directories" "Explanation: This section identifies files and directories that any account on the host can modify. A world-writable file that is executed by a privileged account allows an unprivileged user to obtain privileged execution, and a world-writable application file allows unauthorized modification of data or programs in financial-reporting scope. Read this together with the cron evidence in Sections 12 and 21, the startup evidence in Section 16, and the sudo evidence in Section 4 to determine whether anything privileged executes a world-writable path. The scan is deliberately pruned to system binary, system configuration, and application installation paths, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host; the resulting limits are stated in the output. Directories that are world-writable by design, such as /tmp, are not enumerated. Instead their sticky bit is verified, which is the actual control on a shared temporary directory. Only path, permission, and ownership metadata is recorded. The contents of a world-writable file are never printed or copied into this evidence package." ""
+scan_timer_start "Scanning system and application paths for world-writable files"
+print_world_writable_review
+scan_timer_end "10 (world-writable)"
 
-section_with_explanation "11. SetUID and SetGID Files" "Explanation: This section identifies SetUID and SetGID files, but the scan is intentionally pruned to standard system and application binary paths rather than the entire filesystem. This reduces runtime and avoids broad traversal of mounted, pseudo, and temporary filesystems while still capturing the most relevant binaries." ""
+section_with_explanation "11. SetUID and SetGID Files" "Explanation: A SetUID program runs with the privileges of the file owner rather than those of the user who started it, so a SetUID root binary allows an unprivileged user to execute code with root privileges. A small number of system tools legitimately require this, but each one is a potential privilege-escalation path, so the population is inventoried for review. SetGID behaves the same way for group privileges. The scan is deliberately pruned to standard system and application binary paths rather than the entire filesystem, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host. The resulting limits are stated in the output so a reviewer can see the bound on the evidence rather than assuming the population is complete. Application directories supplied at runtime are scanned as roots in their own right so that an application tree residing on its own mount is still covered." ""
+scan_timer_start "Scanning system and application paths for SetUID/SetGID files"
 print_setuid_setgid_files
+scan_timer_end "11 (SetUID/SetGID)"
 
 _sec12_files=`section12_source_files`
 section_with_explanation "12. Scheduled Cron Jobs" "Explanation: This section shows system-wide and user cron jobs where available. Scheduled jobs matter because they can run automatically with elevated or application-specific permissions and can therefore affect controlled processing." "$_sec12_files"
@@ -2273,11 +2644,13 @@ if [ -z "$APP_DIRECTORIES" ]; then
     printf 'Application directories can be supplied with the --app-dir flag,\n'
     printf 'or by responding to the interactive prompt at script startup.\n'
 else
+    scan_timer_start "Listing application installation directories recursively"
     printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r app_path_entry; do
         if [ -n "$app_path_entry" ]; then
             print_application_directory_listing "$app_path_entry"
         fi
     done
+    scan_timer_end "23 (application directory listing)"
 fi
 
 _sec24_files=`section24_source_files`
@@ -2302,6 +2675,21 @@ printf 'Report file: %s\n' "$REPORT_FILE"
 printf 'Manifest file: %s\n' "$MANIFEST_FILE"
 printf 'Sensitive skip file: %s\n' "$SENSITIVE_SKIPPED_FILE"
 printf 'Configuration changes made: none\n'
+
+# Runtime of the filesystem-walking sections. Everything else in this collection
+# is effectively instantaneous, so these are the only figures a client or reviewer
+# would need in order to account for the script's time on the host.
+blank_line
+subsection "Scan Timing (filesystem-walking sections only):"
+if [ -n "$SCAN_TIMING_SUMMARY" ]; then
+    printf '%s\n' "$SCAN_TIMING_SUMMARY" | while IFS= read -r _timing_line; do
+        if [ -n "$_timing_line" ]; then
+            printf '%s\n' "$_timing_line"
+        fi
+    done
+else
+    printf '  no timed scans were run\n'
+fi
 
 # Transfer ownership of the evidence package to the operator who invoked
 # sudo. This runs after the report is finalized so that subsequent operator

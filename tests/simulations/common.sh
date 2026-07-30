@@ -130,6 +130,11 @@ sim_new_root() {
              "$R"/etc/default "$R"/etc/sssd "$R"/etc/audit "$R"/etc/systemd \
              "$R"/etc/syslog-ng/conf.d "$R"/etc/alternatives
     chmod 700 "$R/root/.ssh"
+    # Shared temporary directories carry the sticky bit on a real host, which is
+    # the control Section 10 verifies. A fixture can override these to exercise
+    # the missing-sticky-bit finding.
+    mkdir -p "$R/var/tmp" "$R/dev/shm"
+    chmod 1777 "$R/tmp" "$R/var/tmp" "$R/dev/shm"
 
     # usr-merged layout, matching a modern distro
     ln -s usr/bin "$R/bin"
@@ -172,10 +177,28 @@ EOF
 if [ -f /etc/.sim_df ]; then cat /etc/.sim_df; else echo 'Filesystem 1K-blocks Used Available Use% Mounted on'; fi
 EOF
 
-    # Themed setuid/setgid answers; anything else falls through to real find.
+    # Themed answers for the permission scans; anything else falls through to the
+    # real find. The fixture's /usr is a read-only bind of the host's /usr, so an
+    # unshimmed scan of the standard binary paths would walk the host's entire
+    # /usr tree and add minutes to every simulation.
     cat > "$RSHIMS/find" <<'EOF'
 #!/bin/sh
+# Record the arguments each permission scan was invoked with, one per line, so a
+# fixture can assert that the scan roots arrived as intended. Without this the
+# shim would answer from a canned list regardless of what it was passed, making
+# argument-passing faults - such as a path with a space being word-split into two
+# nonexistent roots - completely invisible to these tests.
 case "$*" in
+  *0002*|*4000*|*2000*)
+    for _a in "$@"; do printf '%s\n' "$_a"; done > /tmp/.sim_find_argv
+    ;;
+esac
+case "$*" in
+  *0002*)
+    case "$*" in
+      *"-type d"*) [ -f /etc/.sim_ww_dirs ]  && cat /etc/.sim_ww_dirs;  exit 0;;
+      *)           [ -f /etc/.sim_ww_files ] && cat /etc/.sim_ww_files; exit 0;;
+    esac ;;
   *4000*) [ -f /etc/.sim_setuid ] && cat /etc/.sim_setuid; exit 0;;
   *2000*) [ -f /etc/.sim_setgid ] && cat /etc/.sim_setgid; exit 0;;
   *) exec /usr/bin/find "$@";;
@@ -237,6 +260,9 @@ sim_extract() {
     rm -rf "$OUT/evidence"
     mkdir -p "$OUT/evidence"
     cp -a "$R/out/." "$OUT/evidence/" 2>/dev/null || true
+    # Kept outside the evidence tree so the delivered package stays clean.
+    FIND_ARGV="$OUT/find-argv.txt"
+    cp "$R/tmp/.sim_find_argv" "$FIND_ARGV" 2>/dev/null || : > "$FIND_ARGV"
     E="$OUT/evidence/SOX-ITGC-AUDIT-LINUX-UNIX"
     REPORT="$E/report/SOX-ITGC-AUDIT-REPORT.txt"
     MANIFEST="$E/metadata/MANIFEST.txt"
@@ -327,6 +353,19 @@ sim_verify_common() {
         sim_pass "archive created"
     else
         sim_fail "no archive created"
+    fi
+
+    # The filesystem-walking sections must account for their own runtime, both in
+    # the report and in the manifest, so a client can be told what the script was
+    # doing on their host and for how long.
+    assert_report_matches 'Scan Timing \(filesystem-walking sections only\):' \
+        "scan timing summarized in the execution summary"
+    sim_check
+    if grep -q '^TIMING|section=10' "$MANIFEST" 2>/dev/null &&
+       grep -q '^TIMING|section=11' "$MANIFEST" 2>/dev/null; then
+        sim_pass "scan timings recorded in the manifest"
+    else
+        sim_fail "expected TIMING entries for sections 10 and 11 in the manifest"
     fi
 
     # All 25 sections should render, so a section that dies is not missed.

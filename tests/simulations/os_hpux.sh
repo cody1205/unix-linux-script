@@ -420,6 +420,14 @@ EOF
 /usr/bin/write
 /usr/sbin/lpsched
 EOF
+    # This host has a world-writable /var/tmp with NO sticky bit, so any user can
+    # delete or rename another user's files there. Exercises the missing-sticky-bit
+    # finding; the other fixtures carry the expected 1777.
+    chmod 0777 "$R/var/tmp"
+    cat > "$R/etc/.sim_ww_files" <<'EOF'
+/opt/policyadmin/etc/policy.conf
+EOF
+    chmod 0666 "$R/opt/policyadmin/etc/policy.conf"
 
     # HP-UX writes su history to /var/adm/sulog, so this fixture covers that
     # location while the RHEL fixture covers /var/log/sulog.
@@ -454,6 +462,10 @@ verify_os() {
     # HP-UX records su history at /var/adm/sulog.
     assert_report_matches 'File: /var/adm/sulog' 'su history located at the HP-UX path'
     assert_report_matches 'awright-root' 'su events captured'
+
+    # Section 10: this host's /var/tmp is world-writable with no sticky bit.
+    assert_report_matches 'Sticky bit: ABSENT' 'missing sticky bit reported on shared temp directory'
+    assert_report_matches '/opt/policyadmin/etc/policy\.conf' 'world-writable application config surfaced'
 
     sim_check
     if grep -q '^/etc/shadow$' "$SKIPPED" 2>/dev/null; then
