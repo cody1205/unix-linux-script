@@ -471,7 +471,9 @@ EOF
     : > "$R/usr/lpp/corebank/bin/setid_helper"
     chmod 4755 "$R/usr/lpp/corebank/bin/setid_helper"
 
-    cat > "$R/var/log/sulog" <<'EOF'
+    # AIX records su history at /var/adm/sulog (SULOG in /etc/default/su), not
+    # /var/log/sulog. The RHEL fixture covers the /var/log/sulog location.
+    cat > "$R/var/adm/sulog" <<'EOF'
 SU 06/16 02:00 + pts/0 svcbatch-db2inst1
 SU 06/15 22:14 - pts/2 contract1-root
 SU 06/16 08:05 + pts/0 jbanks-root
@@ -547,6 +549,10 @@ verify_os() {
     else
         sim_fail "/etc/inittab not delivered in raw_files/"
     fi
+
+    # su history lives at /var/adm/sulog on AIX, so Section 6 must find it there.
+    assert_report_matches 'File: /var/adm/sulog' 'su history located at the AIX path'
+    assert_report_matches 'jbanks-root' 'su events captured'
 
     # The regression this fixture exists to catch.
     sim_check

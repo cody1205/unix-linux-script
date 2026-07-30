@@ -457,17 +457,10 @@ EOF
 2024-06-16T14:55:31 suse-erp-db02 sshd[8720]: Accepted keyboard-interactive/pam for dkumar from 10.40.4.51 port 51002 ssh2
 2024-05-22T19:40:12 suse-erp-db02 sshd[30011]: Failed password for rfoster from 203.0.113.44 port 55210 ssh2
 EOF
-    # Hardened builds also route authpriv to a dedicated secure log; stock
-    # openSUSE writes auth to /var/log/messages only, which the collector does
-    # not treat as an auth-log candidate.
-    cat > "$R/var/log/secure" <<'EOF'
-2024-06-16T15:10:44 suse-erp-db02 sshd[8821]: Accepted publickey for tprince from 10.40.4.22 port 49122 ssh2: ED25519
-2024-06-16T15:12:02 suse-erp-db02 sudo:  tprince : USER=root ; COMMAND=/usr/bin/systemctl restart saphostagent
-2024-06-16T14:55:31 suse-erp-db02 sshd[8720]: Accepted keyboard-interactive/pam for dkumar from 10.40.4.51 port 51002 ssh2
-2024-06-16T02:00:01 suse-erp-db02 sshd[7010]: Accepted publickey for svc_pgbackup from 10.40.2.14 port 40122 ssh2: RSA
-2024-05-22T19:40:12 suse-erp-db02 sshd[30011]: Failed password for rfoster from 203.0.113.44 port 55210 ssh2
-2024-06-16T09:00:22 suse-erp-db02 su[6001]: pam_unix(su:session): session opened for user postgres by dkumar(uid=1002)
-EOF
+    # Deliberately NO dedicated /var/log/secure here. Stock openSUSE routes auth
+    # and authpriv into /var/log/messages, so this fixture is what exercises the
+    # collector's general-syslog fallback for Section 25. The RHEL fixture covers
+    # the dedicated-auth-log path.
 }
 
 verify_os() {
@@ -480,7 +473,8 @@ verify_os() {
     assert_report_matches 'samba-winbind' 'SUSE package inventory captured'
     assert_report_matches 'PASS_MAX_DAYS   60' 'password aging policy captured'
     assert_report_matches 'postgresql' 'database service evidence captured'
-    assert_report_matches 'Log file: /var/log/secure' 'auth log sampled'
+    assert_report_matches 'sampling general syslog /var/log/messages' 'general syslog fallback used when no dedicated auth log exists'
+    assert_report_matches 'Accepted publickey for tprince' 'authentication events captured from general syslog'
     sim_check
     if grep -q '^/etc/shadow$' "$SKIPPED" 2>/dev/null; then
         sim_pass "/etc/shadow withheld from the package"

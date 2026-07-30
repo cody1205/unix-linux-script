@@ -1050,8 +1050,27 @@ print_sshd_full_content() {
 # su activity log review:
 # Where present, sulog is read to provide evidence of account switching
 # activity. The log file is not truncated, rotated, or modified.
+sulog_candidates() {
+    # /var/adm/sulog is the traditional location on AIX, HP-UX, and Solaris;
+    # /var/log/sulog is used by some Linux builds. Both are checked so su
+    # history is not reported as unavailable on a host that is recording it.
+    printf '/var/log/sulog\n/var/adm/sulog\n'
+}
+
 print_sulog_content() {
-    print_file_with_header /var/log/sulog
+    found=no
+
+    for sulog_path in `sulog_candidates`; do
+        if [ -f "$sulog_path" ]; then
+            print_file_with_header "$sulog_path"
+            found=yes
+        fi
+    done
+
+    if [ "$found" = no ]; then
+        not_available
+        blank_line
+    fi
 }
 
 # Package inventory:
@@ -1641,6 +1660,26 @@ print_auth_log_samples() {
         fi
     done
 
+    # Stock openSUSE, and AIX by default, route auth and authpriv into the general
+    # syslog file rather than a dedicated auth log. Sample that only when no
+    # dedicated auth log exists: on a host that has one (RHEL's /var/log/secure)
+    # the general log is mostly unrelated kernel and application traffic, and
+    # sampling it would add noise rather than authentication evidence.
+    if [ "$found" = no ]; then
+        for log_path in /var/log/messages /var/adm/messages; do
+            if [ -f "$log_path" ] && [ -r "$log_path" ]; then
+                printf 'No dedicated authentication log found; sampling general syslog %s (last %s lines)\n' "$log_path" "$AUTH_LOG_SAMPLE_LINES"
+                if tail -n "$AUTH_LOG_SAMPLE_LINES" "$log_path" 2>/dev/null; then
+                    record_manifest_line "LOG_SAMPLED|$log_path|source=general_syslog_fallback|lines=$AUTH_LOG_SAMPLE_LINES"
+                    found=yes
+                else
+                    not_available
+                fi
+                blank_line
+            fi
+        done
+    fi
+
     if [ "$found" = no ] && command_exists journalctl; then
         printf 'No authentication log files found; sampling systemd journal auth/authpriv facilities (last %s lines)\n' "$AUTH_LOG_SAMPLE_LINES"
         # Restrict to syslog facilities auth (4) and authpriv (10) so the
@@ -1949,7 +1988,7 @@ section3_source_files()  {
 }
 section4_source_files()  { printf '/etc/sudoers\n/etc/sudoers.d\n'; }
 section5_source_files()  { printf '/etc/group\n'; }
-section6_source_files()  { printf '/var/log/sulog\n'; }
+section6_source_files()  { sulog_candidates; }
 section7_source_files()  { printf '/etc/ssh/sshd_config\n'; }
 section12_source_files() { printf '/etc/crontab\n/etc/cron.d\n/var/spool/cron/crontabs\n'; }
 section13_source_files() { printf '/etc/passwd\n'; }
