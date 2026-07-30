@@ -371,9 +371,11 @@ EOF
     printf '15 0 * * * /usr/lpp/corebank/bin/run_nightly.ksh\n' > "$R/var/spool/cron/crontabs/svcbatch"
 
     cat > "$R/etc/syslog.conf" <<'EOF'
-*.info;auth.none;authpriv.none    /var/adm/messages
-auth.info                         /var/adm/authlog
-authpriv.*                        /var/adm/authlog
+# Default AIX routing: everything, including auth and authpriv, lands in the
+# general syslog file. No dedicated authlog is configured on this host, which is
+# common on a stock AIX install. The HP-UX fixture covers /var/adm/authlog.
+*.info                            /var/adm/messages
+auth.debug                        /var/adm/messages
 *.emerg                           *
 # forward everything to the enterprise syslog relay
 *.debug                           @siem-relay.corp.bank.local
@@ -479,8 +481,14 @@ SU 06/15 22:14 - pts/2 contract1-root
 SU 06/16 08:05 + pts/0 jbanks-root
 SU 06/14 03:10 + ??? root-db2inst1
 EOF
-    cat > "$R/var/adm/authlog" <<'EOF'
+    # No dedicated /var/adm/authlog on this host and no systemd journal, so auth
+    # events are only in the general syslog file. This is what exercises the
+    # collector's last-resort general-syslog fallback for Section 25; the mixed
+    # non-auth lines are deliberate, since that log is unfiltered on a real host.
+    cat > "$R/var/adm/messages" <<'EOF'
+Jun 16 01:58:44 aix-fin-batch01 syslog:info syslogd: restart
 Jun 16 02:00:01 aix-fin-batch01 auth|security:info sshd[5243088]: Accepted publickey for svcbatch from 10.60.2.14
+Jun 16 02:41:19 aix-fin-batch01 user:notice corebank: nightly batch complete rc=0
 Jun 16 08:05:12 aix-fin-batch01 auth|security:info sshd[5243120]: Accepted password for jbanks from 10.60.4.9
 Jun 16 08:06:44 aix-fin-batch01 auth|security:notice sudo: jbanks : TTY=pts/0 ; USER=root ; COMMAND=/usr/bin/stopsrc -s db2fmcd
 Jun 15 22:14:08 aix-fin-batch01 auth|security:info sshd[5243090]: Failed password for contract1 from 203.0.113.9
@@ -553,6 +561,11 @@ verify_os() {
     # su history lives at /var/adm/sulog on AIX, so Section 6 must find it there.
     assert_report_matches 'File: /var/adm/sulog' 'su history located at the AIX path'
     assert_report_matches 'jbanks-root' 'su events captured'
+
+    # No dedicated authlog and no journal on this host, so the last-resort
+    # general-syslog fallback must supply the authentication evidence.
+    assert_report_matches 'sampling general syslog /var/adm/messages' 'general syslog fallback used as last resort'
+    assert_report_matches 'Accepted publickey for svcbatch' 'authentication events captured from general syslog'
 
     # The regression this fixture exists to catch.
     sim_check

@@ -133,8 +133,29 @@ echo "Maximum number of days between password change          : ${mx:-99999}"
 echo "Number of days of warning before password expires       : ${wn:-7}"
 EOF
 
+    # openSUSE is systemd, so the journal is available and is the collector's
+    # preferred source when no dedicated auth log exists. Emits only auth and
+    # authpriv facility entries, as journalctl --facility=auth,authpriv would.
+    cat > "$RSHIMS/journalctl" <<'EOF'
+#!/bin/sh
+case "$*" in
+ *facility=auth*)
+   cat <<'L'
+Jun 16 15:10:44 suse-erp-db02 sshd[8821]: Accepted publickey for tprince from 10.40.4.22 port 49122 ssh2: ED25519
+Jun 16 15:12:02 suse-erp-db02 sudo[8840]:  tprince : TTY=pts/0 ; USER=root ; COMMAND=/usr/bin/systemctl restart saphostagent
+Jun 16 14:55:31 suse-erp-db02 sshd[8720]: Accepted keyboard-interactive/pam for dkumar from 10.40.4.51 port 51002 ssh2
+Jun 16 09:00:22 suse-erp-db02 su[6001]: pam_unix(su:session): session opened for user postgres by dkumar(uid=1002)
+Jun 16 02:00:01 suse-erp-db02 sshd[7010]: Accepted publickey for svc_pgbackup from 10.40.2.14 port 40122 ssh2: RSA
+May 22 19:40:12 suse-erp-db02 sshd[30011]: Failed password for rfoster from 203.0.113.44 port 55210 ssh2
+L
+   ;;
+ *) echo '-- No entries --';;
+esac
+EOF
+
     chmod 0755 "$RSHIMS/rpm" "$RSHIMS/ss" "$RSHIMS/systemctl" \
-               "$RSHIMS/getent" "$RSHIMS/passwd" "$RSHIMS/chage"
+               "$RSHIMS/getent" "$RSHIMS/passwd" "$RSHIMS/chage" \
+               "$RSHIMS/journalctl"
 }
 
 write_os_files() {
@@ -457,10 +478,11 @@ EOF
 2024-06-16T14:55:31 suse-erp-db02 sshd[8720]: Accepted keyboard-interactive/pam for dkumar from 10.40.4.51 port 51002 ssh2
 2024-05-22T19:40:12 suse-erp-db02 sshd[30011]: Failed password for rfoster from 203.0.113.44 port 55210 ssh2
 EOF
-    # Deliberately NO dedicated /var/log/secure here. Stock openSUSE routes auth
-    # and authpriv into /var/log/messages, so this fixture is what exercises the
-    # collector's general-syslog fallback for Section 25. The RHEL fixture covers
-    # the dedicated-auth-log path.
+    # Deliberately NO dedicated /var/log/secure here. Stock openSUSE has no
+    # dedicated auth log but does have the systemd journal, so this fixture
+    # exercises the collector's filtered-journal path - and proves the journal is
+    # preferred over the unfiltered /var/log/messages above, which is present and
+    # would otherwise satisfy the section with weaker evidence.
 }
 
 verify_os() {
@@ -473,8 +495,16 @@ verify_os() {
     assert_report_matches 'samba-winbind' 'SUSE package inventory captured'
     assert_report_matches 'PASS_MAX_DAYS   60' 'password aging policy captured'
     assert_report_matches 'postgresql' 'database service evidence captured'
-    assert_report_matches 'sampling general syslog /var/log/messages' 'general syslog fallback used when no dedicated auth log exists'
-    assert_report_matches 'Accepted publickey for tprince' 'authentication events captured from general syslog'
+    assert_report_matches 'sampling systemd journal auth/authpriv' 'filtered journal used when no dedicated auth log exists'
+    assert_report_matches 'Accepted publickey for tprince' 'authentication events captured'
+    # The journal must win over the unfiltered general syslog file, which exists
+    # on this fixture. If the ordering regresses, this fires.
+    sim_check
+    if grep -q 'sampling general syslog' "$REPORT" 2>/dev/null; then
+        sim_fail "unfiltered general syslog preferred over the filtered journal"
+    else
+        sim_pass "unfiltered general syslog not used while a journal is available"
+    fi
     sim_check
     if grep -q '^/etc/shadow$' "$SKIPPED" 2>/dev/null; then
         sim_pass "/etc/shadow withheld from the package"
