@@ -50,11 +50,24 @@ The package ships with `HOW-TO-READ-THIS-EVIDENCE.txt` at its top level covering
 the same ground, so the guidance travels with the evidence rather than in a
 separate document.
 
-Inside the package, directories are `0750` and files `0640`, owned by the operator
-who ran the collection — readable by them and their team, and by nobody else.
-Those are **handover permissions and are not evidence**: the permissions and
-ownership each file had on the source system are recorded in `MANIFEST.txt`, which
-is where to look when the permission itself is the control being tested.
+Permissions inside the package are deliberately not uniform:
+
+- **`raw_files/` keeps the exact permissions each file had on the source system.**
+  These are copies of the client's files and their modes are part of the
+  evidence, so nothing rewrites them. One consequence: a source file readable
+  only by its owner stays restrictive in the package, so a colleague opening it
+  from a shared location may not be able to read every individual file. Take a
+  copy and adjust the copy if that happens.
+- **Everything else is normalised for handover** — the report, manifest,
+  collection log, handling instructions, and all directories, at `0640` and
+  `0750`. None of these existed on the client system, so their permissions are
+  not evidence of anything. Directories are normalised throughout, including
+  under `raw_files/`, because a directory that cannot be entered makes everything
+  beneath it unreachable regardless of the files' own modes.
+
+The whole package is owned by the operator who ran the collection. `MANIFEST.txt`
+additionally records the permissions and ownership each file had on the source
+system, which survives transfer even if filesystem metadata does not.
 
 ### The collection log
 

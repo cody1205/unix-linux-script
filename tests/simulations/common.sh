@@ -425,20 +425,49 @@ sim_verify_common() {
         sim_fail "no archive to inspect"
     fi
 
-    # Handover permissions: readable by the operator and their group, nobody else.
+    # Handover permissions. Scoped to GENERATED content only: files under
+    # raw_files/ deliberately keep the permissions they had on the source system,
+    # because a collected file's mode is part of the evidence. Asserting
+    # readability across raw_files/ would be asserting that the script rewrites
+    # evidence, which is the opposite of what is wanted.
     sim_check
-    _sim_bad_modes=`find "$E" -type f ! -perm -0040 2>/dev/null | head -3`
+    _sim_bad_modes=`find "$E/report" "$E/metadata" -type f ! -perm -0040 2>/dev/null | head -3`
     if [ -z "$_sim_bad_modes" ]; then
-        sim_pass "package files are group-readable for the audit team"
+        sim_pass "report and metadata are group-readable for the audit team"
     else
-        sim_fail "package contains files the audit team cannot read:"
+        sim_fail "generated files the audit team cannot read:"
         printf '%s\n' "$_sim_bad_modes" | sed 's/^/            /' >&2
     fi
+    # Directories must be traversable everywhere, including under raw_files/, or
+    # the files beneath them are unreachable whatever their own modes say.
     sim_check
-    if find "$E" -perm -0004 2>/dev/null | grep -q .; then
-        sim_fail "package contains world-readable entries; evidence should not be open to all"
+    _sim_bad_dirs=`find "$E" -type d ! -perm -0050 2>/dev/null | head -3`
+    if [ -z "$_sim_bad_dirs" ]; then
+        sim_pass "all package directories are traversable by the audit team"
     else
-        sim_pass "package is not world-readable"
+        sim_fail "package contains directories the audit team cannot enter:"
+        printf '%s\n' "$_sim_bad_dirs" | sed 's/^/            /' >&2
+    fi
+    # Collected files must NOT have been rewritten to a uniform mode.
+    sim_check
+    if [ -f "$E/raw_files/etc/sudoers" ]; then
+        # Exact match against the mode the fixture set on the source file (0440).
+        # A range of "plausible" modes is useless here: normalising the copies
+        # produces -rw-r-----, which any loose pattern would happily accept.
+        _sim_sudoers_mode=`ls -l "$E/raw_files/etc/sudoers" 2>/dev/null | awk 'NR == 1 { print substr($1, 1, 10) }'`
+        if [ "$_sim_sudoers_mode" = "-r--r-----" ]; then
+            sim_pass "collected /etc/sudoers kept its exact source mode (-r--r-----)"
+        else
+            sim_fail "collected /etc/sudoers mode is '$_sim_sudoers_mode', expected '-r--r-----'; source permissions were rewritten"
+        fi
+    else
+        sim_pass "no collected sudoers to check source-mode preservation against"
+    fi
+    sim_check
+    if find "$E/report" "$E/metadata" -perm -0004 2>/dev/null | grep -q .; then
+        sim_fail "report or metadata is world-readable; the package should not be open to all"
+    else
+        sim_pass "report and metadata are not world-readable"
     fi
 
     # The filesystem-walking sections must account for their own runtime, both in

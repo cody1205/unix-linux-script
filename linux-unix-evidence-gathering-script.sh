@@ -2557,11 +2557,22 @@ write_handling_instructions() {
         printf '\n'
         printf 'A note on file permissions in this package\n'
         printf '%s\n' '------------------------------------------'
-        printf 'Directories are 0750 and files 0640 so that you and your team can\n'
-        printf 'read them while others cannot. These are handover permissions and\n'
-        printf 'are NOT evidence. The permissions each file had on the source\n'
-        printf 'system are recorded in metadata/MANIFEST.txt, which is where to\n'
-        printf 'look when the permission itself is the control being tested.\n'
+        printf 'Files under raw_files/ carry the EXACT permissions they had on the\n'
+        printf 'source system. They are copies of the client'"'"'s files and their\n'
+        printf 'modes are part of the evidence, so nothing here rewrites them.\n'
+        printf '\n'
+        printf 'One consequence: a source file that was readable only by its owner\n'
+        printf 'is still restrictive here, so a colleague opening the package from a\n'
+        printf 'shared location may not be able to read every individual file. If\n'
+        printf 'that happens, take a copy and adjust the copy - see the section\n'
+        printf 'above. Do not conclude the file is missing; check MANIFEST.txt,\n'
+        printf 'which records the permissions and ownership each file had on the\n'
+        printf 'source system.\n'
+        printf '\n'
+        printf 'The report, the manifest, this file, the collection log, and all\n'
+        printf 'directories are 0640 and 0750 respectively. Those did not exist on\n'
+        printf 'the client system, so their permissions are handover settings and\n'
+        printf 'are NOT evidence of anything.\n'
         printf '\n'
         printf 'Handling\n'
         printf '%s\n' '--------'
@@ -2580,32 +2591,63 @@ write_handling_instructions() {
 # During collection the evidence is deliberately restrictive (umask 077, root
 # owned) so it is not exposed while it sits on the client's production server.
 # That posture is correct there and wrong the moment the package leaves: an
-# auditor who receives a tree of root-owned 0600 files cannot open it, and the
-# usual reaction - extracting it with sudo, or chmod -R 777 - is worse than the
-# problem. So the package is normalised once, here, at the point of handover.
+# auditor who receives a tree they cannot open will reach for sudo or
+# chmod -R 777, and the second of those is worse than the problem.
 #
-# Directories become 0750 and files 0640, owned by the operator who invoked sudo
-# and their primary group. That is readable by the operator and by their team
-# through the group, and by nobody else. It is applied BEFORE the archive is
-# created, so the archive carries these modes rather than the collection-time
-# ones; permissions inside a tar are what the recipient gets.
+# The package is therefore normalised at handover, but NOT uniformly, because
+# the two kinds of content in it mean different things:
 #
-# Normalising the copies does not discard evidence: the ORIGINAL permissions and
-# ownership of every collected file are recorded in the manifest at copy time,
-# which is where that fact belongs. The mode of our copy was never the evidence.
+#   raw_files/    Copies of the client's files. Their permissions are carried
+#                 over verbatim by cp -p and are left ALONE. The mode of a
+#                 collected file is an attribute of the evidence, and an auditor
+#                 comparing a copy against the report should see exactly what was
+#                 on the source system, not something this script rewrote. A
+#                 consequence is that a source file readable only by its owner
+#                 stays that way in the package, so a colleague may not be able
+#                 to open every individual file without taking a copy of it. That
+#                 is the deliberate trade: fidelity over convenience.
+#
+#   everything    The report, manifest, collection log, handling instructions,
+#   else          and all directories. None of these existed on the client
+#                 system, so their permissions are not evidence of anything. They
+#                 are set to 0640, and directories to 0750, so the package can be
+#                 navigated and the report and log can be read by the operator
+#                 and their team.
+#
+# Directories are normalised throughout, including under raw_files/. A directory
+# that cannot be entered makes everything beneath it unreachable regardless of
+# the files' own modes, and the directories in raw_files/ are created by this
+# script to mirror the source layout - they are not copies of the client's
+# directories and carry none of their permissions.
 normalize_package_permissions() {
     if [ ! -d "$COLLECTION_DIRECTORY" ]; then
         return
     fi
-    # The X operator grants execute only where it is already meaningful, which in
-    # practice means directories. One recursive call rather than a chmod process
-    # per file, and POSIX rather than a GNU find extension.
     _perm_ok=yes
-    chmod -R u=rwX,g=rX,o= "$COLLECTION_DIRECTORY" 2>/dev/null || _perm_ok=no
+
+    # Generated content: safe to normalise, none of it is evidence of a mode.
+    chmod 0750 "$COLLECTION_DIRECTORY" 2>/dev/null || _perm_ok=no
+    for _perm_dir in "$REPORTS_DIRECTORY" "$METADATA_DIRECTORY"; do
+        if [ -d "$_perm_dir" ]; then
+            chmod -R u=rwX,g=rX,o= "$_perm_dir" 2>/dev/null || _perm_ok=no
+        fi
+    done
+    for _perm_top in "$COLLECTION_DIRECTORY"/*.txt; do
+        if [ -f "$_perm_top" ]; then
+            chmod 0640 "$_perm_top" 2>/dev/null || _perm_ok=no
+        fi
+    done
+
+    # raw_files/: directories only. The copied files keep the modes they had on
+    # the source system.
+    if [ -d "$RAW_FILES_DIRECTORY" ]; then
+        find "$RAW_FILES_DIRECTORY" -type d -exec chmod 0750 {} \; 2>/dev/null || _perm_ok=no
+    fi
+
     if [ "$_perm_ok" = "yes" ]; then
-        log_event INFO handover "package permissions normalised to 0750 directories and 0640 files so the audit team can read the evidence after transfer"
+        log_event INFO handover "package normalised for handover: directories 0750, generated files 0640; collected files under raw_files/ keep their original source permissions"
     else
-        log_event WARN handover "could not normalise permissions on the whole package; some files may be unreadable to the audit team after transfer"
+        log_event WARN handover "could not normalise permissions on the whole package; some of it may be unreadable to the audit team after transfer"
     fi
 }
 
