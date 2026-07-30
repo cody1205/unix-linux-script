@@ -342,6 +342,19 @@ sim_verify_common() {
         sim_fail "no archive created"
     fi
 
+    # The filesystem-walking sections must account for their own runtime, both in
+    # the report and in the manifest, so a client can be told what the script was
+    # doing on their host and for how long.
+    assert_report_matches 'Scan Timing \(filesystem-walking sections only\):' \
+        "scan timing summarized in the execution summary"
+    sim_check
+    if grep -q '^TIMING|section=10' "$MANIFEST" 2>/dev/null &&
+       grep -q '^TIMING|section=11' "$MANIFEST" 2>/dev/null; then
+        sim_pass "scan timings recorded in the manifest"
+    else
+        sim_fail "expected TIMING entries for sections 10 and 11 in the manifest"
+    fi
+
     # All 25 sections should render, so a section that dies is not missed.
     sim_check
     _sections=`grep -cE '^[0-9]+\. ' "$REPORT" 2>/dev/null || echo 0`

@@ -266,6 +266,90 @@ no_entries_found() {
     printf 'no entries found\n'
 }
 
+# Scan timing and operator feedback:
+#
+# Most of this collection is instantaneous file reads, but the sections that walk
+# the filesystem (world-writable, SetUID/SetGID, and the recursive application
+# directory listing) can each run for minutes on a large host. Two different
+# audiences need to know about that.
+#
+# The operator running the script needs to see that it is still working. Without
+# any output, several minutes of silence looks like a hang, and the reasonable
+# reaction to a hung script on a production box is to interrupt it. Progress
+# messages are therefore written to the operator's terminal on file descriptor 3,
+# which holds the original stdout while the report itself is being written to the
+# report file. A progress bar is deliberately not used: find produces no
+# incremental output to derive progress from, so any bar would be decorative, and
+# terminal control codes would corrupt the output of a non-interactive run.
+#
+# The reviewer reading the evidence needs the timings recorded in the package
+# itself. Start and end wall-clock times let the collection be correlated against
+# the client's own monitoring and change records, which is the answer to "what was
+# this script doing on our server for five minutes".
+#
+# Portability: date +%s is not in POSIX and is missing on older HP-UX and some AIX
+# builds, so elapsed seconds cannot always be computed. Wall-clock start and end
+# times are therefore always recorded using plain date, which is universally
+# available, and a computed elapsed time is added only where the platform
+# supports it. For audit purposes the timestamps are the more useful of the two
+# anyway.
+SCAN_TIMING_SUMMARY=""
+SCAN_TIMER_LABEL=""
+SCAN_TIMER_START_WALL=""
+SCAN_TIMER_START_EPOCH=""
+
+# Epoch seconds when the platform supports it, empty string when it does not.
+epoch_seconds() {
+    _epoch_value=`date +%s 2>/dev/null`
+    case "$_epoch_value" in
+        ''|*[!0-9]*) printf '' ;;
+        *)           printf '%s' "$_epoch_value" ;;
+    esac
+}
+
+format_elapsed() {
+    _elapsed_secs=${1:-}
+    if [ -z "$_elapsed_secs" ]; then
+        printf 'not available on this platform'
+        return
+    fi
+    printf '%sm%02ds' "`expr "$_elapsed_secs" / 60`" "`expr "$_elapsed_secs" % 60`"
+}
+
+# Announce a long-running scan on the operator's terminal and start the clock.
+scan_timer_start() {
+    SCAN_TIMER_LABEL=$1
+    SCAN_TIMER_START_WALL=`date 2>/dev/null || echo unknown`
+    SCAN_TIMER_START_EPOCH=`epoch_seconds`
+    printf '  %s ...\n' "$SCAN_TIMER_LABEL" >&3 2>/dev/null || :
+}
+
+# Close the clock: report to the operator, into the report, and into the manifest.
+scan_timer_end() {
+    _timer_section=$1
+    _timer_end_wall=`date 2>/dev/null || echo unknown`
+    _timer_end_epoch=`epoch_seconds`
+
+    _timer_elapsed=""
+    if [ -n "$SCAN_TIMER_START_EPOCH" ] && [ -n "$_timer_end_epoch" ]; then
+        _timer_elapsed=`expr "$_timer_end_epoch" - "$SCAN_TIMER_START_EPOCH" 2>/dev/null`
+    fi
+    _timer_elapsed_text=`format_elapsed "$_timer_elapsed"`
+
+    printf '    completed in %s\n' "$_timer_elapsed_text" >&3 2>/dev/null || :
+
+    blank_line
+    subsection "Scan Timing:"
+    printf 'Started:   %s\n' "$SCAN_TIMER_START_WALL"
+    printf 'Completed: %s\n' "$_timer_end_wall"
+    printf 'Elapsed:   %s\n' "$_timer_elapsed_text"
+
+    record_manifest_line "TIMING|section=$_timer_section|started=$SCAN_TIMER_START_WALL|completed=$_timer_end_wall|elapsed=$_timer_elapsed_text"
+
+    SCAN_TIMING_SUMMARY="$SCAN_TIMING_SUMMARY
+  Section $_timer_section: $_timer_elapsed_text ($SCAN_TIMER_START_WALL to $_timer_end_wall)"
+}
+
 # Usage text distinguishes full collection from dry-run testing so the client
 # can decide which execution mode is appropriate for the review activity.
 print_usage() {
@@ -2411,10 +2495,14 @@ section_with_explanation "9. Recent Login Activity" "Explanation: This section s
 print_recent_login_activity
 
 section_with_explanation "10. World-Writable Files and Directories" "Explanation: This section identifies files and directories that any account on the host can modify. A world-writable file that is executed by a privileged account allows an unprivileged user to obtain privileged execution, and a world-writable application file allows unauthorized modification of data or programs in financial-reporting scope. Read this together with the cron evidence in Sections 12 and 21, the startup evidence in Section 16, and the sudo evidence in Section 4 to determine whether anything privileged executes a world-writable path. The scan is deliberately pruned to system binary, system configuration, and application installation paths, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host; the resulting limits are stated in the output. Directories that are world-writable by design, such as /tmp, are not enumerated. Instead their sticky bit is verified, which is the actual control on a shared temporary directory. Only path, permission, and ownership metadata is recorded. The contents of a world-writable file are never printed or copied into this evidence package." ""
+scan_timer_start "Scanning system and application paths for world-writable files"
 print_world_writable_review
+scan_timer_end "10 (world-writable)"
 
 section_with_explanation "11. SetUID and SetGID Files" "Explanation: This section identifies SetUID and SetGID files, but the scan is intentionally pruned to standard system and application binary paths rather than the entire filesystem. This reduces runtime and avoids broad traversal of mounted, pseudo, and temporary filesystems while still capturing the most relevant binaries." ""
+scan_timer_start "Scanning system and application paths for SetUID/SetGID files"
 print_setuid_setgid_files
+scan_timer_end "11 (SetUID/SetGID)"
 
 _sec12_files=`section12_source_files`
 section_with_explanation "12. Scheduled Cron Jobs" "Explanation: This section shows system-wide and user cron jobs where available. Scheduled jobs matter because they can run automatically with elevated or application-specific permissions and can therefore affect controlled processing." "$_sec12_files"
@@ -2474,11 +2562,13 @@ if [ -z "$APP_DIRECTORIES" ]; then
     printf 'Application directories can be supplied with the --app-dir flag,\n'
     printf 'or by responding to the interactive prompt at script startup.\n'
 else
+    scan_timer_start "Listing application installation directories recursively"
     printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r app_path_entry; do
         if [ -n "$app_path_entry" ]; then
             print_application_directory_listing "$app_path_entry"
         fi
     done
+    scan_timer_end "23 (application directory listing)"
 fi
 
 _sec24_files=`section24_source_files`
@@ -2503,6 +2593,21 @@ printf 'Report file: %s\n' "$REPORT_FILE"
 printf 'Manifest file: %s\n' "$MANIFEST_FILE"
 printf 'Sensitive skip file: %s\n' "$SENSITIVE_SKIPPED_FILE"
 printf 'Configuration changes made: none\n'
+
+# Runtime of the filesystem-walking sections. Everything else in this collection
+# is effectively instantaneous, so these are the only figures a client or reviewer
+# would need in order to account for the script's time on the host.
+blank_line
+subsection "Scan Timing (filesystem-walking sections only):"
+if [ -n "$SCAN_TIMING_SUMMARY" ]; then
+    printf '%s\n' "$SCAN_TIMING_SUMMARY" | while IFS= read -r _timing_line; do
+        if [ -n "$_timing_line" ]; then
+            printf '%s\n' "$_timing_line"
+        fi
+    done
+else
+    printf '  no timed scans were run\n'
+fi
 
 # Transfer ownership of the evidence package to the operator who invoked
 # sudo. This runs after the report is finalized so that subsequent operator
