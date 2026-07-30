@@ -348,6 +348,51 @@ sim_verify_common() {
         sim_pass "manifest paths well formed"
     fi
 
+    # The collection log is the companion to the report: it states whether the
+    # evidence is complete. It must exist, be self-describing, carry a
+    # machine-readable verdict, and stay safe to share.
+    LOGFILE="$E/metadata/COLLECTION-LOG.txt"
+    sim_check
+    if [ -s "$LOGFILE" ]; then
+        sim_pass "collection log produced"
+    else
+        sim_fail "no collection log at $LOGFILE"
+    fi
+    sim_check
+    if grep -q '^RESULT: ' "$LOGFILE" 2>/dev/null; then
+        sim_pass "collection log carries a machine-readable RESULT verdict"
+    else
+        sim_fail "collection log has no RESULT line"
+    fi
+    sim_check
+    _sim_result=`sed -n 's/^RESULT: //p' "$LOGFILE" 2>/dev/null | head -1`
+    if [ "$_sim_result" = "COMPLETED_CLEAN" ]; then
+        sim_pass "healthy fixture reports COMPLETED_CLEAN"
+    else
+        sim_fail "expected COMPLETED_CLEAN on a healthy fixture, got '${_sim_result:-none}'"
+        grep '| WARN \|| ERROR' "$LOGFILE" 2>/dev/null | sed 's/^/            /' >&2
+    fi
+    sim_check
+    if grep -q 'read-only and makes no configuration changes' "$LOGFILE" 2>/dev/null; then
+        sim_pass "collection log states the read-only guarantee for the host admin"
+    else
+        sim_fail "collection log does not state the read-only guarantee"
+    fi
+    # The log is the artefact most likely to be forwarded informally, so it must
+    # never carry credential material even though the package as a whole might.
+    sim_check
+    if grep -qE '\$[0-9y]\$[./A-Za-z0-9]|\{ssha[0-9]+\}|BEGIN [A-Z ]*PRIVATE KEY' "$LOGFILE" 2>/dev/null; then
+        sim_fail "CREDENTIAL LEAK - credential material present in the collection log"
+    else
+        sim_pass "no credential material in the collection log"
+    fi
+    sim_check
+    if grep -q '^COLLECTION_LOG|' "$MANIFEST" 2>/dev/null; then
+        sim_pass "collection log recorded in the manifest"
+    else
+        sim_fail "collection log not recorded in the manifest"
+    fi
+
     sim_check
     if ls "$OUT/evidence"/*.tar.gz >/dev/null 2>&1; then
         sim_pass "archive created"

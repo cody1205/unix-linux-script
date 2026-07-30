@@ -345,6 +345,8 @@ scan_timer_end() {
     printf 'Elapsed:   %s\n' "$_timer_elapsed_text"
 
     record_manifest_line "TIMING|section=$_timer_section|started=$SCAN_TIMER_START_WALL|completed=$_timer_end_wall|elapsed=$_timer_elapsed_text"
+    log_event INFO timing "Section $_timer_section took $_timer_elapsed_text"
+
 
     SCAN_TIMING_SUMMARY="$SCAN_TIMING_SUMMARY
   Section $_timer_section: $_timer_elapsed_text ($SCAN_TIMER_START_WALL to $_timer_end_wall)"
@@ -436,6 +438,202 @@ record_sensitive_skip() {
     if [ -f "$SENSITIVE_SKIPPED_FILE" ]; then
         printf '%s\n' "$1" >> "$SENSITIVE_SKIPPED_FILE"
     fi
+    log_event INFO sensitive "$1 held back from the package by the credential safeguards; metadata recorded instead of contents"
+}
+
+# Collection log:
+#
+# The report answers "what is the configuration of this host". The collection log
+# answers a different question: "did this collection actually work, and is the
+# evidence in this package complete". Those are separate concerns and separate
+# audiences, which is why they are separate files.
+#
+# The log is written for three readers at once:
+#   - an auditor, who needs to know whether any evidence is missing before relying
+#     on the report, without needing to know Unix;
+#   - the client's system administrator, who needs to see exactly what the script
+#     touched on their production host and that nothing was changed;
+#   - an automated reader, which needs a stable line format and an explicit
+#     machine-readable verdict rather than prose it has to interpret.
+#
+# Each line is "timestamp | level | category | message", padded so the columns
+# line up for a human but still trivially splittable on "|" by a machine. The
+# file ends with a summary block containing a single RESULT token.
+#
+# The log deliberately records paths and outcomes only. It never contains file
+# contents, credentials, or command output, because this file is the one most
+# likely to be forwarded around informally - pasted into a ticket, mailed to the
+# client, or handed to an automated reader - and it must stay safe to share.
+LOG_FILE=""
+LOG_BUFFER=""
+LOG_READY=no
+LOG_WARN_COUNT=0
+LOG_ERROR_COUNT=0
+
+log_timestamp() {
+    date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf 'unknown-time'
+}
+
+# log_event LEVEL CATEGORY MESSAGE
+#
+# LEVEL is one of INFO, WARN, ERROR. Events raised before the evidence directory
+# exists are buffered and flushed once the log file is created, so nothing that
+# happens during startup is lost.
+log_event() {
+    _log_level=$1
+    _log_category=$2
+    _log_message=$3
+
+    case "$_log_level" in
+        WARN)  LOG_WARN_COUNT=`expr "$LOG_WARN_COUNT" + 1` ;;
+        ERROR) LOG_ERROR_COUNT=`expr "$LOG_ERROR_COUNT" + 1` ;;
+    esac
+
+    _log_ts=`log_timestamp`
+    _log_line=`printf '%s | %-5s | %-11s | %s' "$_log_ts" "$_log_level" "$_log_category" "$_log_message"`
+
+    if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+        printf '%s\n' "$_log_line" >> "$LOG_FILE" 2>/dev/null
+    else
+        LOG_BUFFER="$LOG_BUFFER
+$_log_line"
+    fi
+}
+
+# Create the log file, write the self-describing header, and flush anything that
+# was buffered before the evidence directory existed.
+initialize_collection_log() {
+    LOG_FILE="$METADATA_DIRECTORY/COLLECTION-LOG.txt"
+    if ! : > "$LOG_FILE" 2>/dev/null; then
+        LOG_FILE=""
+        return 1
+    fi
+
+    {
+        printf 'SOX ITGC EVIDENCE COLLECTION LOG\n'
+        printf '================================\n'
+        printf '\n'
+        printf 'What this file is\n'
+        printf '  A record of whether this evidence collection ran correctly and\n'
+        printf '  whether anything prevented evidence from being gathered. It is a\n'
+        printf '  companion to the audit report, not a copy of it: the report says\n'
+        printf '  what the system is configured to do, this log says whether the\n'
+        printf '  collection of that information succeeded.\n'
+        printf '\n'
+        printf 'How to read it\n'
+        printf '  Each line is:  timestamp | level | category | message\n'
+        printf '\n'
+        printf '  INFO   Normal progress. No action needed.\n'
+        printf '  WARN   The collection continued, but something limited the\n'
+        printf '         evidence. Anything marked WARN should be read before\n'
+        printf '         relying on the corresponding section of the report.\n'
+        printf '  ERROR  Something failed. The package may be incomplete or absent.\n'
+        printf '\n'
+        printf '  The RESULT line in the summary at the end of this file is the\n'
+        printf '  single overall verdict for the run.\n'
+        printf '\n'
+        printf 'For the system administrator of this host\n'
+        printf '  This script is read-only. It does not create, modify, delete,\n'
+        printf '  enable, disable, restart, or reconfigure anything on this system.\n'
+        printf '  The only files it writes are inside its own output directory,\n'
+        printf '  named in the summary below. Entries in this log describe files\n'
+        printf '  that were READ, never files that were changed.\n'
+        printf '\n'
+        printf 'Contents and handling\n'
+        printf '  This log contains file paths and outcomes only. It contains no\n'
+        printf '  file contents, no passwords or hashes, and no command output, so\n'
+        printf '  it can be shared more freely than the evidence package itself.\n'
+        printf '\n'
+        printf '================================================================\n'
+        printf '\n'
+    } >> "$LOG_FILE" 2>/dev/null
+
+    LOG_READY=yes
+
+    if [ -n "$LOG_BUFFER" ]; then
+        printf '%s\n' "$LOG_BUFFER" | while IFS= read -r _log_buffered; do
+            if [ -n "$_log_buffered" ]; then
+                printf '%s\n' "$_log_buffered" >> "$LOG_FILE" 2>/dev/null
+            fi
+        done
+        LOG_BUFFER=""
+    fi
+    return 0
+}
+
+# Overall verdict for the run, as a single stable token.
+collection_log_result() {
+    if [ "$COLLECTION_STATUS" != "ready" ]; then
+        printf 'FAILED'
+    elif [ "$LOG_ERROR_COUNT" -gt 0 ]; then
+        printf 'COMPLETED_WITH_ERRORS'
+    elif [ "$LOG_WARN_COUNT" -gt 0 ]; then
+        printf 'COMPLETED_WITH_WARNINGS'
+    else
+        printf 'COMPLETED_CLEAN'
+    fi
+}
+
+# Plain-language reading of the verdict, for a reader who is not going to parse
+# the token.
+collection_log_result_meaning() {
+    case "$1" in
+        COMPLETED_CLEAN)
+            printf 'The collection completed and nothing limited the evidence gathered.'
+            ;;
+        COMPLETED_WITH_WARNINGS)
+            printf 'The collection completed, but some evidence was limited or unavailable. Review the WARN lines above before relying on the affected report sections.'
+            ;;
+        COMPLETED_WITH_ERRORS)
+            printf 'The collection ran but at least one step failed. Review the ERROR lines above; the evidence package may be incomplete.'
+            ;;
+        FAILED)
+            printf 'The collection could not be completed. The evidence package should not be relied upon.'
+            ;;
+        *)
+            printf 'Unrecognised result.'
+            ;;
+    esac
+}
+
+# Close the log with a summary block. The RESULT, ERRORS, and WARNINGS lines are
+# deliberately bare "KEY: value" so an automated reader does not have to parse
+# prose to determine the outcome.
+finalize_collection_log() {
+    if [ "$LOG_READY" != "yes" ] || [ -z "$LOG_FILE" ]; then
+        return
+    fi
+
+    _log_result=`collection_log_result`
+    _log_meaning=`collection_log_result_meaning "$_log_result"`
+    _log_files_collected=0
+    if [ -f "$MANIFEST_FILE" ]; then
+        _log_files_collected=`grep -c '^COPIED|' "$MANIFEST_FILE" 2>/dev/null`
+        [ -n "$_log_files_collected" ] || _log_files_collected=0
+    fi
+
+    {
+        printf '\n'
+        printf '================================================================\n'
+        printf 'SUMMARY\n'
+        printf '================================================================\n'
+        printf '\n'
+        printf 'RESULT: %s\n' "$_log_result"
+        printf 'ERRORS: %s\n' "$LOG_ERROR_COUNT"
+        printf 'WARNINGS: %s\n' "$LOG_WARN_COUNT"
+        printf 'FILES_COLLECTED: %s\n' "$_log_files_collected"
+        printf 'HOST: %s\n' "$HOSTNAME_VALUE"
+        printf 'PLATFORM: %s\n' "$OS_NAME"
+        printf 'STARTED: %s\n' "$TIMESTAMP"
+        printf 'FINISHED: %s\n' "`log_timestamp`"
+        printf 'OUTPUT_DIRECTORY: %s\n' "$COLLECTION_DIRECTORY"
+        printf 'ARCHIVE: %s\n' "${ARCHIVE_FILE:-none}"
+        printf 'CONFIGURATION_CHANGES_MADE: none\n'
+        printf '\n'
+        printf 'What this means\n'
+        wrap_text "  $_log_meaning"
+        printf '\n'
+    } >> "$LOG_FILE" 2>/dev/null
 }
 
 record_file_reference() {
@@ -465,8 +663,13 @@ prepare_collection_directory() {
         : > "$MANIFEST_FILE"
         : > "$SENSITIVE_SKIPPED_FILE"
         COLLECTION_STATUS="ready"
+        initialize_collection_log
+        log_event INFO startup "evidence directory prepared at $COLLECTION_DIRECTORY"
     else
         COLLECTION_STATUS="failed to create collection directory"
+        # No log file is possible in this case, so report on the terminal.
+        printf 'ERROR: could not create the evidence directory at %s\n' "$COLLECTION_DIRECTORY" >&2
+        printf 'No evidence was collected. Check that the output directory is writable.\n' >&2
     fi
 }
 
@@ -505,7 +708,11 @@ copy_file_to_collection() {
     if mkdir -p "$target_directory" 2>/dev/null; then
         if cp -p "$file_path" "$target_path" 2>/dev/null || cp "$file_path" "$target_path" 2>/dev/null; then
             record_manifest_line "COPIED|$file_path"
+        else
+            log_event WARN evidence "$file_path was readable but could not be copied into the package; the report may reference a file that was not delivered"
         fi
+    else
+        log_event WARN evidence "could not create the destination directory for $file_path; the file was not delivered"
     fi
 }
 
@@ -679,6 +886,14 @@ print_file_with_header() {
         record_manifest_line "PRINTED|$file_path"
     else
         not_available
+        # A file that is simply absent is normal: this script targets several
+        # Unix families and most hosts legitimately lack most of these paths.
+        # A file that EXISTS but cannot be read is a genuine evidence gap, and
+        # is the case worth surfacing - in the report both render identically as
+        # "not available", which is exactly why the log separates them.
+        if path_exists "$file_path"; then
+            log_event WARN evidence "$file_path exists but could not be read; its content is missing from the evidence package"
+        fi
     fi
     blank_line
 }
@@ -1369,6 +1584,7 @@ print_world_writable_review() {
             # known once the cap is exceeded. Record that honestly rather than
             # reporting the probe count as if it were the true total.
             ww_file_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable files exist; Section 10 lists the first $WORLD_WRITABLE_MAX_ENTRIES only and the full population is not in this package"
         fi
         printf '%s\n' "$ww_files" | while IFS= read -r _ww_entry; do
             if [ -n "$_ww_entry" ]; then
@@ -1396,6 +1612,7 @@ print_world_writable_review() {
             blank_line
             ww_dirs=`printf '%s\n' "$ww_dirs" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
             ww_dir_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable directories without a sticky bit exist; Section 10 lists the first $WORLD_WRITABLE_MAX_ENTRIES only"
         fi
         printf '%s\n' "$ww_dirs" | while IFS= read -r _ww_entry; do
             if [ -n "$_ww_entry" ]; then
@@ -2089,6 +2306,7 @@ create_collection_archive() {
 
     if [ "$COLLECTION_STATUS" != "ready" ]; then
         ARCHIVE_STATUS="skipped because collection directory was not ready"
+        log_event ERROR archive "archive skipped because the evidence directory was never created"
         return
     fi
 
@@ -2097,17 +2315,20 @@ create_collection_archive() {
             if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null; then
                 ARCHIVE_FILE=$archive_base.tar.gz
                 ARCHIVE_STATUS="created"
+                log_event INFO archive "compressed archive created at $ARCHIVE_FILE"
                 return
             fi
         fi
         if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null; then
             ARCHIVE_FILE=$archive_base.tar
             ARCHIVE_STATUS="created"
+            log_event WARN archive "gzip unavailable or failed; created an uncompressed archive at $ARCHIVE_FILE"
             return
         fi
     fi
 
     ARCHIVE_STATUS="failed"
+    log_event ERROR archive "could not create an archive; the evidence directory at $COLLECTION_DIRECTORY must be transferred manually"
 }
 
 # Application directory listing flags:
@@ -2276,6 +2497,7 @@ apply_output_directory() {
 apply_ownership_to_evidence() {
     if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
         OWNERSHIP_STATUS="not adjusted (no SUDO_USER detected)"
+        log_event INFO handover "no SUDO_USER present, so evidence ownership was left unchanged"
         return
     fi
 
@@ -2300,8 +2522,10 @@ apply_ownership_to_evidence() {
 
     if [ "$chown_ok" = "yes" ]; then
         OWNERSHIP_STATUS="evidence owned by $target_owner (archive mode 0640)"
+        log_event INFO handover "evidence ownership transferred to $target_owner so it can be moved without root"
     else
         OWNERSHIP_STATUS="ownership adjustment to $target_owner encountered errors"
+        log_event WARN handover "could not transfer ownership of the evidence to $target_owner; the files remain owned by root and may need elevated access to copy"
     fi
 }
 
@@ -2475,6 +2699,27 @@ apply_output_directory
 prompt_for_app_directories
 
 prepare_collection_directory
+
+# Startup context. Recorded first so a reader can tell what was run, where, and
+# under what privileges without needing the report.
+log_event INFO startup "collection started on $HOSTNAME_VALUE (platform $OS_NAME)"
+log_event INFO startup "run mode: $RUN_PRIVILEGE_MODE"
+log_event INFO startup "invoked as: $SCRIPT_NAME"
+log_event INFO startup "this script is read-only and makes no configuration changes to this host"
+if [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
+    log_event WARN startup "running without root privileges; files readable only by root will be missing from this package"
+fi
+if [ -n "$APP_DIRECTORIES" ]; then
+    printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r _log_app_dir; do
+        if [ -n "$_log_app_dir" ]; then
+            if [ -d "$_log_app_dir" ]; then
+                log_event INFO startup "application directory selected for listing: $_log_app_dir"
+            else
+                log_event WARN startup "application directory $_log_app_dir does not exist or is not a directory; it was not listed"
+            fi
+        fi
+    done
+fi
 
 # Preserve the original stdout on file descriptor 3. The script writes the
 # report to the report file first, then replays the completed report to the
@@ -2697,6 +2942,33 @@ fi
 apply_ownership_to_evidence
 printf 'Ownership status: %s\n' "$OWNERSHIP_STATUS"
 
+log_event INFO completion "evidence collection finished"
+
+# Point the report at the log, so a reader who starts from the report knows where
+# to check whether the evidence is complete.
+blank_line
+subsection "Collection Log:"
+printf 'A record of whether this collection ran correctly, and of anything that\n'
+printf 'limited the evidence gathered, is in:\n'
+printf '  %s\n' "${LOG_FILE:-not created}"
+printf 'Review that file before relying on any section reported as not available.\n'
+
+finalize_collection_log
+record_manifest_line "COLLECTION_LOG|${LOG_FILE:-not created}"
+
 if [ -r "$REPORT_FILE" ]; then
     cat "$REPORT_FILE" >&3
 fi
+
+# Leave the operator with the verdict and where to find the detail. This is the
+# last thing printed, so it is what remains on screen after the run.
+_final_result=`collection_log_result`
+{
+    printf '\n'
+    printf '================================================================\n'
+    printf 'COLLECTION RESULT: %s\n' "$_final_result"
+    printf '  errors: %s   warnings: %s\n' "$LOG_ERROR_COUNT" "$LOG_WARN_COUNT"
+    printf '%s\n' "  `collection_log_result_meaning "$_final_result"`"
+    printf '  Full log: %s\n' "${LOG_FILE:-not created}"
+    printf '================================================================\n'
+} >&3 2>/dev/null || :

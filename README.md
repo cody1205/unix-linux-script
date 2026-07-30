@@ -32,7 +32,37 @@ SOX-ITGC-AUDIT-LINUX-UNIX/
 ├── raw_files/                             copied non-sensitive source files
 └── metadata/  MANIFEST.txt                chain of custody for every file used
             SENSITIVE_FILES_SKIPPED.txt    credential files deliberately withheld
+            COLLECTION-LOG.txt             whether the collection itself worked
 ```
+
+### The collection log
+
+The report says what the host is configured to do. `COLLECTION-LOG.txt` answers a
+different question — *did this collection work, and is the evidence complete?* —
+and is written for three readers at once: the auditor, the client's system
+administrator, and an automated reader.
+
+Each line is `timestamp | level | category | message`. `WARN` marks something
+that limited the evidence; `ERROR` marks a step that failed. The file ends with a
+summary block whose `RESULT` is one of:
+
+| RESULT | Meaning |
+| --- | --- |
+| `COMPLETED_CLEAN` | Collection completed; nothing limited the evidence. |
+| `COMPLETED_WITH_WARNINGS` | Completed, but some evidence was limited. Read the `WARN` lines before relying on the affected sections. |
+| `COMPLETED_WITH_ERRORS` | A step failed; the package may be incomplete. |
+| `FAILED` | Collection could not be completed; do not rely on the package. |
+
+The distinction the log exists to draw: a file that is **absent** is normal, since
+this script targets several Unix families and most hosts lack most of these paths.
+A file that **exists but could not be read** is a genuine evidence gap. The report
+renders both identically as "not available"; the log separates them, so a missing
+`/etc/sudoers` is visible rather than buried among expected platform differences.
+
+The log records paths and outcomes only — never file contents, credentials, or
+command output — so it stays safe to forward to the client or paste into a ticket
+even when the evidence package itself would not be. The operator also sees the
+verdict on their terminal at the end of the run.
 
 Credential-bearing files (`/etc/shadow`, AIX `/etc/security/passwd`, SSH keys,
 keytabs, LDAP bind secrets) are never printed or copied. The script records
