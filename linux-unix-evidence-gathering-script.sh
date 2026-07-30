@@ -1253,30 +1253,37 @@ world_writable_expected_shared_dirs() {
     printf '/tmp\n/var/tmp\n/dev/shm\n/var/lock\n'
 }
 
-# Scope of the scan: system binary and configuration paths, plus any application
-# roots the operator supplied with --app-dir. Application roots already covered by
-# a standard path are skipped so find does not traverse the same tree twice.
+# Application installation roots supplied by the operator with --app-dir.
+#
+# These are always listed as scan roots in their own right, even when they sit
+# underneath a directory that is already being scanned such as /opt. That looks
+# redundant but it is required once -xdev is in use: find does not cross a
+# filesystem boundary, so if /opt/someapp is a separate mount, scanning /opt stops
+# at the boundary and never enters it. Naming the application root explicitly
+# makes find start inside that filesystem, so the tree the operator specifically
+# asked about is covered either way. Where the root is not a separate mount this
+# does traverse the same files twice, which is why the callers pass their results
+# through sort -u before reporting.
+operator_app_scan_roots() {
+    if [ -z "$APP_DIRECTORIES" ]; then
+        return
+    fi
+    printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r _app_scan_root; do
+        if [ -n "$_app_scan_root" ] && [ -d "$_app_scan_root" ]; then
+            printf '%s\n' "$_app_scan_root"
+        fi
+    done
+}
+
+# Scope of the world-writable scan: system binary and configuration paths, plus
+# any application roots the operator supplied.
 world_writable_search_paths() {
     for candidate in /etc /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt; do
         if [ -d "$candidate" ]; then
             printf '%s\n' "$candidate"
         fi
     done
-
-    if [ -n "$APP_DIRECTORIES" ]; then
-        printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r _ww_app_dir; do
-            if [ -z "$_ww_app_dir" ] || [ ! -d "$_ww_app_dir" ]; then
-                continue
-            fi
-            case "$_ww_app_dir" in
-                /etc|/etc/*|/bin|/bin/*|/sbin|/sbin/*|/usr|/usr/*|/opt|/opt/*)
-                    ;;
-                *)
-                    printf '%s\n' "$_ww_app_dir"
-                    ;;
-            esac
-        done
-    fi
+    operator_app_scan_roots
 }
 
 print_world_writable_review() {
@@ -1314,7 +1321,7 @@ print_world_writable_review() {
     ww_limit_probe=`expr "$WORLD_WRITABLE_MAX_ENTRIES" + 1`
 
     subsection "World-Writable Files:"
-    ww_files=`find $ww_search_paths -xdev -type f -perm -0002 -print 2>/dev/null | head -n "$ww_limit_probe"`
+    ww_files=`find $ww_search_paths -xdev -type f -perm -0002 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
     # grep -c always prints a count but exits 1 when that count is zero, so it
     # must not be guarded with "|| echo 0" - that would emit the count twice and
     # break the numeric comparison below, leaving a clean host with a blank
@@ -1343,7 +1350,7 @@ print_world_writable_review() {
     # world-writable file: any user can delete or replace files they do not own
     # inside it, including files owned by root.
     subsection "World-Writable Directories Without the Sticky Bit:"
-    ww_dirs=`find $ww_search_paths -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | head -n "$ww_limit_probe"`
+    ww_dirs=`find $ww_search_paths -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
     ww_dir_count=`printf '%s' "$ww_dirs" | grep -c . 2>/dev/null`
     [ -n "$ww_dir_count" ] || ww_dir_count=0
     if [ "$ww_dir_count" -eq 0 ]; then
@@ -1395,9 +1402,28 @@ print_world_writable_review() {
 }
 
 # SetUID / SetGID file review:
-# The search is intentionally limited to common binary and application paths so
-# the scan remains practical and avoids broad traversal of temporary, mounted,
-# or pseudo filesystems. The find command lists matching files only.
+#
+# A SetUID program runs with the privileges of the file's owner rather than those
+# of the user who started it, so a SetUID root binary lets an unprivileged user
+# execute code as root. That is legitimate for a small number of system tools, but
+# each one is a potential privilege-escalation path, so the population is
+# inventoried for review. SetGID behaves the same way for group privileges.
+#
+# The scan is bounded exactly as the world-writable scan in Section 10 is, and for
+# the same reason: this runs on live client production systems.
+#
+# - Scope is pruned to binary and application paths rather than whole filesystems.
+# - find -xdev stops the scan at filesystem boundaries so it cannot descend into
+#   NFS or SAN mounts, place load on a remote filer, or stall on an unresponsive
+#   mount. The cost is that a separately mounted subdirectory beneath a scoped
+#   path is not traversed, so the population can under-report. That trade is made
+#   deliberately in favour of not disturbing the client, and the boundary is
+#   disclosed in the report so a reviewer knows the limit of the evidence rather
+#   than assuming the list is complete.
+# - Application roots supplied with --app-dir are scanned as roots in their own
+#   right, which is what keeps -xdev from skipping an application tree that lives
+#   on its own mount. Results are passed through sort -u because a root that is
+#   not a separate mount would otherwise be traversed twice.
 print_setuid_setgid_files() {
     if ! command_exists find; then
         not_available
@@ -1410,22 +1436,42 @@ print_setuid_setgid_files() {
             search_paths="$search_paths $candidate"
         fi
     done
+    for _suid_app_root in `operator_app_scan_roots`; do
+        search_paths="$search_paths $_suid_app_root"
+    done
+    search_paths=${search_paths# }
 
     if [ -z "$search_paths" ]; then
         not_available
         return
     fi
 
-    subsection "Pruned Search Scope:"
-    printf '%s\n' "$search_paths"
+    subsection "Scan Scope and Limits:"
+    printf 'Paths scanned: %s\n' "$search_paths"
+    printf 'Filesystem boundary: not crossed (find -xdev). Separately mounted\n'
+    printf '  subdirectories beneath the paths above are not traversed, so this\n'
+    printf '  population may under-report. This bound is deliberate: it prevents\n'
+    printf '  the scan from loading NFS or SAN mounts on a production host.\n'
+    printf 'Recorded per finding: full path. File contents are not printed or\n'
+    printf '  copied into this evidence package.\n'
     blank_line
 
     subsection "SetUID Files:"
-    find $search_paths -type f \( -perm -4000 -o -perm -04000 \) -print 2>/dev/null || not_available
+    _suid_list=`find $search_paths -xdev -type f \( -perm -4000 -o -perm -04000 \) -print 2>/dev/null | sort -u`
+    if [ -n "$_suid_list" ]; then
+        printf '%s\n' "$_suid_list"
+    else
+        no_entries_found
+    fi
     blank_line
 
     subsection "SetGID Files:"
-    find $search_paths -type f \( -perm -2000 -o -perm -02000 \) -print 2>/dev/null || not_available
+    _sgid_list=`find $search_paths -xdev -type f \( -perm -2000 -o -perm -02000 \) -print 2>/dev/null | sort -u`
+    if [ -n "$_sgid_list" ]; then
+        printf '%s\n' "$_sgid_list"
+    else
+        no_entries_found
+    fi
 }
 
 # Cron spool fallback:
@@ -2499,7 +2545,7 @@ scan_timer_start "Scanning system and application paths for world-writable files
 print_world_writable_review
 scan_timer_end "10 (world-writable)"
 
-section_with_explanation "11. SetUID and SetGID Files" "Explanation: This section identifies SetUID and SetGID files, but the scan is intentionally pruned to standard system and application binary paths rather than the entire filesystem. This reduces runtime and avoids broad traversal of mounted, pseudo, and temporary filesystems while still capturing the most relevant binaries." ""
+section_with_explanation "11. SetUID and SetGID Files" "Explanation: A SetUID program runs with the privileges of the file owner rather than those of the user who started it, so a SetUID root binary allows an unprivileged user to execute code with root privileges. A small number of system tools legitimately require this, but each one is a potential privilege-escalation path, so the population is inventoried for review. SetGID behaves the same way for group privileges. The scan is deliberately pruned to standard system and application binary paths rather than the entire filesystem, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host. The resulting limits are stated in the output so a reviewer can see the bound on the evidence rather than assuming the population is complete. Application directories supplied at runtime are scanned as roots in their own right so that an application tree residing on its own mount is still covered." ""
 scan_timer_start "Scanning system and application paths for SetUID/SetGID files"
 print_setuid_setgid_files
 scan_timer_end "11 (SetUID/SetGID)"

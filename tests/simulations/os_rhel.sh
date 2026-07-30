@@ -575,6 +575,17 @@ verify_os() {
     assert_report_matches '/opt/finapp/logs' 'world-writable directory without sticky bit surfaced'
     assert_report_matches 'Sticky bit: present \(expected\)' 'sticky bit verified on shared temp directories'
     assert_report_matches 'Filesystem boundary: not crossed' 'scan limits disclosed in the report'
+    # Both filesystem-walking scans must disclose the boundary, not just Section 10.
+    sim_check
+    _boundary_disclosures=`grep -c 'Filesystem boundary: not crossed' "$REPORT" 2>/dev/null`
+    if [ "${_boundary_disclosures:-0}" -ge 2 ]; then
+        sim_pass "both world-writable and SetUID scans disclose the boundary"
+    else
+        sim_fail "expected boundary disclosure in both scan sections, found ${_boundary_disclosures:-0}"
+    fi
+    # The operator-supplied application root is scanned in its own right, which is
+    # what stops -xdev skipping an application tree that sits on its own mount.
+    assert_report_matches 'Paths scanned:.*/opt/finapp' 'application root scanned as a root in its own right'
     # The same script must also appear as a scheduled job, so the two sections can
     # be joined during the review.
     assert_report_matches 'svc_deploy  /opt/finapp/bin/nightly-close\.sh' 'cron job referencing that script captured'
