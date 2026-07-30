@@ -707,7 +707,12 @@ copy_file_to_collection() {
 
     if mkdir -p "$target_directory" 2>/dev/null; then
         if cp -p "$file_path" "$target_path" 2>/dev/null || cp "$file_path" "$target_path" 2>/dev/null; then
-            record_manifest_line "COPIED|$file_path"
+            # The permissions and ownership of the SOURCE file are a control fact
+            # and are recorded here. The permissions of our copy are not evidence
+            # and are normalised at handover so the audit team can read them.
+            _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
+            record_manifest_line "COPIED|$file_path|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
         else
             log_event WARN evidence "$file_path was readable but could not be copied into the package; the report may reference a file that was not delivered"
         fi
@@ -2429,7 +2434,7 @@ prompt_for_output_directory() {
 
     printf '\n'
     printf 'Evidence Output Directory\n'
-    printf '-------------------------\n'
+    printf '%s\n' '-------------------------'
     printf 'The script will create the SOX-ITGC-AUDIT-LINUX-UNIX/ collection\n'
     printf 'folder and the resulting tar.gz archive inside the output\n'
     printf 'directory you choose. If the directory does not exist, the\n'
@@ -2494,39 +2499,166 @@ apply_output_directory() {
 # restrictive umask 077 because they may contain sensitive configuration.
 # When SUDO_USER is not set (for example, dry-run or non-root execution),
 # no ownership change is attempted.
-apply_ownership_to_evidence() {
-    if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
-        OWNERSHIP_STATUS="not adjusted (no SUDO_USER detected)"
-        log_event INFO handover "no SUDO_USER present, so evidence ownership was left unchanged"
+# Extraction guidance shipped inside the package.
+#
+# The single most common way an evidence package becomes unreadable is being
+# extracted with sudo. GNU tar restores the archived numeric UID and GID when it
+# runs as root, and those numbers come from the CLIENT's account database, where
+# they mean nothing on the auditor's machine. Extracted as an ordinary user, tar
+# assigns the files to whoever ran it and the package just opens. The instinct
+# when files "look like root files" is to reach for sudo, which is precisely what
+# causes the problem, so it is stated here in the package itself rather than in a
+# document that travels separately and gets lost.
+write_handling_instructions() {
+    _handling_file="$COLLECTION_DIRECTORY/HOW-TO-READ-THIS-EVIDENCE.txt"
+    {
+        printf 'HOW TO READ THIS EVIDENCE PACKAGE\n'
+        printf '=================================\n'
+        printf '\n'
+        printf 'Extracting the archive\n'
+        printf '%s\n' '----------------------'
+        printf 'Extract it as your normal user account. Do NOT use sudo:\n'
+        printf '\n'
+        printf '    tar -xzf %s.tar.gz\n' "$ARCHIVE_BASE_NAME"
+        printf '\n'
+        printf 'Extracting with sudo is the usual cause of an unreadable package.\n'
+        printf 'As root, tar restores the numeric user and group IDs recorded in\n'
+        printf 'the archive. Those numbers come from the client system and mean\n'
+        printf 'nothing on yours, so the files end up owned by an account you do\n'
+        printf 'not have. Extracted as yourself, the files belong to you and open\n'
+        printf 'normally.\n'
+        printf '\n'
+        printf 'If the files are still unreadable\n'
+        printf '%s\n' '---------------------------------'
+        printf 'Take ownership of your own copy and make it readable to you and\n'
+        printf 'your team. This changes only the copy you extracted:\n'
+        printf '\n'
+        printf '    chown -R "$(id -un)":"$(id -gn)" SOX-ITGC-AUDIT-LINUX-UNIX\n'
+        printf '    chmod -R u=rwX,g=rX,o= SOX-ITGC-AUDIT-LINUX-UNIX\n'
+        printf '\n'
+        printf 'Do not use chmod -R 777. It is not needed, and it makes the\n'
+        printf 'evidence readable to every account on your machine.\n'
+        printf '\n'
+        printf 'What is in here\n'
+        printf '%s\n' '---------------'
+        printf '  report/SOX-ITGC-AUDIT-REPORT.txt\n'
+        printf '      The audit report. Start here.\n'
+        printf '  metadata/COLLECTION-LOG.txt\n'
+        printf '      Whether the collection worked and whether any evidence is\n'
+        printf '      missing. Read the RESULT line before relying on the report.\n'
+        printf '  metadata/MANIFEST.txt\n'
+        printf '      Every file used, with the permissions and ownership it had\n'
+        printf '      on the source system.\n'
+        printf '  metadata/SENSITIVE_FILES_SKIPPED.txt\n'
+        printf '      Credential files deliberately withheld. Their absence is by\n'
+        printf '      design, not a collection failure.\n'
+        printf '  raw_files/\n'
+        printf '      Copies of the source files, under their original paths.\n'
+        printf '\n'
+        printf 'A note on file permissions in this package\n'
+        printf '%s\n' '------------------------------------------'
+        printf 'Directories are 0750 and files 0640 so that you and your team can\n'
+        printf 'read them while others cannot. These are handover permissions and\n'
+        printf 'are NOT evidence. The permissions each file had on the source\n'
+        printf 'system are recorded in metadata/MANIFEST.txt, which is where to\n'
+        printf 'look when the permission itself is the control being tested.\n'
+        printf '\n'
+        printf 'Handling\n'
+        printf '%s\n' '--------'
+        printf 'This package describes access control on a production system.\n'
+        printf 'Treat it as confidential and transfer it over an encrypted channel.\n'
+    } > "$_handling_file" 2>/dev/null
+
+    if [ -f "$_handling_file" ]; then
+        record_manifest_line "GENERATED|$_handling_file"
+        log_event INFO handover "extraction and handling instructions written to $_handling_file"
+    fi
+}
+
+# Handing the package over so the audit team can actually read it:
+#
+# During collection the evidence is deliberately restrictive (umask 077, root
+# owned) so it is not exposed while it sits on the client's production server.
+# That posture is correct there and wrong the moment the package leaves: an
+# auditor who receives a tree of root-owned 0600 files cannot open it, and the
+# usual reaction - extracting it with sudo, or chmod -R 777 - is worse than the
+# problem. So the package is normalised once, here, at the point of handover.
+#
+# Directories become 0750 and files 0640, owned by the operator who invoked sudo
+# and their primary group. That is readable by the operator and by their team
+# through the group, and by nobody else. It is applied BEFORE the archive is
+# created, so the archive carries these modes rather than the collection-time
+# ones; permissions inside a tar are what the recipient gets.
+#
+# Normalising the copies does not discard evidence: the ORIGINAL permissions and
+# ownership of every collected file are recorded in the manifest at copy time,
+# which is where that fact belongs. The mode of our copy was never the evidence.
+normalize_package_permissions() {
+    if [ ! -d "$COLLECTION_DIRECTORY" ]; then
         return
     fi
-
-    target_group=""
-    if command_exists id; then
-        target_group=`id -gn "$SUDO_USER" 2>/dev/null`
-    fi
-    if [ -n "$target_group" ]; then
-        target_owner="$SUDO_USER:$target_group"
+    # The X operator grants execute only where it is already meaningful, which in
+    # practice means directories. One recursive call rather than a chmod process
+    # per file, and POSIX rather than a GNU find extension.
+    _perm_ok=yes
+    chmod -R u=rwX,g=rX,o= "$COLLECTION_DIRECTORY" 2>/dev/null || _perm_ok=no
+    if [ "$_perm_ok" = "yes" ]; then
+        log_event INFO handover "package permissions normalised to 0750 directories and 0640 files so the audit team can read the evidence after transfer"
     else
-        target_owner="$SUDO_USER"
+        log_event WARN handover "could not normalise permissions on the whole package; some files may be unreadable to the audit team after transfer"
+    fi
+}
+
+# Resolve the operator who invoked sudo, if any.
+handover_target_owner() {
+    if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
+        return 1
+    fi
+    _handover_group=""
+    if command_exists id; then
+        _handover_group=`id -gn "$SUDO_USER" 2>/dev/null`
+    fi
+    if [ -n "$_handover_group" ]; then
+        printf '%s:%s' "$SUDO_USER" "$_handover_group"
+    else
+        printf '%s' "$SUDO_USER"
+    fi
+    return 0
+}
+
+# Ownership of the evidence tree. Runs before the archive is created so the
+# archive records the operator as owner rather than root.
+apply_ownership_to_evidence() {
+    if ! target_owner=`handover_target_owner`; then
+        OWNERSHIP_STATUS="not adjusted (no SUDO_USER detected)"
+        log_event INFO handover "no SUDO_USER present, so evidence ownership was left unchanged; whoever transfers this package may need elevated access to read it"
+        return
     fi
 
     chown_ok=yes
     if [ -d "$COLLECTION_DIRECTORY" ]; then
         chown -R "$target_owner" "$COLLECTION_DIRECTORY" 2>/dev/null || chown_ok=no
     fi
-    if [ -n "$ARCHIVE_FILE" ] && [ -f "$ARCHIVE_FILE" ]; then
-        chown "$target_owner" "$ARCHIVE_FILE" 2>/dev/null || chown_ok=no
-        chmod 0640 "$ARCHIVE_FILE" 2>/dev/null || chown_ok=no
-    fi
 
     if [ "$chown_ok" = "yes" ]; then
-        OWNERSHIP_STATUS="evidence owned by $target_owner (archive mode 0640)"
-        log_event INFO handover "evidence ownership transferred to $target_owner so it can be moved without root"
+        OWNERSHIP_STATUS="evidence owned by $target_owner (directories 0750, files 0640)"
+        log_event INFO handover "evidence ownership transferred to $target_owner so it can be moved and read without root"
     else
         OWNERSHIP_STATUS="ownership adjustment to $target_owner encountered errors"
-        log_event WARN handover "could not transfer ownership of the evidence to $target_owner; the files remain owned by root and may need elevated access to copy"
+        log_event WARN handover "could not transfer ownership of the evidence to $target_owner; the files remain owned by root and will need elevated access to read"
     fi
+}
+
+# Ownership of the archive itself, which can only run once the archive exists.
+apply_ownership_to_archive() {
+    if [ -z "$ARCHIVE_FILE" ] || [ ! -f "$ARCHIVE_FILE" ]; then
+        return
+    fi
+    if ! _archive_owner=`handover_target_owner`; then
+        return
+    fi
+    chown "$_archive_owner" "$ARCHIVE_FILE" 2>/dev/null
+    chmod 0640 "$ARCHIVE_FILE" 2>/dev/null
 }
 
 # Interactive application directory prompt:
@@ -2547,7 +2679,7 @@ prompt_for_app_directories() {
 
     printf '\n'
     printf 'Application Installation Directory Listing\n'
-    printf '------------------------------------------\n'
+    printf '%s\n' '------------------------------------------'
     printf 'You may include one or more application installation directories\n'
     printf 'in the evidence collection. The script will run a recursive\n'
     printf 'directory listing on each directory you provide.\n'
@@ -2906,16 +3038,17 @@ _sec25_files=`section25_source_files`
 section_with_explanation "25. Authentication Log Samples" "Explanation: This section shows the most recent entries from the host's authentication logs to demonstrate that login and privilege activity was actually being recorded at the time of collection. It complements Section 15, which shows how logging is configured, by providing evidence that logging is operating. Only the sampled lines shown here are included in the evidence; the full log files are intentionally not copied because production authentication logs can be very large. Each sampled log is recorded in the manifest as LOG_SAMPLED." "$_sec25_files" "no"
 print_auth_log_samples
 
-create_collection_archive
-
 section "Execution Summary"
 printf 'Status: completed\n'
 printf 'Behavior: report file plus local evidence packaging\n'
 printf 'Output directory: %s\n' "$WORKING_DIRECTORY"
 printf 'Files created in output directory: %s\n' "$COLLECTION_DIRECTORY"
 printf 'Collection directory status: %s\n' "$COLLECTION_STATUS"
-printf 'Archive status: %s\n' "$ARCHIVE_STATUS"
-printf 'Archive file: %s\n' "${ARCHIVE_FILE:-not available}"
+printf 'Archive file (planned): %s\n' "$WORKING_DIRECTORY/$ARCHIVE_BASE_NAME.tar.gz"
+printf 'Archive note: the archive is created after this report and the collection\n'
+printf '  log are finalized, so that both are complete inside it. An archive cannot\n'
+printf '  record the outcome of its own creation; that result is printed on the\n'
+printf '  operator terminal and appended to the collection log on disk.\n'
 printf 'Report file: %s\n' "$REPORT_FILE"
 printf 'Manifest file: %s\n' "$MANIFEST_FILE"
 printf 'Sensitive skip file: %s\n' "$SENSITIVE_SKIPPED_FILE"
@@ -2939,9 +3072,6 @@ fi
 # Transfer ownership of the evidence package to the operator who invoked
 # sudo. This runs after the report is finalized so that subsequent operator
 # actions (copy, scp, email, ftp) do not require sudo.
-apply_ownership_to_evidence
-printf 'Ownership status: %s\n' "$OWNERSHIP_STATUS"
-
 log_event INFO completion "evidence collection finished"
 
 # Point the report at the log, so a reader who starts from the report knows where
@@ -2953,8 +3083,27 @@ printf 'limited the evidence gathered, is in:\n'
 printf '  %s\n' "${LOG_FILE:-not created}"
 printf 'Review that file before relying on any section reported as not available.\n'
 
-finalize_collection_log
 record_manifest_line "COLLECTION_LOG|${LOG_FILE:-not created}"
+
+# Order from here matters and is the reason the archive is built last.
+#
+# The archive is what actually reaches the audit team, so everything that belongs
+# in the package has to be finished before it is created. Building it earlier
+# produced an archive whose report stopped short of the execution summary and
+# whose collection log had no RESULT verdict, while the copies left behind on the
+# client's server were complete - so the delivered evidence was the truncated one.
+#
+# Permissions and ownership are also applied before archiving, because the modes
+# recorded inside a tar are the modes the recipient gets.
+finalize_collection_log
+write_handling_instructions
+normalize_package_permissions
+apply_ownership_to_evidence
+create_collection_archive
+apply_ownership_to_archive
+
+# The archive result cannot be inside the archive, so it goes to the on-disk log.
+log_event INFO archive "archive status: $ARCHIVE_STATUS"
 
 if [ -r "$REPORT_FILE" ]; then
     cat "$REPORT_FILE" >&3

@@ -160,7 +160,7 @@ while IFS= read -r line; do
         COPIED\|*) ;;
         *) continue ;;
     esac
-    src=`printf '%s' "$line" | sed 's/^COPIED|//'`
+    src=`printf '%s' "$line" | sed 's/^COPIED|//' | cut -d'|' -f1`
     copied=`expr $copied + 1`
     if [ ! -f "$E/raw_files$src" ]; then
         printf '            claimed but absent: %s\n' "$src" >&2

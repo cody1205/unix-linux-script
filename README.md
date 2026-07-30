@@ -35,6 +35,27 @@ SOX-ITGC-AUDIT-LINUX-UNIX/
             COLLECTION-LOG.txt             whether the collection itself worked
 ```
 
+### Receiving and opening the package
+
+Extract the archive **as your normal user account, not with sudo**. Extracting as
+root makes `tar` restore the numeric user and group IDs recorded in the archive;
+those come from the client system and mean nothing on yours, which is the usual
+cause of an evidence package that will not open:
+
+```sh
+tar -xzf SOX-ITGC-AUDIT-LINUX-UNIX-<host>-<timestamp>.tar.gz
+```
+
+The package ships with `HOW-TO-READ-THIS-EVIDENCE.txt` at its top level covering
+the same ground, so the guidance travels with the evidence rather than in a
+separate document.
+
+Inside the package, directories are `0750` and files `0640`, owned by the operator
+who ran the collection — readable by them and their team, and by nobody else.
+Those are **handover permissions and are not evidence**: the permissions and
+ownership each file had on the source system are recorded in `MANIFEST.txt`, which
+is where to look when the permission itself is the control being tested.
+
 ### The collection log
 
 The report says what the host is configured to do. `COLLECTION-LOG.txt` answers a

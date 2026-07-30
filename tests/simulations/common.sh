@@ -326,7 +326,7 @@ sim_verify_common() {
     _copied=0
     while IFS= read -r _line; do
         case "$_line" in COPIED\|*) ;; *) continue ;; esac
-        _src=`printf '%s' "$_line" | sed 's/^COPIED|//'`
+        _src=`printf '%s' "$_line" | sed 's/^COPIED|//' | cut -d'|' -f1`
         _copied=`expr $_copied + 1`
         if [ ! -f "$E/raw_files$_src" ]; then
             printf '            claimed but absent: %s\n' "$_src" >&2
@@ -398,6 +398,47 @@ sim_verify_common() {
         sim_pass "archive created"
     else
         sim_fail "no archive created"
+    fi
+
+    # The archive is what actually reaches the audit team, so completeness has to
+    # be asserted against the ARCHIVE, not against the copy left on the server.
+    # These previously differed: the archive was built before the report and log
+    # were finished, so the delivered evidence was the truncated one.
+    sim_check
+    _sim_arc=`ls "$OUT/evidence"/*.tar.gz 2>/dev/null | head -1`
+    if [ -n "$_sim_arc" ]; then
+        rm -rf "$OUT/archive-check"
+        mkdir -p "$OUT/archive-check"
+        if ( cd "$OUT/archive-check" && tar -xzf "$_sim_arc" ) 2>/dev/null; then
+            _sim_ar="$OUT/archive-check/SOX-ITGC-AUDIT-LINUX-UNIX"
+            if grep -q 'Execution Summary' "$_sim_ar/report/SOX-ITGC-AUDIT-REPORT.txt" 2>/dev/null &&
+               grep -q '^RESULT: ' "$_sim_ar/metadata/COLLECTION-LOG.txt" 2>/dev/null &&
+               [ -f "$_sim_ar/HOW-TO-READ-THIS-EVIDENCE.txt" ]; then
+                sim_pass "archive contains the finished report, the log verdict, and the handling instructions"
+            else
+                sim_fail "archive content is incomplete (report summary, log RESULT, or handling file missing)"
+            fi
+        else
+            sim_fail "archive could not be extracted"
+        fi
+    else
+        sim_fail "no archive to inspect"
+    fi
+
+    # Handover permissions: readable by the operator and their group, nobody else.
+    sim_check
+    _sim_bad_modes=`find "$E" -type f ! -perm -0040 2>/dev/null | head -3`
+    if [ -z "$_sim_bad_modes" ]; then
+        sim_pass "package files are group-readable for the audit team"
+    else
+        sim_fail "package contains files the audit team cannot read:"
+        printf '%s\n' "$_sim_bad_modes" | sed 's/^/            /' >&2
+    fi
+    sim_check
+    if find "$E" -perm -0004 2>/dev/null | grep -q .; then
+        sim_fail "package contains world-readable entries; evidence should not be open to all"
+    else
+        sim_pass "package is not world-readable"
     fi
 
     # The filesystem-walking sections must account for their own runtime, both in
