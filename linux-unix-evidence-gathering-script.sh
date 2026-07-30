@@ -345,6 +345,8 @@ scan_timer_end() {
     printf 'Elapsed:   %s\n' "$_timer_elapsed_text"
 
     record_manifest_line "TIMING|section=$_timer_section|started=$SCAN_TIMER_START_WALL|completed=$_timer_end_wall|elapsed=$_timer_elapsed_text"
+    log_event INFO timing "Section $_timer_section took $_timer_elapsed_text"
+
 
     SCAN_TIMING_SUMMARY="$SCAN_TIMING_SUMMARY
   Section $_timer_section: $_timer_elapsed_text ($SCAN_TIMER_START_WALL to $_timer_end_wall)"
@@ -436,6 +438,272 @@ record_sensitive_skip() {
     if [ -f "$SENSITIVE_SKIPPED_FILE" ]; then
         printf '%s\n' "$1" >> "$SENSITIVE_SKIPPED_FILE"
     fi
+    log_event INFO sensitive "$1 held back from the package by the credential safeguards; metadata recorded instead of contents"
+}
+
+# Collection log:
+#
+# The report answers "what is the configuration of this host". The collection log
+# answers a different question: "did this collection actually work, and is the
+# evidence in this package complete". Those are separate concerns and separate
+# audiences, which is why they are separate files.
+#
+# The log is written for three readers at once:
+#   - an auditor, who needs to know whether any evidence is missing before relying
+#     on the report, without needing to know Unix;
+#   - the client's system administrator, who needs to see exactly what the script
+#     touched on their production host and that nothing was changed;
+#   - an automated reader, which needs a stable line format and an explicit
+#     machine-readable verdict rather than prose it has to interpret.
+#
+# Each line is "timestamp | level | category | message", padded so the columns
+# line up for a human but still trivially splittable on "|" by a machine. The
+# file ends with a summary block containing a single RESULT token.
+#
+# The log deliberately records paths and outcomes only. It never contains file
+# contents, credentials, or command output, because this file is the one most
+# likely to be forwarded around informally - pasted into a ticket, mailed to the
+# client, or handed to an automated reader - and it must stay safe to share.
+LOG_FILE=""
+LOG_BUFFER=""
+LOG_READY=no
+LOG_WARN_COUNT=0
+LOG_ERROR_COUNT=0
+
+log_timestamp() {
+    date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf 'unknown-time'
+}
+
+# log_event LEVEL CATEGORY MESSAGE
+#
+# LEVEL is one of INFO, WARN, ERROR. Events raised before the evidence directory
+# exists are buffered and flushed once the log file is created, so nothing that
+# happens during startup is lost.
+log_event() {
+    _log_level=$1
+    _log_category=$2
+    _log_message=$3
+
+    case "$_log_level" in
+        WARN)  LOG_WARN_COUNT=`expr "$LOG_WARN_COUNT" + 1` ;;
+        ERROR) LOG_ERROR_COUNT=`expr "$LOG_ERROR_COUNT" + 1` ;;
+    esac
+
+    _log_ts=`log_timestamp`
+    _log_line=`printf '%s | %-5s | %-11s | %s' "$_log_ts" "$_log_level" "$_log_category" "$_log_message"`
+
+    if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+        printf '%s\n' "$_log_line" >> "$LOG_FILE" 2>/dev/null
+    else
+        LOG_BUFFER="$LOG_BUFFER
+$_log_line"
+    fi
+}
+
+# Create the log file, write the self-describing header, and flush anything that
+# was buffered before the evidence directory existed.
+initialize_collection_log() {
+    LOG_FILE="$METADATA_DIRECTORY/COLLECTION-LOG.txt"
+    if ! : > "$LOG_FILE" 2>/dev/null; then
+        LOG_FILE=""
+        return 1
+    fi
+
+    {
+        printf 'SOX ITGC EVIDENCE COLLECTION LOG\n'
+        printf '================================\n'
+        printf '\n'
+        printf 'What this file is\n'
+        printf '  A record of whether this evidence collection ran correctly and\n'
+        printf '  whether anything prevented evidence from being gathered. It is a\n'
+        printf '  companion to the audit report, not a copy of it: the report says\n'
+        printf '  what the system is configured to do, this log says whether the\n'
+        printf '  collection of that information succeeded.\n'
+        printf '\n'
+        printf 'How to read it\n'
+        printf '  Each line is:  timestamp | level | category | message\n'
+        printf '\n'
+        printf '  INFO   Normal progress. No action needed.\n'
+        printf '  WARN   The collection continued, but something limited the\n'
+        printf '         evidence. Anything marked WARN should be read before\n'
+        printf '         relying on the corresponding section of the report.\n'
+        printf '  ERROR  Something failed. The package may be incomplete or absent.\n'
+        printf '\n'
+        printf '  The RESULT line in the summary at the end of this file is the\n'
+        printf '  single overall verdict for the run.\n'
+        printf '\n'
+        printf 'For the system administrator of this host\n'
+        printf '  This script is read-only. It does not create, modify, delete,\n'
+        printf '  enable, disable, restart, or reconfigure anything on this system.\n'
+        printf '  The only files it writes are inside its own output directory,\n'
+        printf '  named in the summary below. Entries in this log describe files\n'
+        printf '  that were READ, never files that were changed.\n'
+        printf '\n'
+        printf 'Contents and handling\n'
+        printf '  This log contains file paths and outcomes only. It contains no\n'
+        printf '  file contents, no passwords or hashes, and no command output, so\n'
+        printf '  it can be shared more freely than the evidence package itself.\n'
+        printf '\n'
+        printf '================================================================\n'
+        printf '\n'
+    } >> "$LOG_FILE" 2>/dev/null
+
+    LOG_READY=yes
+
+    if [ -n "$LOG_BUFFER" ]; then
+        printf '%s\n' "$LOG_BUFFER" | while IFS= read -r _log_buffered; do
+            if [ -n "$_log_buffered" ]; then
+                printf '%s\n' "$_log_buffered" >> "$LOG_FILE" 2>/dev/null
+            fi
+        done
+        LOG_BUFFER=""
+    fi
+    return 0
+}
+
+# The archive is created after the log is closed, so nothing about it can appear
+# in the summary above, and none of it can appear inside the archived copy of this
+# log at all - an archive cannot record whether it was created.
+#
+# The addendum is opened BEFORE the archive is built so that everything the
+# archive step reports lands beneath its heading rather than loose under the
+# summary, and closed afterwards with the outcome and the final counts. This
+# matters beyond tidiness: an archive failure raises an ERROR after the verdict
+# has already been written, so without the addendum the log could read
+# "COMPLETED_CLEAN" with an error logged underneath it. The closing counts here
+# are the ones that account for the archive.
+open_log_addendum() {
+    if [ "$LOG_READY" != "yes" ] || [ -z "$LOG_FILE" ]; then
+        return
+    fi
+    {
+        printf '\n'
+        printf '%s\n' '---------------------------------------------------------------'
+        printf 'ADDENDUM: the archive step, which runs after the log is closed\n'
+        printf '%s\n' '---------------------------------------------------------------'
+        printf 'This section is absent from the copy of this log inside the archive,\n'
+        printf 'because the archive was already sealed when it was written. The\n'
+        printf 'RESULT above covers the collection; the archive outcome is below.\n'
+        printf '\n'
+    } >> "$LOG_FILE" 2>/dev/null
+}
+
+close_log_addendum() {
+    if [ "$LOG_READY" != "yes" ] || [ -z "$LOG_FILE" ]; then
+        return
+    fi
+    recount_log_levels
+    {
+        printf '\n'
+        printf 'ARCHIVE_RESULT: %s\n' "$ARCHIVE_STATUS"
+        printf 'ARCHIVE_FILE: %s\n' "${ARCHIVE_FILE:-none}"
+        printf 'FINAL_ERRORS: %s\n' "$LOG_ERROR_COUNT"
+        printf 'FINAL_WARNINGS: %s\n' "$LOG_WARN_COUNT"
+        printf 'FINAL_RESULT: %s\n' "`collection_log_result`"
+        printf '\n'
+        printf 'FINAL_RESULT supersedes the RESULT above when they differ, which\n'
+        printf 'happens only when the archive step itself reported a problem.\n'
+    } >> "$LOG_FILE" 2>/dev/null
+}
+
+# Recompute the WARN and ERROR tallies from the log file itself.
+#
+# The in-memory counters undercount, and the reason is structural: log_event runs
+# inside pipeline subshells - the "printf | while read" loops that walk section
+# file lists and the --app-dir validation - and a counter incremented in a
+# subshell is lost when that subshell exits. The log LINE is not lost, because it
+# is appended directly to the file. So the file is the authoritative record, and
+# every verdict and count is derived from it; the in-memory counters remain only
+# as a fallback for the case where no log file could be created at all.
+#
+# The grep patterns match the padded column layout log_event writes
+# (" | WARN  | ", " | ERROR | ") and cannot match the prose in the header or
+# summary, which never carries the surrounding pipe columns.
+recount_log_levels() {
+    if [ "$LOG_READY" = "yes" ] && [ -f "$LOG_FILE" ]; then
+        LOG_WARN_COUNT=`grep -c ' | WARN  | ' "$LOG_FILE" 2>/dev/null`
+        [ -n "$LOG_WARN_COUNT" ] || LOG_WARN_COUNT=0
+        LOG_ERROR_COUNT=`grep -c ' | ERROR | ' "$LOG_FILE" 2>/dev/null`
+        [ -n "$LOG_ERROR_COUNT" ] || LOG_ERROR_COUNT=0
+    fi
+}
+
+# Overall verdict for the run, as a single stable token.
+collection_log_result() {
+    recount_log_levels
+    if [ "$COLLECTION_STATUS" != "ready" ]; then
+        printf 'FAILED'
+    elif [ "$LOG_ERROR_COUNT" -gt 0 ]; then
+        printf 'COMPLETED_WITH_ERRORS'
+    elif [ "$LOG_WARN_COUNT" -gt 0 ]; then
+        printf 'COMPLETED_WITH_WARNINGS'
+    else
+        printf 'COMPLETED_CLEAN'
+    fi
+}
+
+# Plain-language reading of the verdict, for a reader who is not going to parse
+# the token.
+collection_log_result_meaning() {
+    case "$1" in
+        COMPLETED_CLEAN)
+            printf 'The collection completed and nothing limited the evidence gathered.'
+            ;;
+        COMPLETED_WITH_WARNINGS)
+            printf 'The collection completed, but some evidence was limited or unavailable. Review the WARN lines above before relying on the affected report sections.'
+            ;;
+        COMPLETED_WITH_ERRORS)
+            printf 'The collection ran but at least one step failed. Review the ERROR lines above; the evidence package may be incomplete.'
+            ;;
+        FAILED)
+            printf 'The collection could not be completed. The evidence package should not be relied upon.'
+            ;;
+        *)
+            printf 'Unrecognised result.'
+            ;;
+    esac
+}
+
+# Close the log with a summary block. The RESULT, ERRORS, and WARNINGS lines are
+# deliberately bare "KEY: value" so an automated reader does not have to parse
+# prose to determine the outcome.
+finalize_collection_log() {
+    if [ "$LOG_READY" != "yes" ] || [ -z "$LOG_FILE" ]; then
+        return
+    fi
+
+    recount_log_levels
+    _log_result=`collection_log_result`
+    _log_meaning=`collection_log_result_meaning "$_log_result"`
+    _log_files_collected=0
+    if [ -f "$MANIFEST_FILE" ]; then
+        _log_files_collected=`grep -c '^COPIED|' "$MANIFEST_FILE" 2>/dev/null`
+        [ -n "$_log_files_collected" ] || _log_files_collected=0
+    fi
+
+    {
+        printf '\n'
+        printf '================================================================\n'
+        printf 'SUMMARY\n'
+        printf '================================================================\n'
+        printf '\n'
+        printf 'RESULT: %s\n' "$_log_result"
+        printf 'ERRORS: %s\n' "$LOG_ERROR_COUNT"
+        printf 'WARNINGS: %s\n' "$LOG_WARN_COUNT"
+        printf 'FILES_COLLECTED: %s\n' "$_log_files_collected"
+        printf 'HOST: %s\n' "$HOSTNAME_VALUE"
+        printf 'PLATFORM: %s\n' "$OS_NAME"
+        printf 'STARTED: %s\n' "$TIMESTAMP"
+        printf 'FINISHED: %s\n' "`log_timestamp`"
+        printf 'OUTPUT_DIRECTORY: %s\n' "$COLLECTION_DIRECTORY"
+        printf 'ARCHIVE_PLANNED: %s\n' "$WORKING_DIRECTORY/$ARCHIVE_BASE_NAME"
+        printf 'ARCHIVE_RESULT: reported in the addendum below, if present\n'
+        printf 'CONFIGURATION_CHANGES_MADE: none\n'
+        printf '\n'
+        printf 'What this means\n'
+        wrap_text "  $_log_meaning"
+        printf '\n'
+    } >> "$LOG_FILE" 2>/dev/null
 }
 
 record_file_reference() {
@@ -465,8 +733,13 @@ prepare_collection_directory() {
         : > "$MANIFEST_FILE"
         : > "$SENSITIVE_SKIPPED_FILE"
         COLLECTION_STATUS="ready"
+        initialize_collection_log
+        log_event INFO startup "evidence directory prepared at $COLLECTION_DIRECTORY"
     else
         COLLECTION_STATUS="failed to create collection directory"
+        # No log file is possible in this case, so report on the terminal.
+        printf 'ERROR: could not create the evidence directory at %s\n' "$COLLECTION_DIRECTORY" >&2
+        printf 'No evidence was collected. Check that the output directory is writable.\n' >&2
     fi
 }
 
@@ -504,8 +777,17 @@ copy_file_to_collection() {
 
     if mkdir -p "$target_directory" 2>/dev/null; then
         if cp -p "$file_path" "$target_path" 2>/dev/null || cp "$file_path" "$target_path" 2>/dev/null; then
-            record_manifest_line "COPIED|$file_path"
+            # The permissions and ownership of the SOURCE file are a control fact
+            # and are recorded here. The permissions of our copy are not evidence
+            # and are normalised at handover so the audit team can read them.
+            _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
+            record_manifest_line "COPIED|$file_path|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+        else
+            log_event WARN evidence "$file_path was readable but could not be copied into the package; the report may reference a file that was not delivered"
         fi
+    else
+        log_event WARN evidence "could not create the destination directory for $file_path; the file was not delivered"
     fi
 }
 
@@ -679,6 +961,14 @@ print_file_with_header() {
         record_manifest_line "PRINTED|$file_path"
     else
         not_available
+        # A file that is simply absent is normal: this script targets several
+        # Unix families and most hosts legitimately lack most of these paths.
+        # A file that EXISTS but cannot be read is a genuine evidence gap, and
+        # is the case worth surfacing - in the report both render identically as
+        # "not available", which is exactly why the log separates them.
+        if path_exists "$file_path"; then
+            log_event WARN evidence "$file_path exists but could not be read; its content is missing from the evidence package"
+        fi
     fi
     blank_line
 }
@@ -1369,6 +1659,7 @@ print_world_writable_review() {
             # known once the cap is exceeded. Record that honestly rather than
             # reporting the probe count as if it were the true total.
             ww_file_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable files exist; Section 10 lists the first $WORLD_WRITABLE_MAX_ENTRIES only and the full population is not in this package"
         fi
         printf '%s\n' "$ww_files" | while IFS= read -r _ww_entry; do
             if [ -n "$_ww_entry" ]; then
@@ -1396,6 +1687,7 @@ print_world_writable_review() {
             blank_line
             ww_dirs=`printf '%s\n' "$ww_dirs" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
             ww_dir_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable directories without a sticky bit exist; Section 10 lists the first $WORLD_WRITABLE_MAX_ENTRIES only"
         fi
         printf '%s\n' "$ww_dirs" | while IFS= read -r _ww_entry; do
             if [ -n "$_ww_entry" ]; then
@@ -2089,6 +2381,7 @@ create_collection_archive() {
 
     if [ "$COLLECTION_STATUS" != "ready" ]; then
         ARCHIVE_STATUS="skipped because collection directory was not ready"
+        log_event ERROR archive "archive skipped because the evidence directory was never created"
         return
     fi
 
@@ -2097,17 +2390,20 @@ create_collection_archive() {
             if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null; then
                 ARCHIVE_FILE=$archive_base.tar.gz
                 ARCHIVE_STATUS="created"
+                log_event INFO archive "compressed archive created at $ARCHIVE_FILE"
                 return
             fi
         fi
         if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null; then
             ARCHIVE_FILE=$archive_base.tar
             ARCHIVE_STATUS="created"
+            log_event WARN archive "gzip unavailable or failed; created an uncompressed archive at $ARCHIVE_FILE"
             return
         fi
     fi
 
     ARCHIVE_STATUS="failed"
+    log_event ERROR archive "could not create an archive; the evidence directory at $COLLECTION_DIRECTORY must be transferred manually"
 }
 
 # Application directory listing flags:
@@ -2208,7 +2504,7 @@ prompt_for_output_directory() {
 
     printf '\n'
     printf 'Evidence Output Directory\n'
-    printf '-------------------------\n'
+    printf '%s\n' '-------------------------'
     printf 'The script will create the SOX-ITGC-AUDIT-LINUX-UNIX/ collection\n'
     printf 'folder and the resulting tar.gz archive inside the output\n'
     printf 'directory you choose. If the directory does not exist, the\n'
@@ -2273,36 +2569,208 @@ apply_output_directory() {
 # restrictive umask 077 because they may contain sensitive configuration.
 # When SUDO_USER is not set (for example, dry-run or non-root execution),
 # no ownership change is attempted.
-apply_ownership_to_evidence() {
-    if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
-        OWNERSHIP_STATUS="not adjusted (no SUDO_USER detected)"
+# Extraction guidance shipped inside the package.
+#
+# The single most common way an evidence package becomes unreadable is being
+# extracted with sudo. GNU tar restores the archived numeric UID and GID when it
+# runs as root, and those numbers come from the CLIENT's account database, where
+# they mean nothing on the auditor's machine. Extracted as an ordinary user, tar
+# assigns the files to whoever ran it and the package just opens. The instinct
+# when files "look like root files" is to reach for sudo, which is precisely what
+# causes the problem, so it is stated here in the package itself rather than in a
+# document that travels separately and gets lost.
+write_handling_instructions() {
+    _handling_file="$COLLECTION_DIRECTORY/HOW-TO-READ-THIS-EVIDENCE.txt"
+    {
+        printf 'HOW TO READ THIS EVIDENCE PACKAGE\n'
+        printf '=================================\n'
+        printf '\n'
+        printf 'Extracting the archive\n'
+        printf '%s\n' '----------------------'
+        printf 'Extract it as your normal user account. Do NOT use sudo:\n'
+        printf '\n'
+        printf '    tar -xzf %s.tar.gz\n' "$ARCHIVE_BASE_NAME"
+        printf '\n'
+        printf 'Extracting with sudo is the usual cause of an unreadable package.\n'
+        printf 'As root, tar restores the numeric user and group IDs recorded in\n'
+        printf 'the archive. Those numbers come from the client system and mean\n'
+        printf 'nothing on yours, so the files end up owned by an account you do\n'
+        printf 'not have. Extracted as yourself, the files belong to you and open\n'
+        printf 'normally.\n'
+        printf '\n'
+        printf 'If the files are still unreadable\n'
+        printf '%s\n' '---------------------------------'
+        printf 'Take ownership of your own copy and make it readable to you and\n'
+        printf 'your team. This changes only the copy you extracted:\n'
+        printf '\n'
+        printf '    chown -R "$(id -un)":"$(id -gn)" SOX-ITGC-AUDIT-LINUX-UNIX\n'
+        printf '    chmod -R u=rwX,g=rX,o= SOX-ITGC-AUDIT-LINUX-UNIX\n'
+        printf '\n'
+        printf 'Do not use chmod -R 777. It is not needed, and it makes the\n'
+        printf 'evidence readable to every account on your machine.\n'
+        printf '\n'
+        printf 'What is in here\n'
+        printf '%s\n' '---------------'
+        printf '  report/SOX-ITGC-AUDIT-REPORT.txt\n'
+        printf '      The audit report. Start here.\n'
+        printf '  metadata/COLLECTION-LOG.txt\n'
+        printf '      Whether the collection worked and whether any evidence is\n'
+        printf '      missing. Read the RESULT line before relying on the report.\n'
+        printf '  metadata/MANIFEST.txt\n'
+        printf '      Every file used, with the permissions and ownership it had\n'
+        printf '      on the source system.\n'
+        printf '  metadata/SENSITIVE_FILES_SKIPPED.txt\n'
+        printf '      Credential files deliberately withheld. Their absence is by\n'
+        printf '      design, not a collection failure.\n'
+        printf '  raw_files/\n'
+        printf '      Copies of the source files, under their original paths.\n'
+        printf '\n'
+        printf 'A note on file permissions in this package\n'
+        printf '%s\n' '------------------------------------------'
+        printf 'Files under raw_files/ carry the EXACT permissions they had on the\n'
+        printf 'source system. They are copies of the client'"'"'s files and their\n'
+        printf 'modes are part of the evidence, so nothing here rewrites them.\n'
+        printf '\n'
+        printf 'One consequence: a source file that was readable only by its owner\n'
+        printf 'is still restrictive here, so a colleague opening the package from a\n'
+        printf 'shared location may not be able to read every individual file. If\n'
+        printf 'that happens, take a copy and adjust the copy - see the section\n'
+        printf 'above. Do not conclude the file is missing; check MANIFEST.txt,\n'
+        printf 'which records the permissions and ownership each file had on the\n'
+        printf 'source system.\n'
+        printf '\n'
+        printf 'The report, the manifest, this file, the collection log, and all\n'
+        printf 'directories are 0640 and 0750 respectively. Those did not exist on\n'
+        printf 'the client system, so their permissions are handover settings and\n'
+        printf 'are NOT evidence of anything.\n'
+        printf '\n'
+        printf 'Handling\n'
+        printf '%s\n' '--------'
+        printf 'This package describes access control on a production system.\n'
+        printf 'Treat it as confidential and transfer it over an encrypted channel.\n'
+    } > "$_handling_file" 2>/dev/null
+
+    if [ -f "$_handling_file" ]; then
+        record_manifest_line "GENERATED|$_handling_file"
+        log_event INFO handover "extraction and handling instructions written to $_handling_file"
+    fi
+}
+
+# Handing the package over so the audit team can actually read it:
+#
+# During collection the evidence is deliberately restrictive (umask 077, root
+# owned) so it is not exposed while it sits on the client's production server.
+# That posture is correct there and wrong the moment the package leaves: an
+# auditor who receives a tree they cannot open will reach for sudo or
+# chmod -R 777, and the second of those is worse than the problem.
+#
+# The package is therefore normalised at handover, but NOT uniformly, because
+# the two kinds of content in it mean different things:
+#
+#   raw_files/    Copies of the client's files. Their permissions are carried
+#                 over verbatim by cp -p and are left ALONE. The mode of a
+#                 collected file is an attribute of the evidence, and an auditor
+#                 comparing a copy against the report should see exactly what was
+#                 on the source system, not something this script rewrote. A
+#                 consequence is that a source file readable only by its owner
+#                 stays that way in the package, so a colleague may not be able
+#                 to open every individual file without taking a copy of it. That
+#                 is the deliberate trade: fidelity over convenience.
+#
+#   everything    The report, manifest, collection log, handling instructions,
+#   else          and all directories. None of these existed on the client
+#                 system, so their permissions are not evidence of anything. They
+#                 are set to 0640, and directories to 0750, so the package can be
+#                 navigated and the report and log can be read by the operator
+#                 and their team.
+#
+# Directories are normalised throughout, including under raw_files/. A directory
+# that cannot be entered makes everything beneath it unreachable regardless of
+# the files' own modes, and the directories in raw_files/ are created by this
+# script to mirror the source layout - they are not copies of the client's
+# directories and carry none of their permissions.
+normalize_package_permissions() {
+    if [ ! -d "$COLLECTION_DIRECTORY" ]; then
         return
     fi
+    _perm_ok=yes
 
-    target_group=""
-    if command_exists id; then
-        target_group=`id -gn "$SUDO_USER" 2>/dev/null`
+    # Generated content: safe to normalise, none of it is evidence of a mode.
+    chmod 0750 "$COLLECTION_DIRECTORY" 2>/dev/null || _perm_ok=no
+    for _perm_dir in "$REPORTS_DIRECTORY" "$METADATA_DIRECTORY"; do
+        if [ -d "$_perm_dir" ]; then
+            chmod -R u=rwX,g=rX,o= "$_perm_dir" 2>/dev/null || _perm_ok=no
+        fi
+    done
+    for _perm_top in "$COLLECTION_DIRECTORY"/*.txt; do
+        if [ -f "$_perm_top" ]; then
+            chmod 0640 "$_perm_top" 2>/dev/null || _perm_ok=no
+        fi
+    done
+
+    # raw_files/: directories only. The copied files keep the modes they had on
+    # the source system.
+    if [ -d "$RAW_FILES_DIRECTORY" ]; then
+        find "$RAW_FILES_DIRECTORY" -type d -exec chmod 0750 {} \; 2>/dev/null || _perm_ok=no
     fi
-    if [ -n "$target_group" ]; then
-        target_owner="$SUDO_USER:$target_group"
+
+    if [ "$_perm_ok" = "yes" ]; then
+        log_event INFO handover "package normalised for handover: directories 0750, generated files 0640; collected files under raw_files/ keep their original source permissions"
     else
-        target_owner="$SUDO_USER"
+        log_event WARN handover "could not normalise permissions on the whole package; some of it may be unreadable to the audit team after transfer"
+    fi
+}
+
+# Resolve the operator who invoked sudo, if any.
+handover_target_owner() {
+    if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
+        return 1
+    fi
+    _handover_group=""
+    if command_exists id; then
+        _handover_group=`id -gn "$SUDO_USER" 2>/dev/null`
+    fi
+    if [ -n "$_handover_group" ]; then
+        printf '%s:%s' "$SUDO_USER" "$_handover_group"
+    else
+        printf '%s' "$SUDO_USER"
+    fi
+    return 0
+}
+
+# Ownership of the evidence tree. Runs before the archive is created so the
+# archive records the operator as owner rather than root.
+apply_ownership_to_evidence() {
+    if ! target_owner=`handover_target_owner`; then
+        OWNERSHIP_STATUS="not adjusted (no SUDO_USER detected)"
+        log_event INFO handover "no SUDO_USER present, so evidence ownership was left unchanged; whoever transfers this package may need elevated access to read it"
+        return
     fi
 
     chown_ok=yes
     if [ -d "$COLLECTION_DIRECTORY" ]; then
         chown -R "$target_owner" "$COLLECTION_DIRECTORY" 2>/dev/null || chown_ok=no
     fi
-    if [ -n "$ARCHIVE_FILE" ] && [ -f "$ARCHIVE_FILE" ]; then
-        chown "$target_owner" "$ARCHIVE_FILE" 2>/dev/null || chown_ok=no
-        chmod 0640 "$ARCHIVE_FILE" 2>/dev/null || chown_ok=no
-    fi
 
     if [ "$chown_ok" = "yes" ]; then
-        OWNERSHIP_STATUS="evidence owned by $target_owner (archive mode 0640)"
+        OWNERSHIP_STATUS="evidence owned by $target_owner (directories 0750, files 0640)"
+        log_event INFO handover "evidence ownership transferred to $target_owner so it can be moved and read without root"
     else
         OWNERSHIP_STATUS="ownership adjustment to $target_owner encountered errors"
+        log_event WARN handover "could not transfer ownership of the evidence to $target_owner; the files remain owned by root and will need elevated access to read"
     fi
+}
+
+# Ownership of the archive itself, which can only run once the archive exists.
+apply_ownership_to_archive() {
+    if [ -z "$ARCHIVE_FILE" ] || [ ! -f "$ARCHIVE_FILE" ]; then
+        return
+    fi
+    if ! _archive_owner=`handover_target_owner`; then
+        return
+    fi
+    chown "$_archive_owner" "$ARCHIVE_FILE" 2>/dev/null
+    chmod 0640 "$ARCHIVE_FILE" 2>/dev/null
 }
 
 # Interactive application directory prompt:
@@ -2323,7 +2791,7 @@ prompt_for_app_directories() {
 
     printf '\n'
     printf 'Application Installation Directory Listing\n'
-    printf '------------------------------------------\n'
+    printf '%s\n' '------------------------------------------'
     printf 'You may include one or more application installation directories\n'
     printf 'in the evidence collection. The script will run a recursive\n'
     printf 'directory listing on each directory you provide.\n'
@@ -2475,6 +2943,27 @@ apply_output_directory
 prompt_for_app_directories
 
 prepare_collection_directory
+
+# Startup context. Recorded first so a reader can tell what was run, where, and
+# under what privileges without needing the report.
+log_event INFO startup "collection started on $HOSTNAME_VALUE (platform $OS_NAME)"
+log_event INFO startup "run mode: $RUN_PRIVILEGE_MODE"
+log_event INFO startup "invoked as: $SCRIPT_NAME"
+log_event INFO startup "this script is read-only and makes no configuration changes to this host"
+if [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
+    log_event WARN startup "running without root privileges; files readable only by root will be missing from this package"
+fi
+if [ -n "$APP_DIRECTORIES" ]; then
+    printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r _log_app_dir; do
+        if [ -n "$_log_app_dir" ]; then
+            if [ -d "$_log_app_dir" ]; then
+                log_event INFO startup "application directory selected for listing: $_log_app_dir"
+            else
+                log_event WARN startup "application directory $_log_app_dir does not exist or is not a directory; it was not listed"
+            fi
+        fi
+    done
+fi
 
 # Preserve the original stdout on file descriptor 3. The script writes the
 # report to the report file first, then replays the completed report to the
@@ -2661,16 +3150,18 @@ _sec25_files=`section25_source_files`
 section_with_explanation "25. Authentication Log Samples" "Explanation: This section shows the most recent entries from the host's authentication logs to demonstrate that login and privilege activity was actually being recorded at the time of collection. It complements Section 15, which shows how logging is configured, by providing evidence that logging is operating. Only the sampled lines shown here are included in the evidence; the full log files are intentionally not copied because production authentication logs can be very large. Each sampled log is recorded in the manifest as LOG_SAMPLED." "$_sec25_files" "no"
 print_auth_log_samples
 
-create_collection_archive
-
 section "Execution Summary"
 printf 'Status: completed\n'
 printf 'Behavior: report file plus local evidence packaging\n'
 printf 'Output directory: %s\n' "$WORKING_DIRECTORY"
 printf 'Files created in output directory: %s\n' "$COLLECTION_DIRECTORY"
 printf 'Collection directory status: %s\n' "$COLLECTION_STATUS"
-printf 'Archive status: %s\n' "$ARCHIVE_STATUS"
-printf 'Archive file: %s\n' "${ARCHIVE_FILE:-not available}"
+printf 'Archive file (planned): %s.tar.gz\n' "$WORKING_DIRECTORY/$ARCHIVE_BASE_NAME"
+printf '  (or .tar if gzip is unavailable on this host)\n'
+printf 'Archive note: the archive is created after this report and the collection\n'
+printf '  log are finalized, so that both are complete inside it. An archive cannot\n'
+printf '  record the outcome of its own creation; that result is printed on the\n'
+printf '  operator terminal and appended to the collection log on disk.\n'
 printf 'Report file: %s\n' "$REPORT_FILE"
 printf 'Manifest file: %s\n' "$MANIFEST_FILE"
 printf 'Sensitive skip file: %s\n' "$SENSITIVE_SKIPPED_FILE"
@@ -2694,9 +3185,55 @@ fi
 # Transfer ownership of the evidence package to the operator who invoked
 # sudo. This runs after the report is finalized so that subsequent operator
 # actions (copy, scp, email, ftp) do not require sudo.
+log_event INFO completion "evidence collection finished"
+
+# Point the report at the log, so a reader who starts from the report knows where
+# to check whether the evidence is complete.
+blank_line
+subsection "Collection Log:"
+printf 'A record of whether this collection ran correctly, and of anything that\n'
+printf 'limited the evidence gathered, is in:\n'
+printf '  %s\n' "${LOG_FILE:-not created}"
+printf 'Review that file before relying on any section reported as not available.\n'
+
+record_manifest_line "COLLECTION_LOG|${LOG_FILE:-not created}"
+
+# Order from here matters and is the reason the archive is built last.
+#
+# The archive is what actually reaches the audit team, so everything that belongs
+# in the package has to be finished before it is created. Building it earlier
+# produced an archive whose report stopped short of the execution summary and
+# whose collection log had no RESULT verdict, while the copies left behind on the
+# client's server were complete - so the delivered evidence was the truncated one.
+#
+# Permissions and ownership are also applied before archiving, because the modes
+# recorded inside a tar are the modes the recipient gets.
+write_handling_instructions
+normalize_package_permissions
 apply_ownership_to_evidence
-printf 'Ownership status: %s\n' "$OWNERSHIP_STATUS"
+
+# The summary block closes the log, so everything that has something to report
+# must have run by now. Only the archive follows, and it appends an addendum.
+finalize_collection_log
+
+open_log_addendum
+create_collection_archive
+apply_ownership_to_archive
+close_log_addendum
 
 if [ -r "$REPORT_FILE" ]; then
     cat "$REPORT_FILE" >&3
 fi
+
+# Leave the operator with the verdict and where to find the detail. This is the
+# last thing printed, so it is what remains on screen after the run.
+_final_result=`collection_log_result`
+{
+    printf '\n'
+    printf '================================================================\n'
+    printf 'COLLECTION RESULT: %s\n' "$_final_result"
+    printf '  errors: %s   warnings: %s\n' "$LOG_ERROR_COUNT" "$LOG_WARN_COUNT"
+    printf '%s\n' "  `collection_log_result_meaning "$_final_result"`"
+    printf '  Full log: %s\n' "${LOG_FILE:-not created}"
+    printf '================================================================\n'
+} >&3 2>/dev/null || :

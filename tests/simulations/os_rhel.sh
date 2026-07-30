@@ -13,6 +13,14 @@ UNAME_V='#1 SMP Thu Jun 20 12:38:14 EDT 2024'
 UNAME_M=x86_64
 NODENAME=rhel-fin-app01.corp.acmefinancial.com
 APPDIR="/srv/Finance App"
+# A second application root that deliberately does NOT exist in the fixture. Its
+# purpose is the WARN it triggers: that warning is raised from inside a pipeline
+# subshell, which is exactly the path that once lost its increment and let the
+# verdict read COMPLETED_CLEAN above a WARN line. This fixture therefore expects
+# a WARNINGS verdict, and the count-vs-lines assertion in common.sh has a real
+# warning to check.
+APPDIR2=/srv/retired-app
+EXPECTED_RESULT=COMPLETED_WITH_WARNINGS
 BLOCKERS=""
 
 write_os_shims() {
@@ -635,6 +643,14 @@ verify_os() {
         sim_pass "world-writable file contents not copied"
     fi
     # /etc/shadow must be withheld
+    # The nonexistent second app root must be warned about, in the log.
+    sim_check
+    if grep -q ' | WARN  | .*retired-app does not exist' "$LOGFILE" 2>/dev/null; then
+        sim_pass "missing application directory raised a WARN in the collection log"
+    else
+        sim_fail "no WARN in the collection log for the missing /srv/retired-app"
+    fi
+
     sim_check
     if grep -q '^/etc/shadow$' "$SKIPPED" 2>/dev/null; then
         sim_pass "/etc/shadow withheld from the package"

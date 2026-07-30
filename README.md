@@ -32,7 +32,71 @@ SOX-ITGC-AUDIT-LINUX-UNIX/
 ├── raw_files/                             copied non-sensitive source files
 └── metadata/  MANIFEST.txt                chain of custody for every file used
             SENSITIVE_FILES_SKIPPED.txt    credential files deliberately withheld
+            COLLECTION-LOG.txt             whether the collection itself worked
 ```
+
+### Receiving and opening the package
+
+Extract the archive **as your normal user account, not with sudo**. Extracting as
+root makes `tar` restore the numeric user and group IDs recorded in the archive;
+those come from the client system and mean nothing on yours, which is the usual
+cause of an evidence package that will not open:
+
+```sh
+tar -xzf SOX-ITGC-AUDIT-LINUX-UNIX-<host>-<timestamp>.tar.gz
+```
+
+The package ships with `HOW-TO-READ-THIS-EVIDENCE.txt` at its top level covering
+the same ground, so the guidance travels with the evidence rather than in a
+separate document.
+
+Permissions inside the package are deliberately not uniform:
+
+- **`raw_files/` keeps the exact permissions each file had on the source system.**
+  These are copies of the client's files and their modes are part of the
+  evidence, so nothing rewrites them. One consequence: a source file readable
+  only by its owner stays restrictive in the package, so a colleague opening it
+  from a shared location may not be able to read every individual file. Take a
+  copy and adjust the copy if that happens.
+- **Everything else is normalised for handover** — the report, manifest,
+  collection log, handling instructions, and all directories, at `0640` and
+  `0750`. None of these existed on the client system, so their permissions are
+  not evidence of anything. Directories are normalised throughout, including
+  under `raw_files/`, because a directory that cannot be entered makes everything
+  beneath it unreachable regardless of the files' own modes.
+
+The whole package is owned by the operator who ran the collection. `MANIFEST.txt`
+additionally records the permissions and ownership each file had on the source
+system, which survives transfer even if filesystem metadata does not.
+
+### The collection log
+
+The report says what the host is configured to do. `COLLECTION-LOG.txt` answers a
+different question — *did this collection work, and is the evidence complete?* —
+and is written for three readers at once: the auditor, the client's system
+administrator, and an automated reader.
+
+Each line is `timestamp | level | category | message`. `WARN` marks something
+that limited the evidence; `ERROR` marks a step that failed. The file ends with a
+summary block whose `RESULT` is one of:
+
+| RESULT | Meaning |
+| --- | --- |
+| `COMPLETED_CLEAN` | Collection completed; nothing limited the evidence. |
+| `COMPLETED_WITH_WARNINGS` | Completed, but some evidence was limited. Read the `WARN` lines before relying on the affected sections. |
+| `COMPLETED_WITH_ERRORS` | A step failed; the package may be incomplete. |
+| `FAILED` | Collection could not be completed; do not rely on the package. |
+
+The distinction the log exists to draw: a file that is **absent** is normal, since
+this script targets several Unix families and most hosts lack most of these paths.
+A file that **exists but could not be read** is a genuine evidence gap. The report
+renders both identically as "not available"; the log separates them, so a missing
+`/etc/sudoers` is visible rather than buried among expected platform differences.
+
+The log records paths and outcomes only — never file contents, credentials, or
+command output — so it stays safe to forward to the client or paste into a ticket
+even when the evidence package itself would not be. The operator also sees the
+verdict on their terminal at the end of the run.
 
 Credential-bearing files (`/etc/shadow`, AIX `/etc/security/passwd`, SSH keys,
 keytabs, LDAP bind secrets) are never printed or copied. The script records

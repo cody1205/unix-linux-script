@@ -43,7 +43,9 @@ UNAME_V=""
 UNAME_M=""
 NODENAME=""
 APPDIR=""      # application directory passed via --app-dir
+APPDIR2=""     # optional second --app-dir; may deliberately not exist
 BLOCKERS=""    # commands that must appear ABSENT on this OS
+EXPECTED_RESULT=COMPLETED_CLEAN   # the collection log verdict this fixture should produce
 
 # Each os_*.sh must define:
 #   write_os_shims   - OS-specific shim executables into $RSHIMS
@@ -252,6 +254,7 @@ sim_run_collector() {
     chroot "$R" /usr/bin/env -i \
         PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C HOME=/root TERM=dumb \
         /usr/bin/sh /collect.sh --output-dir /out --app-dir "$APPDIR" \
+        ${APPDIR2:+--app-dir} ${APPDIR2:+"$APPDIR2"} \
         </dev/null >"$OUT/console.txt" 2>&1
     COLLECTOR_RC=$?
 }
@@ -326,7 +329,7 @@ sim_verify_common() {
     _copied=0
     while IFS= read -r _line; do
         case "$_line" in COPIED\|*) ;; *) continue ;; esac
-        _src=`printf '%s' "$_line" | sed 's/^COPIED|//'`
+        _src=`printf '%s' "$_line" | sed 's/^COPIED|//' | cut -d'|' -f1`
         _copied=`expr $_copied + 1`
         if [ ! -f "$E/raw_files$_src" ]; then
             printf '            claimed but absent: %s\n' "$_src" >&2
@@ -348,11 +351,143 @@ sim_verify_common() {
         sim_pass "manifest paths well formed"
     fi
 
+    # The collection log is the companion to the report: it states whether the
+    # evidence is complete. It must exist, be self-describing, carry a
+    # machine-readable verdict, and stay safe to share.
+    LOGFILE="$E/metadata/COLLECTION-LOG.txt"
+    sim_check
+    if [ -s "$LOGFILE" ]; then
+        sim_pass "collection log produced"
+    else
+        sim_fail "no collection log at $LOGFILE"
+    fi
+    sim_check
+    if grep -q '^RESULT: ' "$LOGFILE" 2>/dev/null; then
+        sim_pass "collection log carries a machine-readable RESULT verdict"
+    else
+        sim_fail "collection log has no RESULT line"
+    fi
+    sim_check
+    _sim_result=`sed -n 's/^RESULT: //p' "$LOGFILE" 2>/dev/null | head -1`
+    if [ "$_sim_result" = "$EXPECTED_RESULT" ]; then
+        sim_pass "collection log verdict is $EXPECTED_RESULT as this fixture expects"
+    else
+        sim_fail "expected $EXPECTED_RESULT, got '${_sim_result:-none}'"
+        grep '| WARN \|| ERROR' "$LOGFILE" 2>/dev/null | sed 's/^/            /' >&2
+    fi
+    # The verdict must agree with the log's own lines. The counters behind the
+    # verdict were once kept in shell variables, and log_event calls made inside
+    # pipeline subshells lost their increments - producing COMPLETED_CLEAN
+    # verdicts above WARN lines. Counting the lines here catches any return of
+    # that class of bug regardless of which call site regresses.
+    sim_check
+    _sim_warn_lines=`grep -c ' | WARN  | ' "$LOGFILE" 2>/dev/null`
+    [ -n "$_sim_warn_lines" ] || _sim_warn_lines=0
+    _sim_err_lines=`grep -c ' | ERROR | ' "$LOGFILE" 2>/dev/null`
+    [ -n "$_sim_err_lines" ] || _sim_err_lines=0
+    _sim_final_warn=`sed -n 's/^FINAL_WARNINGS: //p' "$LOGFILE" 2>/dev/null | tail -1`
+    _sim_final_err=`sed -n 's/^FINAL_ERRORS: //p' "$LOGFILE" 2>/dev/null | tail -1`
+    if [ "$_sim_final_warn" = "$_sim_warn_lines" ] && [ "$_sim_final_err" = "$_sim_err_lines" ]; then
+        sim_pass "verdict counts match the log lines ($_sim_warn_lines WARN, $_sim_err_lines ERROR)"
+    else
+        sim_fail "verdict counts disagree with the log: FINAL says ${_sim_final_warn:-?}W/${_sim_final_err:-?}E, lines say ${_sim_warn_lines}W/${_sim_err_lines}E"
+    fi
+    sim_check
+    if grep -q 'read-only and makes no configuration changes' "$LOGFILE" 2>/dev/null; then
+        sim_pass "collection log states the read-only guarantee for the host admin"
+    else
+        sim_fail "collection log does not state the read-only guarantee"
+    fi
+    # The log is the artefact most likely to be forwarded informally, so it must
+    # never carry credential material even though the package as a whole might.
+    sim_check
+    if grep -qE '\$[0-9y]\$[./A-Za-z0-9]|\{ssha[0-9]+\}|BEGIN [A-Z ]*PRIVATE KEY' "$LOGFILE" 2>/dev/null; then
+        sim_fail "CREDENTIAL LEAK - credential material present in the collection log"
+    else
+        sim_pass "no credential material in the collection log"
+    fi
+    sim_check
+    if grep -q '^COLLECTION_LOG|' "$MANIFEST" 2>/dev/null; then
+        sim_pass "collection log recorded in the manifest"
+    else
+        sim_fail "collection log not recorded in the manifest"
+    fi
+
     sim_check
     if ls "$OUT/evidence"/*.tar.gz >/dev/null 2>&1; then
         sim_pass "archive created"
     else
         sim_fail "no archive created"
+    fi
+
+    # The archive is what actually reaches the audit team, so completeness has to
+    # be asserted against the ARCHIVE, not against the copy left on the server.
+    # These previously differed: the archive was built before the report and log
+    # were finished, so the delivered evidence was the truncated one.
+    sim_check
+    _sim_arc=`ls "$OUT/evidence"/*.tar.gz 2>/dev/null | head -1`
+    if [ -n "$_sim_arc" ]; then
+        rm -rf "$OUT/archive-check"
+        mkdir -p "$OUT/archive-check"
+        if ( cd "$OUT/archive-check" && tar -xzf "$_sim_arc" ) 2>/dev/null; then
+            _sim_ar="$OUT/archive-check/SOX-ITGC-AUDIT-LINUX-UNIX"
+            if grep -q 'Execution Summary' "$_sim_ar/report/SOX-ITGC-AUDIT-REPORT.txt" 2>/dev/null &&
+               grep -q '^RESULT: ' "$_sim_ar/metadata/COLLECTION-LOG.txt" 2>/dev/null &&
+               [ -f "$_sim_ar/HOW-TO-READ-THIS-EVIDENCE.txt" ]; then
+                sim_pass "archive contains the finished report, the log verdict, and the handling instructions"
+            else
+                sim_fail "archive content is incomplete (report summary, log RESULT, or handling file missing)"
+            fi
+        else
+            sim_fail "archive could not be extracted"
+        fi
+    else
+        sim_fail "no archive to inspect"
+    fi
+
+    # Handover permissions. Scoped to GENERATED content only: files under
+    # raw_files/ deliberately keep the permissions they had on the source system,
+    # because a collected file's mode is part of the evidence. Asserting
+    # readability across raw_files/ would be asserting that the script rewrites
+    # evidence, which is the opposite of what is wanted.
+    sim_check
+    _sim_bad_modes=`find "$E/report" "$E/metadata" -type f ! -perm -0040 2>/dev/null | head -3`
+    if [ -z "$_sim_bad_modes" ]; then
+        sim_pass "report and metadata are group-readable for the audit team"
+    else
+        sim_fail "generated files the audit team cannot read:"
+        printf '%s\n' "$_sim_bad_modes" | sed 's/^/            /' >&2
+    fi
+    # Directories must be traversable everywhere, including under raw_files/, or
+    # the files beneath them are unreachable whatever their own modes say.
+    sim_check
+    _sim_bad_dirs=`find "$E" -type d ! -perm -0050 2>/dev/null | head -3`
+    if [ -z "$_sim_bad_dirs" ]; then
+        sim_pass "all package directories are traversable by the audit team"
+    else
+        sim_fail "package contains directories the audit team cannot enter:"
+        printf '%s\n' "$_sim_bad_dirs" | sed 's/^/            /' >&2
+    fi
+    # Collected files must NOT have been rewritten to a uniform mode.
+    sim_check
+    if [ -f "$E/raw_files/etc/sudoers" ]; then
+        # Exact match against the mode the fixture set on the source file (0440).
+        # A range of "plausible" modes is useless here: normalising the copies
+        # produces -rw-r-----, which any loose pattern would happily accept.
+        _sim_sudoers_mode=`ls -l "$E/raw_files/etc/sudoers" 2>/dev/null | awk 'NR == 1 { print substr($1, 1, 10) }'`
+        if [ "$_sim_sudoers_mode" = "-r--r-----" ]; then
+            sim_pass "collected /etc/sudoers kept its exact source mode (-r--r-----)"
+        else
+            sim_fail "collected /etc/sudoers mode is '$_sim_sudoers_mode', expected '-r--r-----'; source permissions were rewritten"
+        fi
+    else
+        sim_pass "no collected sudoers to check source-mode preservation against"
+    fi
+    sim_check
+    if find "$E/report" "$E/metadata" -perm -0004 2>/dev/null | grep -q .; then
+        sim_fail "report or metadata is world-readable; the package should not be open to all"
+    else
+        sim_pass "report and metadata are not world-readable"
     fi
 
     # The filesystem-walking sections must account for their own runtime, both in
