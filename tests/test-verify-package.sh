@@ -77,9 +77,37 @@ if [ -z "$ARCHIVE" ]; then
 fi
 printf '  %s\n\n' "$ARCHIVE"
 
-printf '== a healthy package verifies ==\n'
-expect_exit "healthy archive" 0 "$ARCHIVE"
-expect_exit "healthy extracted directory" 0 "`fresh_copy healthy`"
+printf '== an intact package verifies, and the verdict agrees with the log ==\n'
+# The exit code is derived from the package's own verdict rather than assumed to
+# be 0. A collection is only CLEAN if nothing on the host limited it, and that is
+# a property of the host, not of the verifier: a CI runner, or any real client
+# system with a file that exists but cannot be read, legitimately produces
+# warnings. Hard-coding 0 here tested the environment instead of the tool, and
+# failed the moment it ran somewhere other than a developer's container.
+REFERENCE_LOG="`fresh_copy reference`/metadata/COLLECTION-LOG.txt"
+reference_verdict=`sed -n 's/^FINAL_RESULT: //p' "$REFERENCE_LOG" 2>/dev/null | tail -1`
+[ -n "$reference_verdict" ] || reference_verdict=`sed -n 's/^RESULT: //p' "$REFERENCE_LOG" 2>/dev/null | head -1`
+case "$reference_verdict" in
+    COMPLETED_CLEAN)          reference_exit=0 ;;
+    COMPLETED_WITH_WARNINGS)  reference_exit=1 ;;
+    *)                        reference_exit=2 ;;
+esac
+printf '  (this host collected as %s, so the verifier must return %s)\n' \
+    "$reference_verdict" "$reference_exit"
+expect_exit "intact archive" "$reference_exit" "$ARCHIVE"
+expect_exit "intact extracted directory" "$reference_exit" "`fresh_copy intact`"
+
+# The clean path still needs pinning deterministically, which no real host can be
+# relied on to provide. Construct one: strip the WARN lines and set the verdict to
+# match, so the package is internally consistent and genuinely clean.
+target=`fresh_copy clean`
+grep -v ' | WARN  | ' "$target/metadata/COLLECTION-LOG.txt" \
+    | sed -e 's/^RESULT: .*/RESULT: COMPLETED_CLEAN/' \
+          -e 's/^FINAL_RESULT: .*/FINAL_RESULT: COMPLETED_CLEAN/' \
+          -e 's/^WARNINGS: .*/WARNINGS: 0/' \
+          -e 's/^FINAL_WARNINGS: .*/FINAL_WARNINGS: 0/' > "$WORK/t" \
+    && mv "$WORK/t" "$target/metadata/COLLECTION-LOG.txt"
+expect_exit "package whose collection was clean" 0 "$target"
 
 printf '\n== degraded packages are rejected ==\n'
 
