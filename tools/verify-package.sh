@@ -52,6 +52,18 @@ if [ ! -e "$TARGET" ]; then
     exit 3
 fi
 
+# Resolve to an absolute path. Extraction runs inside a temporary directory, so a
+# relative path would be resolved against that directory rather than the caller's
+# and a perfectly good archive would be reported as corrupt. The documented usage
+# - running this from the directory holding the archive - is exactly the relative
+# case, so this is the common invocation, not the exotic one. TARGET is kept
+# unchanged for display, since echoing an absolute path back at someone who typed
+# a relative one is confusing.
+case "$TARGET" in
+    /*) TARGET_PATH=$TARGET ;;
+    *)  TARGET_PATH="`pwd`/$TARGET" ;;
+esac
+
 WORK=""
 cleanup() {
     if [ -n "$WORK" ] && [ -d "$WORK" ]; then
@@ -78,9 +90,9 @@ case "$TARGET" in
             printf 'CANNOT VERIFY: could not create a temporary directory\n' >&2
             exit 3
         }
-        if ! ( cd "$WORK" && tar -xf "$TARGET" ) 2>/dev/null; then
+        if ! ( cd "$WORK" && tar -xf "$TARGET_PATH" ) 2>/dev/null; then
             # Retry without assuming the archive is compressed.
-            if ! ( cd "$WORK" && tar -xzf "$TARGET" ) 2>/dev/null; then
+            if ! ( cd "$WORK" && tar -xzf "$TARGET_PATH" ) 2>/dev/null; then
                 printf 'CANNOT VERIFY: %s could not be extracted. It may be corrupt or\n' "$TARGET" >&2
                 printf 'truncated in transfer.\n' >&2
                 exit 3
@@ -93,15 +105,15 @@ case "$TARGET" in
         fi
         ;;
     *)
-        if [ ! -d "$TARGET" ]; then
+        if [ ! -d "$TARGET_PATH" ]; then
             printf 'CANNOT VERIFY: %s is neither an archive nor a directory\n' "$TARGET" >&2
             exit 3
         fi
         # Accept either the package directory itself or its parent.
-        if [ -d "$TARGET/$PACKAGE_DIR_NAME" ]; then
-            ROOT_DIR="$TARGET/$PACKAGE_DIR_NAME"
+        if [ -d "$TARGET_PATH/$PACKAGE_DIR_NAME" ]; then
+            ROOT_DIR="$TARGET_PATH/$PACKAGE_DIR_NAME"
         else
-            ROOT_DIR=$TARGET
+            ROOT_DIR=$TARGET_PATH
         fi
         ;;
 esac
@@ -182,7 +194,22 @@ else
 fi
 
 # Chain of custody: the manifest must not claim files the package does not
-# contain. Only meaningful when raw_files/ is present.
+# contain.
+#
+# The absence of raw_files/ is checked before its contents, and is the more
+# serious case: gating the whole check on the directory existing meant a package
+# that had lost every collected file passed, because the loop that would have
+# noticed never ran. A missing file is a gap; a missing directory alongside a
+# manifest full of claims is a package with no evidence in it at all.
+if [ -s "$MANIFEST" ]; then
+    claimed_total=`grep -c '^COPIED|' "$MANIFEST" 2>/dev/null`
+    [ -n "$claimed_total" ] || claimed_total=0
+
+    if [ "$claimed_total" -gt 0 ] && [ ! -d "$ROOT_DIR/raw_files" ]; then
+        report_problem "the manifest names $claimed_total collected files but raw_files/ is absent entirely - none of the collected evidence is in this package"
+    fi
+fi
+
 if [ -s "$MANIFEST" ] && [ -d "$ROOT_DIR/raw_files" ]; then
     claimed=0
     absent=0

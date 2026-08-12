@@ -137,6 +137,34 @@ target=`fresh_copy no_log`
 rm -f "$target/metadata/COLLECTION-LOG.txt"
 expect_exit "collection log absent entirely" 2 "$target"
 
+printf '\n== a package that lost all its collected files is rejected ==\n'
+# Removing raw_files/ entirely, rather than one file from it. The original guard
+# only ran the manifest check when raw_files/ existed, so a package that had lost
+# every collected file skipped the check and passed - a false PACKAGE VERIFIED,
+# which for this tool is the defining failure.
+target=`fresh_copy no_raw_files`
+rm -rf "$target/raw_files"
+expect_exit "raw_files absent while the manifest claims copies" 2 "$target"
+
+printf '\n== a relative path is accepted, as the documented usage requires ==\n'
+# Extraction happens inside a temporary directory, so a relative archive path was
+# being resolved against that directory and a valid package came back as exit 3,
+# "may be corrupt or truncated in transfer". The documented invocation - run from
+# the directory holding the archive - is precisely this case. Every earlier test
+# used mktemp -d paths, which are absolute, so none of them exercised it.
+RELDIR=`dirname "$ARCHIVE"`
+RELNAME=`basename "$ARCHIVE"`
+checks=`expr "$checks" + 1`
+( cd "$RELDIR" && sh "$VERIFIER" "$RELNAME" ) >"$WORK/rel.txt" 2>&1
+rel_exit=$?
+if [ "$rel_exit" = "$reference_exit" ]; then
+    printf 'ok        archive by relative path (exit %s)\n' "$rel_exit"
+else
+    printf 'NOT OK    archive by relative path: expected exit %s, got %s\n' "$reference_exit" "$rel_exit"
+    sed 's/^/            /' "$WORK/rel.txt" | tail -6 >&2
+    failures=`expr "$failures" + 1`
+fi
+
 printf '\n== unexaminable inputs are distinguished from bad ones ==\n'
 head -c 400 "$ARCHIVE" > "$WORK/corrupt.tar.gz"
 expect_exit "archive truncated in transfer" 3 "$WORK/corrupt.tar.gz"
