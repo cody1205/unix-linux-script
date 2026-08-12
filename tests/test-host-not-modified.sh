@@ -138,8 +138,20 @@ diff "$WORK/before.txt" "$WORK/after.txt" > "$WORK/diff.txt" 2>&1 || :
 changed_logs=`grep -c -E '^[<>] /var/(log|adm)/' "$WORK/diff.txt" 2>/dev/null`
 [ -n "$changed_logs" ] || changed_logs=0
 
-# Anything outside the log directories is a genuine modification.
-grep '^[<>]' "$WORK/diff.txt" 2>/dev/null | grep -v -E '^[<>] /var/(log|adm)/' > "$WORK/real_changes.txt" 2>/dev/null || :
+# The CI agent's own diagnostic logs are excluded for the same reason as the
+# system logs: they are written by the harness that is RUNNING this test, not by
+# the collector under test. A GitHub Actions runner writes continuously to
+# ~/actions-runner/_diag while any job executes, so those files necessarily
+# differ between two snapshots taken minutes apart. Excluding the collector's
+# own output would be cheating; excluding the observer's is not.
+#
+# The pattern is deliberately anchored to the runner's diagnostic directory
+# rather than to /home, so a change anywhere else under a user's home - which
+# WOULD be a genuine modification - is still caught.
+HARNESS_NOISE='^[<>] (/var/(log|adm)/|/home/[^/]*/actions-runner/|/home/[^/]*/runners/)'
+
+# Anything outside those is a genuine modification.
+grep '^[<>]' "$WORK/diff.txt" 2>/dev/null | grep -v -E "$HARNESS_NOISE" > "$WORK/real_changes.txt" 2>/dev/null || :
 # The leading "< " / "> " markers make the same path appear twice; count paths.
 sed 's/^[<>] //' "$WORK/real_changes.txt" 2>/dev/null | cut -d'|' -f1 | sort -u > "$WORK/changed_paths.txt"
 changed_count=`grep -c . "$WORK/changed_paths.txt" 2>/dev/null`

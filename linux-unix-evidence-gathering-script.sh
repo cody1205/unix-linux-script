@@ -2039,6 +2039,69 @@ print_sulog_content() {
 #
 # Getting this wrong does not fail loudly. It reports the wrong inventory as if
 # it were the right one, which is worse than reporting nothing.
+#
+# INVOKING rpm WHEN IT IS NOT THE NATIVE PACKAGE MANAGER MODIFIES THE HOST.
+#
+# This is the reason the selection below tests for a package DATABASE rather
+# than for a binary. On a Debian or Ubuntu host that happens to have the rpm
+# package installed - not unusual; it arrives with alien and various vendor
+# tooling - "rpm -qa" run as root finds no RPM database and CREATES ONE:
+#
+#     /root/.rpmdb/rpmdb.sqlite
+#     /root/.rpmdb/rpmdb.sqlite-shm
+#     /root/.rpmdb/rpmdb.sqlite-wal
+#
+# Three files written into root's home directory by a script whose entire
+# premise is that it writes nothing outside its own output directory. On a
+# client running file integrity monitoring that is an alert, raised against the
+# auditors, during an audit. It was found by tests/test-host-not-modified.sh and
+# reproduced directly before this fix was written.
+#
+# Selecting on the database also fixes the accuracy problem in the same stroke:
+# a host with an rpm binary and no rpm database has no RPM-managed software to
+# report, so querying rpm there could only ever produce an empty or misleading
+# answer.
+# Testing for the directory /var/lib/rpm is NOT sufficient, and the first
+# attempt at this fix failed for exactly that reason. On Debian and Ubuntu:
+#
+#   - the rpm package ships /var/lib/rpm as an EMPTY directory, so the
+#     directory exists on a host that has no RPM-managed software at all; and
+#   - it configures rpm's database path to ~/.rpmdb - a per-user database -
+#     rather than to /var/lib/rpm, which is why the file it creates lands in
+#     root's home directory.
+#
+# The reliable test is therefore to ask rpm where its database actually is, and
+# then check whether a database FILE exists there. "rpm --eval" only expands a
+# macro; it was verified to create nothing. The three filenames cover the
+# backends in use: sqlite (rpm 4.16+), Berkeley DB (older), and ndb/lmdb.
+rpm_database_present() {
+    command_exists rpm || return 1
+    _rpm_dbpath=`rpm --eval '%{_dbpath}' 2>/dev/null`
+    case "$_rpm_dbpath" in
+        ''|%*) _rpm_dbpath=/var/lib/rpm ;;
+    esac
+    [ -f "$_rpm_dbpath/rpmdb.sqlite" ] ||
+    [ -f "$_rpm_dbpath/Packages" ] ||
+    [ -f "$_rpm_dbpath/data.mdb" ]
+}
+
+# dpkg keeps its inventory in a single status file. Its presence and non-zero
+# size is what distinguishes a host dpkg actually manages from one that merely
+# has the binary installed.
+dpkg_database_present() {
+    [ -s /var/lib/dpkg/status ]
+}
+
+# True only when rpm is both installed AND has a database to read, so that
+# calling it cannot create one.
+rpm_usable() {
+    command_exists rpm && rpm_database_present
+}
+
+dpkg_usable() {
+    command_exists dpkg && dpkg_database_present
+}
+
 print_package_inventory() {
     _pkg_done=no
 
@@ -2074,10 +2137,10 @@ print_package_inventory() {
         return
     fi
 
-    if command_exists rpm; then
+    if rpm_usable; then
         printf 'Command: rpm -qa\n'
         rpm -qa 2>/dev/null || not_available
-    elif command_exists dpkg; then
+    elif dpkg_usable; then
         printf 'Command: dpkg -l\n'
         dpkg -l 2>/dev/null || not_available
     elif command_exists pkginfo; then
@@ -2909,10 +2972,10 @@ print_patch_update_summary() {
             ;;
     esac
 
-    if command_exists rpm; then
+    if rpm_usable; then
         printf 'Command: rpm -qa --last\n'
         rpm -qa --last 2>/dev/null || not_available
-    elif command_exists dpkg; then
+    elif dpkg_usable; then
         print_file_with_header /var/log/dpkg.log
     elif command_exists lslpp; then
         printf 'Command: lslpp -h\n'
