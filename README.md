@@ -69,6 +69,35 @@ The whole package is owned by the operator who ran the collection. `MANIFEST.txt
 additionally records the permissions and ownership each file had on the source
 system, which survives transfer even if filesystem metadata does not.
 
+### Verify the package on receipt
+
+Before anyone tests against a delivery, confirm the whole of it arrived. A
+package can look complete — right folders, plausible file sizes — while being a
+truncated delivery, and nothing in the files announces that.
+
+```sh
+sh tools/verify-package.sh SOX-ITGC-AUDIT-LINUX-UNIX-<host>-<timestamp>.tar.gz
+```
+
+It accepts either the archive or an extracted directory, is standalone POSIX
+`sh`, and returns an exit code so it can gate an automated intake process:
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Complete, and the collection reported no problems. |
+| `1` | Complete, but the collection reported warnings. Usable — read them before relying on the affected sections. |
+| `2` | Incomplete, truncated, or the collection reported errors. Request a fresh collection. |
+| `3` | Could not be examined at all (missing, corrupt, not a package). |
+
+It checks that the report reaches its execution summary and the log reaches its
+verdict — both are written last, so their absence means the collection was
+captured mid-write — that the manifest names no file the package lacks, and that
+you can actually read what arrived.
+
+`HOW-TO-READ-THIS-EVIDENCE.txt` inside every package carries a two-command
+version of the same check, so a recipient without this repository can still tell
+a complete delivery from a partial one.
+
 ### The collection log
 
 The report says what the host is configured to do. `COLLECTION-LOG.txt` answers a
@@ -136,6 +165,7 @@ the evidence — but it should be a considered choice rather than a surprise.
 ```sh
 sh tests/test-sensitive-paths.sh           # no root needed
 sudo sh tests/test-no-credential-leak.sh   # runs a real collection
+sudo sh tests/test-verify-package.sh       # the receipt verifier
 sudo sh tests/simulations/run-all.sh       # all four simulated platforms
 ```
 
@@ -149,6 +179,13 @@ sudo sh tests/simulations/run-all.sh       # all four simulated platforms
   reaches `raw_files/`, if a sensitive file read is not recorded, or if the
   manifest claims a `COPIED` file that is not present. It restores `/etc` on
   exit and is intended for ephemeral CI runners.
+
+- **`test-verify-package.sh`** produces a real package, then damages copies of it
+  the way a delivery actually degrades — report cut short mid-write, log without
+  its verdict, manifest naming files that never arrived, archive truncated in
+  transfer — and requires `tools/verify-package.sh` to reject each with the right
+  exit code. A checker that only passes on good input gives false assurance, so
+  the failure cases are the point.
 
 ### Multi-OS simulation
 

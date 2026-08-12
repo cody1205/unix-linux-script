@@ -28,7 +28,7 @@ jobs:
             printf '== %s -n ==\n' "$shell"
             "$shell" -n linux-unix-evidence-gathering-script.sh
           done
-          for t in tests/*.sh; do
+          for t in tests/*.sh tools/*.sh; do
             printf '== dash -n %s ==\n' "$t"
             dash -n "$t"
           done
@@ -37,13 +37,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq devscripts
-          checkbashisms linux-unix-evidence-gathering-script.sh tests/*.sh
+          checkbashisms linux-unix-evidence-gathering-script.sh tests/*.sh tools/*.sh
 
       - name: ShellCheck (advisory)
         continue-on-error: true
         run: |
           sudo apt-get install -y -qq shellcheck
-          shellcheck -s sh linux-unix-evidence-gathering-script.sh tests/*.sh
+          shellcheck -s sh linux-unix-evidence-gathering-script.sh tests/*.sh tools/*.sh
 
       - name: Help and dry-run must not fail
         run: |
@@ -79,6 +79,17 @@ jobs:
       # Safe here because the runner is ephemeral and the test restores /etc.
       - name: Run collector and inspect the evidence package
         run: sudo sh tests/test-no-credential-leak.sh
+
+  verify-package:
+    name: Receipt verifier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Produces a real package, then damages copies of it in the ways a
+      # delivery actually degrades, and requires the verifier to reject each.
+      # A checker that only passes on good input gives false assurance.
+      - name: Verify the verifier accepts good packages and rejects bad ones
+        run: sudo sh tests/test-verify-package.sh
 
   multi-os-simulation:
     name: Multi-OS simulation (${{ matrix.platform }})
