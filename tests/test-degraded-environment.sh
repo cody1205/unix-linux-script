@@ -49,6 +49,17 @@ WORK=`mktemp -d`
 # this the collector would fail for a reason that has nothing to do with the
 # behaviour under test - and would look like a defect in the tool.
 chmod 0755 "$WORK"
+
+# The unprivileged cases below run as "nobody", which must be able to READ the
+# collector as well as traverse to it. In a CI checkout the workspace directory
+# is not world-traversable, so running the collector from its repository path
+# failed with "cannot open ...: Permission denied" - a failure of the test's
+# setup that looked exactly like the collector refusing to work unprivileged.
+# A readable copy in a traversable directory removes that ambiguity.
+UNPRIV_COLLECTOR="$WORK/collector.sh"
+cp "$COLLECTOR" "$UNPRIV_COLLECTOR"
+chmod 0644 "$UNPRIV_COLLECTOR"
+
 cleanup() {
     umount "$WORK/tiny" 2>/dev/null || :
     chmod -R u+rwX "$WORK" 2>/dev/null || :
@@ -74,10 +85,10 @@ O="$WORK/noroot"; mkdir -p "$O"; chmod 0777 "$O"
 # setpriv drops to an unprivileged user; su -c is the fallback.
 if command -v setpriv >/dev/null 2>&1; then
     setpriv --reuid=65534 --regid=65534 --clear-groups \
-        sh "$COLLECTOR" --output-dir "$O" </dev/null >"$WORK/noroot.log" 2>&1
+        sh "$UNPRIV_COLLECTOR" --output-dir "$O" </dev/null >"$WORK/noroot.log" 2>&1
     rc=$?
 else
-    su -s /bin/sh nobody -c "sh '$COLLECTOR' --output-dir '$O' </dev/null" >"$WORK/noroot.log" 2>&1
+    su -s /bin/sh nobody -c "sh '$UNPRIV_COLLECTOR' --output-dir '$O' </dev/null" >"$WORK/noroot.log" 2>&1
     rc=$?
 fi
 if [ "$rc" -ne 0 ] && grep -q 'must be run with sudo' "$WORK/noroot.log" 2>/dev/null; then
@@ -96,10 +107,10 @@ checks=`expr $checks + 1`
 O="$WORK/dry"; mkdir -p "$O"; chmod 0777 "$O"
 if command -v setpriv >/dev/null 2>&1; then
     setpriv --reuid=65534 --regid=65534 --clear-groups \
-        sh "$COLLECTOR" --dry-run --output-dir "$O" </dev/null >"$WORK/dry.log" 2>&1
+        sh "$UNPRIV_COLLECTOR" --dry-run --output-dir "$O" </dev/null >"$WORK/dry.log" 2>&1
     rc=$?
 else
-    su -s /bin/sh nobody -c "sh '$COLLECTOR' --dry-run --output-dir '$O' </dev/null" >"$WORK/dry.log" 2>&1
+    su -s /bin/sh nobody -c "sh '$UNPRIV_COLLECTOR' --dry-run --output-dir '$O' </dev/null" >"$WORK/dry.log" 2>&1
     rc=$?
 fi
 _dryreport="$O/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"

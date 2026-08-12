@@ -75,8 +75,31 @@ normalise() {
         -e 's/^TIMING|.*/TIMING|<TIMING>/' \
         -e 's/^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9:]\{8\} /<TS> /' \
         -e '/^[^ ][^ ]*  *[0-9][0-9]*  *[0-9][0-9]*  *[0-9][0-9]*  *[0-9][0-9]*% /s/.*/<DF-CAPACITY>/' \
+        -e 's/^\(d[rwxsStT-]\{9\}\) *[0-9]\{1,\} \(.*\) \(\/tmp\|\/var\/tmp\|\/dev\/shm\|\/var\/lock\)$/\1 <LINKS> <META> \3/' \
+        -e 's/^\([[:space:]]*\(Local time\|Universal time\|RTC time\|System clock synchronized\|NTP service\)\):.*/\1: <CLOCK>/' \
         "$1"
 }
+# The last three rules normalise things that are genuinely point-in-time on a
+# live host, and each was added only after CI demonstrated it - a developer
+# container did not reproduce any of them:
+#
+#   df capacity   Free space changes between the two runs because the FIRST run
+#                 wrote an evidence package to the same filesystem. Requiring it
+#                 to be identical would assert something false about filesystems.
+#
+#   /tmp link count
+#                 Section 10 lists the shared temporary directories to verify
+#                 their sticky bit. A directory's link count rises when anything
+#                 on the system creates a subdirectory inside it - including this
+#                 test's own mktemp between the two runs. The MODE STRING is
+#                 deliberately still compared, because the sticky bit is the
+#                 actual evidence; only the link count, size, and date are
+#                 normalised away.
+#
+#   clock lines   timedatectl reports the current time, which necessarily differs
+#                 between two runs. The synchronisation STATE is what the section
+#                 is evidencing, and the surrounding lines carrying it are still
+#                 compared.
 # The last rule normalises df output. Free space genuinely changes between the
 # two runs - the first run wrote an evidence package to the same filesystem, so
 # the second run correctly observes less space available. Capacity is
