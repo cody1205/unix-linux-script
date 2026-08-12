@@ -25,9 +25,19 @@ BLOCKERS=""
 EXPECTED_RESULT=COMPLETED_WITH_WARNINGS
 
 write_os_shims() {
+    # The rpm shim must answer --eval '%{_dbpath}', because the collector asks
+    # rpm where its database lives and declines to run rpm at all when no
+    # database exists there. That guard stops rpm CREATING a database on a
+    # host it does not manage - which it does, in root's home directory - and
+    # a fixture without a database would exercise the decline path rather
+    # than this platform's real behaviour.
     cat > "$RSHIMS/rpm" <<'EOF'
 #!/bin/sh
 case "$*" in
+ *--eval*_dbpath*)
+   printf '/var/lib/rpm\n'
+   exit 0
+   ;;
  *--last*)
    cat <<'L'
 kernel-default-5.14.21-150500.55.83.1      Tue Jun  4 09:40:02 2024
@@ -167,6 +177,14 @@ EOF
 }
 
 write_os_files() {
+    # A real host of this platform has an RPM database, and the collector now
+    # requires one before it will invoke rpm - the guard that stops rpm
+    # creating a database on a host it does not manage. Without this file the
+    # fixture would silently exercise the decline path and report the wrong
+    # package inventory, which is the very failure the guard exists to avoid.
+    mkdir -p "$R/var/lib/rpm"
+    printf 'SQLite format 3\n' > "$R/var/lib/rpm/rpmdb.sqlite"
+
     cat > "$R/etc/passwd" <<'EOF'
 root:x:0:0:root:/root:/bin/bash
 daemon:x:2:2:Daemon:/sbin:/usr/sbin/nologin

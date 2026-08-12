@@ -114,6 +114,34 @@ jobs:
       - name: Verify the verifier accepts good packages and rejects bad ones
         run: sudo sh tests/test-verify-package.sh
 
+  # The readiness suite. These are the tests that answer the questions a firm
+  # sanctioning review and a client security review actually ask, rather than
+  # the questions a developer would think to ask. Each is run as its own job so
+  # a failure names the property that broke.
+  readiness:
+    name: Readiness (${{ matrix.property }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - property: host-not-modified
+            why: proves the collection changes nothing on the host
+          - property: no-network-egress
+            why: proves nothing is transmitted and nothing needs the network
+          - property: evidence-chain
+            why: proves every source consulted is accounted for
+          - property: hostile-filesystem
+            why: proves a messy client filesystem is examined, not skipped
+          - property: degraded-environment
+            why: proves the verdict stays honest when conditions are bad
+          - property: determinism
+            why: proves two collections of one host agree
+    steps:
+      - uses: actions/checkout@v4
+      - name: ${{ matrix.why }}
+        run: sudo sh tests/test-${{ matrix.property }}.sh
+
   multi-os-simulation:
     name: Multi-OS simulation (${{ matrix.platform }})
     runs-on: ubuntu-latest

@@ -1,37 +1,192 @@
 #!/bin/sh
 
-# SOX ITGC Audit Data Collection Script
-# Shell-only version intended to be run as:
-#   sudo sh linux-unix-evidence-gathering-script.sh
+# =============================================================================
+# SOX ITGC OPERATING-SYSTEM EVIDENCE COLLECTION
+# =============================================================================
 #
-# Client review statement:
-# This script is intended for controlled SOX ITGC evidence collection on
-# Unix-like operating systems, including Linux, AIX, Solaris / Illumos, HP-UX,
-# BSD, and related platforms. It gathers configuration, access, logging,
-# scheduling, service, network, patch, backup, time synchronization, and file
-# integrity evidence that is commonly requested during operating-system control
-# reviews.
+# Run as:  sudo sh linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
 #
-# Operating model:
-# - The script performs observation and evidence packaging only.
-# - It does not create, modify, delete, enable, disable, restart, or reconfigure
-#   operating-system users, groups, services, jobs, permissions, packages,
-#   network settings, logging settings, or authentication settings.
-# - Source files from the host are read and, where appropriate, copied into the
-#   evidence package. The original source files are not modified.
-# - The script writes only to the evidence directory that it creates under
-#   the output directory selected via --output-dir or the interactive prompt
-#   at startup (default: current working directory), plus the resulting
-#   archive file in that same output directory.
-# - Sensitive files, such as password shadow files, private keys, keytabs, and
-#   SSH key material, are not printed or copied in full. The script records
-#   metadata or safe summaries for those files instead.
+# This script collects operating-system control evidence for a SOX IT General
+# Controls audit. It reads configuration, packages what it read, and stops.
 #
-# Evidence outputs:
-# - report/ contains the narrative audit report.
-# - raw_files/ contains copied non-sensitive source files.
-# - metadata/ contains the manifest and sensitive-file tracking log.
-# - SOX-ITGC-AUDIT-LINUX-UNIX-<hostname>-<timestamp>.* is the packaged archive.
+# It is written to be READ. Two people are expected to review it before it runs
+# anywhere, and the comments throughout are addressed to them:
+#
+#   - the system administrator of the host it will run on, who needs to satisfy
+#     themselves it cannot harm a production server;
+#   - the reviewer deciding whether this is fit to be a sanctioned audit tool,
+#     who needs to see that its limits are known, stated, and tested.
+#
+# Where a decision in this script is not obvious, the comment says why it was
+# made and what the alternative would have cost. Where the evidence has a
+# boundary, the boundary is disclosed in the output rather than left for a
+# reader to assume it away.
+#
+# -----------------------------------------------------------------------------
+# FOR THE SYSTEM ADMINISTRATOR: what this does to your server
+# -----------------------------------------------------------------------------
+#
+# WHAT IT CHANGES:  Nothing.
+#
+# It does not create, modify, delete, enable, disable, restart, or reconfigure
+# any user, group, service, scheduled job, permission, package, network setting,
+# firewall rule, log, or authentication setting. It does not install anything.
+# It does not require a reboot or a maintenance window.
+#
+# Every system command it runs is a query or status form - the same commands you
+# would type to LOOK at the system. It never invokes an administrative command
+# in a form that alters state. Where a platform's status flag is ambiguous, the
+# safe form is chosen explicitly per platform; see print_account_status_summary
+# for a worked example where the obvious approach would have been unsafe on AIX.
+#
+# WHAT IT WRITES:   Only inside the output directory you choose with
+#                   --output-dir, plus the archive file in that same directory.
+#                   Nothing is written anywhere else - not to /tmp, not to the
+#                   home directory, not to any system path.
+#
+# WHAT IT SENDS:    Nothing. It makes no network connections, opens no sockets,
+#                   and contacts no host. It cannot "phone home" because there
+#                   is no code in it that could. (Name-service lookups such as
+#                   getent will consult a directory server if this host is
+#                   configured to use one - that is your operating system
+#                   resolving a user ID, exactly as it does for ls -l, and it
+#                   carries no evidence anywhere.)
+#
+# WHAT IT READS:    Operating-system configuration relevant to access control:
+#                   accounts, groups, sudo rules, SSH settings, scheduled jobs,
+#                   logging, patching, time sync, and file permissions.
+#
+# WHAT IT NEVER READS INTO THE PACKAGE:
+#                   Password hashes (/etc/shadow, AIX /etc/security/passwd),
+#                   SSH private keys, Kerberos keytabs, and LDAP bind secrets.
+#                   For these it records only permissions and ownership -
+#                   evidence that they are protected - never contents. Every
+#                   file treated this way is listed in
+#                   metadata/SENSITIVE_FILES_SKIPPED.txt so you can confirm it.
+#                   It reads no user data, no application data, and no
+#                   databases.
+#
+# WHAT IT COSTS:    Typically one to ten minutes. Two sections walk parts of the
+#                   filesystem and account for nearly all of that; each
+#                   announces itself on screen and reports its own elapsed time.
+#                   Both stop at filesystem boundaries, so neither can descend
+#                   into NFS or SAN mounts and place load on a remote filer.
+#                   Everything else is individual file reads and is effectively
+#                   instantaneous.
+#
+# IF YOU INTERRUPT IT:
+#                   Press Ctrl-C at any point. It stops, marks its own output as
+#                   incomplete so it cannot be mistaken for a finished
+#                   collection, and exits. Nothing is left in a partial state
+#                   because nothing was being changed.
+#
+# HOW TO CHECK ALL OF THAT YOURSELF, rather than taking it on trust.
+# These are exact; each was run against this file and produced what is described.
+#
+#   1. See what it does, without root and without collecting anything
+#      privileged:
+#
+#        sh linux-unix-evidence-gathering-script.sh --dry-run --output-dir /var/tmp/x
+#
+#   2. Prove it opens no network socket. This is the definitive check - it
+#      observes the actual system calls rather than trusting the source:
+#
+#        strace -f -e trace=network \
+#          sh linux-unix-evidence-gathering-script.sh --dry-run --output-dir /var/tmp/x \
+#          2>&1 >/dev/null | grep AF_INET
+#
+#      Prints nothing. No internet-family socket is ever opened. (On AIX or
+#      Solaris the equivalent tool is truss -f -t so_socket.)
+#
+#   3. See every file this script can write to. Each redirection target is a
+#      variable, and this lists them:
+#
+#        grep -nE "^[^#]*(>|>>)[[:space:]]*\"?\\\$" \
+#          linux-unix-evidence-gathering-script.sh | grep -oE '\$[A-Z_]+' | sort -u
+#
+#      Returns five names: $LOG_FILE, $MANIFEST_FILE, $REPORT_FILE,
+#      $SENSITIVE_SKIPPED_FILE, and $_ - the last being the truncated form of
+#      two local variables, $_handling_file and $_redact_target. All five are
+#      files inside the output directory you chose. There is no write to a
+#      system path anywhere in this script.
+#
+#   4. Prove the host is unchanged, empirically. The repository ships the test
+#      that does this - it records the state of roughly 100,000 files before and
+#      after a real collection and fails if any of them differ:
+#
+#        sudo sh tests/test-host-not-modified.sh
+#
+# A NOTE ON SEARCHING FOR NETWORK COMMANDS: grepping this file for words like
+# "telnet" or "ftp" DOES return matches, and they are not what they look like.
+# Section 17 searches YOUR inetd and xinetd configuration for those service
+# names, because an enabled telnet or ftp service is an audit finding. That is
+# this script reading your configuration in order to report on it. Check 2 above
+# is the reliable test, because it observes behaviour rather than vocabulary.
+#
+# -----------------------------------------------------------------------------
+# FOR THE REVIEWER: how this is assured
+# -----------------------------------------------------------------------------
+#
+# PORTABILITY:      Portable POSIX sh. Targets Linux, AIX, Solaris/Illumos,
+#                   HP-UX, and BSD. No bashisms - CI enforces this with
+#                   checkbashisms and parse checks under sh, dash, and bash,
+#                   because /bin/sh on AIX and HP-UX is not what a Linux reader
+#                   would assume.
+#
+# TESTING:          The properties a sanctioning review turns on are each
+#                   asserted by a test that fails the build:
+#
+#                     host-not-modified     snapshots ~100k filesystem paths
+#                                           before and after a real collection
+#                                           and requires zero change
+#                     no-network-egress     static audit, syscall trace under
+#                                           strace, and a run inside a network
+#                                           namespace with no interfaces at all
+#                     evidence-chain        every source consulted is accounted
+#                                           for in the manifest, in both
+#                                           directions
+#                     hostile-filesystem    spaces, quotes, unicode, symlink
+#                                           loops, unreadable and deeply nested
+#                                           directories - and proof the tree was
+#                                           actually examined, not just survived
+#                     degraded-environment  no root, full disk, interruption:
+#                                           the verdict must never overstate
+#                     determinism           two collections of one host must
+#                                           agree byte for byte
+#
+#                   Plus credential-leak and sensitive-path tests, a receipt
+#                   verifier for deliveries, and four simulated platforms
+#                   (RHEL, openSUSE, AIX, HP-UX). See README.md.
+#
+# KNOWN LIMITS, stated rather than discovered later:
+#
+#                   - The two filesystem scans use find -xdev and do not cross
+#                     mount points, so a separately mounted subdirectory beneath
+#                     a scanned path is not traversed. Deliberate: it prevents
+#                     load on client network storage. Disclosed in the report.
+#                   - Section 24 lists accounts the name service will enumerate.
+#                     SSSD and winbind disable enumeration by default, so on a
+#                     directory-joined host the list may be local accounts only.
+#                     The script detects this case and says so.
+#                   - AIX and HP-UX code paths are exercised by simulation, not
+#                     on real hardware of those architectures.
+#
+# EXIT STATUS:      0 the package is usable (clean, or with warnings recorded)
+#                   1 the package is not usable, or the arguments were invalid
+#
+# OUTPUT:           SOX-ITGC-AUDIT-LINUX-UNIX/
+#                     report/     the narrative audit report
+#                     raw_files/  copies of the non-sensitive files it read
+#                     metadata/   MANIFEST.txt              chain of custody
+#                                 SENSITIVE_FILES_SKIPPED.txt  what was withheld
+#                                 COLLECTION-LOG.txt        did the run work
+#                   plus SOX-ITGC-AUDIT-LINUX-UNIX-<host>-<timestamp>.tar.gz
+#
+#                   The report says what the host is configured to do. The
+#                   collection log answers the different and equally important
+#                   question of whether this collection actually worked and
+#                   whether any evidence is missing.
+# =============================================================================
 
 # Restrict command lookup to standard administrative paths. This reduces the
 # chance that a shell alias, user-local wrapper, or non-standard executable is
@@ -380,6 +535,16 @@ print_usage() {
     printf '      When no --app-dir flag is given and stdin is a terminal,\n'
     printf '      the script will interactively prompt for application\n'
     printf '      directories before evidence collection starts.\n'
+    printf '\n'
+    printf 'Exit status:\n'
+    printf '  0   The evidence package is usable. Either nothing limited the\n'
+    printf '      collection, or some evidence was limited and the collection\n'
+    printf '      log records what. Warnings are normal on a live system.\n'
+    printf '  1   The evidence package is NOT usable: a step failed, or the\n'
+    printf '      collection could not be completed. Read the collection log\n'
+    printf '      before relying on anything that was produced.\n'
+    printf '\n'
+    printf '      Argument errors also exit 1, before anything is collected.\n'
 }
 
 # Capability helpers centralize command and path checks. They allow the script
@@ -823,19 +988,86 @@ finalize_collection_log() {
     } >> "$LOG_FILE" 2>/dev/null
 }
 
+# Record what happened to every path this collection consults.
+#
+# THE RULE THIS ENFORCES
+# If a path was used to gain knowledge, or is referenced anywhere in the report,
+# its fate must be recorded in the manifest. An auditor reading the manifest
+# must be able to account for every source the report draws on, without
+# exception - that is what makes the package usable as workpaper support rather
+# than as an unsourced assertion.
+#
+# The four outcomes are recorded distinctly, because they mean different things
+# to a reviewer:
+#
+#   COPIED               the file is in the package; compare it against the report
+#   DIRECTORY_EXAMINED   the directory was read; the file count says what was in it
+#   EXAMINED_ABSENT      the path does not exist on this host. Normal - this
+#                        script targets several Unix families and most hosts
+#                        legitimately lack most of these paths - but recorded so
+#                        that "not collected" is never ambiguous between "not
+#                        there" and "not looked at"
+#   EXAMINED_UNREADABLE  the path EXISTS but could not be read. This is a real
+#                        evidence gap and is the case that must never be silent
+#
+# An empty directory previously disappeared from the chain entirely: the loop
+# copied nothing, so nothing was recorded, while the report still printed the
+# path as a source. That is not a cosmetic omission. An empty
+# /etc/ssh/sshd_config.d is itself evidence - it establishes that no drop-in
+# overrides the main SSH configuration - and an empty /etc/sudoers.d likewise
+# establishes that no supplementary sudo rules exist. Recording the directory
+# and its file count preserves that finding.
 record_file_reference() {
     ref_path=${1%/}
     if [ -z "$ref_path" ]; then
         return
     fi
+
     if [ -f "$ref_path" ]; then
-        copy_file_to_collection "$ref_path"
+        if [ -r "$ref_path" ]; then
+            copy_file_to_collection "$ref_path"
+        else
+            record_reference_outcome "EXAMINED_UNREADABLE" "$ref_path" ""
+            log_event WARN evidence "$ref_path exists but could not be read; it is referenced by the report and is missing from the evidence package"
+        fi
     elif [ -d "$ref_path" ]; then
+        _ref_count=0
         for ref_entry in "$ref_path"/*; do
             if [ -f "$ref_entry" ]; then
+                _ref_count=`expr "$_ref_count" + 1`
                 copy_file_to_collection "$ref_entry"
             fi
         done
+        record_reference_outcome "DIRECTORY_EXAMINED" "$ref_path" "files=$_ref_count"
+        if [ "$_ref_count" -eq 0 ]; then
+            log_event INFO evidence "$ref_path exists but contains no files; recorded as examined and empty, which is itself evidence that nothing in it overrides the corresponding configuration"
+        fi
+    else
+        record_reference_outcome "EXAMINED_ABSENT" "$ref_path" ""
+    fi
+}
+
+# Write one manifest line per path per outcome, without repeating it.
+#
+# Several sections legitimately consult the same path - /etc/passwd is used by a
+# dozen of them - and a manifest that repeated every consultation would obscure
+# the inventory it exists to provide. The first record of an outcome is kept and
+# later identical ones are suppressed.
+record_reference_outcome() {
+    _outcome_verb=$1
+    _outcome_path=$2
+    _outcome_extra=$3
+
+    if [ ! -f "$MANIFEST_FILE" ]; then
+        return
+    fi
+    if grep -Fq "$_outcome_verb|$_outcome_path|" "$MANIFEST_FILE" 2>/dev/null; then
+        return
+    fi
+    if [ -n "$_outcome_extra" ]; then
+        record_manifest_line "$_outcome_verb|$_outcome_path|$_outcome_extra"
+    else
+        record_manifest_line "$_outcome_verb|$_outcome_path|"
     fi
 }
 
@@ -1702,28 +1934,37 @@ print_ssh_summary() {
     fi
     blank_line
 
-    # The daemon's own resolved view, where it is available. This is the only
-    # output in this section that reflects what sshd will actually enforce after
-    # every include, Match block, and compiled-in default is resolved, so it
-    # settles any disagreement between the files above.
+    # WHY THE DAEMON IS NOT ASKED DIRECTLY
     #
-    # FOR THE SYSTEM ADMINISTRATOR REVIEWING THIS SCRIPT: "sshd -T" is extended
-    # test mode. It parses the configuration, prints the effective settings, and
-    # exits. It does NOT start, stop, restart, reload, or reconfigure the SSH
-    # daemon, does not bind a port, and does not affect any existing session.
-    # The running sshd is untouched. Output is filtered to the access-control
-    # keywords this section is about, and stdin is closed so it cannot prompt.
-    subsection "Effective Configuration as Resolved by sshd (-T):"
-    if command_exists sshd; then
-        if sshd -T </dev/null 2>/dev/null | grep -iE '^(permitrootlogin|passwordauthentication|pubkeyauthentication|permitemptypasswords|x11forwarding|allowusers|allowgroups|denyusers|denygroups|logingracetime|maxauthtries)[[:space:]]'; then
-            record_manifest_line "COMMAND_OUTPUT|sshd -T|source=effective_sshd_configuration"
-        else
-            printf 'not available (sshd -T could not resolve the configuration on this\n'
-            printf '  host; the file evidence above stands on its own)\n'
-        fi
-    else
-        printf 'not available (sshd binary not found in the restricted PATH)\n'
-    fi
+    # "sshd -T" would print the configuration the daemon has actually resolved,
+    # which would settle any disagreement between the two sources above
+    # outright. It is deliberately NOT used, and the reason is worth recording
+    # because the omission looks like an oversight otherwise.
+    #
+    # sshd -T opens an AF_INET socket and calls connect() on it while working
+    # out its local addressing. Nothing is transmitted - it is a UDP socket used
+    # for local address determination - but the syscalls are real and would
+    # appear in any packet capture, auditd rule, or EDR product watching the
+    # collection run on a client's production host.
+    #
+    # This tool's guarantee to the client is that it initiates no network
+    # activity whatsoever. That guarantee is worth more than the convenience of
+    # a resolved configuration dump, because a guarantee with a footnote is not
+    # a guarantee: the client's security team would find the socket before they
+    # found the explanation, and every subsequent assurance would be re-opened.
+    # The two files above are the authoritative record and are collected in
+    # full, so nothing that matters is lost by asking the filesystem instead of
+    # the daemon.
+    #
+    # tests/test-no-network-egress.sh enforces this: it fails the build if any
+    # AF_INET socket is opened during a collection.
+    subsection "Effective Configuration:"
+    printf 'Not queried from the running daemon by design. Determining the\n'
+    printf '  effective configuration from sshd itself requires invoking the daemon\n'
+    printf '  binary, which opens a network socket while resolving its local\n'
+    printf '  addressing. This collection makes no network calls of any kind, so\n'
+    printf '  the configuration files above are used instead. Where they disagree,\n'
+    printf '  the precedence rule stated above determines which value applies.\n'
 }
 
 # SSH source-file capture:
@@ -1798,6 +2039,69 @@ print_sulog_content() {
 #
 # Getting this wrong does not fail loudly. It reports the wrong inventory as if
 # it were the right one, which is worse than reporting nothing.
+#
+# INVOKING rpm WHEN IT IS NOT THE NATIVE PACKAGE MANAGER MODIFIES THE HOST.
+#
+# This is the reason the selection below tests for a package DATABASE rather
+# than for a binary. On a Debian or Ubuntu host that happens to have the rpm
+# package installed - not unusual; it arrives with alien and various vendor
+# tooling - "rpm -qa" run as root finds no RPM database and CREATES ONE:
+#
+#     /root/.rpmdb/rpmdb.sqlite
+#     /root/.rpmdb/rpmdb.sqlite-shm
+#     /root/.rpmdb/rpmdb.sqlite-wal
+#
+# Three files written into root's home directory by a script whose entire
+# premise is that it writes nothing outside its own output directory. On a
+# client running file integrity monitoring that is an alert, raised against the
+# auditors, during an audit. It was found by tests/test-host-not-modified.sh and
+# reproduced directly before this fix was written.
+#
+# Selecting on the database also fixes the accuracy problem in the same stroke:
+# a host with an rpm binary and no rpm database has no RPM-managed software to
+# report, so querying rpm there could only ever produce an empty or misleading
+# answer.
+# Testing for the directory /var/lib/rpm is NOT sufficient, and the first
+# attempt at this fix failed for exactly that reason. On Debian and Ubuntu:
+#
+#   - the rpm package ships /var/lib/rpm as an EMPTY directory, so the
+#     directory exists on a host that has no RPM-managed software at all; and
+#   - it configures rpm's database path to ~/.rpmdb - a per-user database -
+#     rather than to /var/lib/rpm, which is why the file it creates lands in
+#     root's home directory.
+#
+# The reliable test is therefore to ask rpm where its database actually is, and
+# then check whether a database FILE exists there. "rpm --eval" only expands a
+# macro; it was verified to create nothing. The three filenames cover the
+# backends in use: sqlite (rpm 4.16+), Berkeley DB (older), and ndb/lmdb.
+rpm_database_present() {
+    command_exists rpm || return 1
+    _rpm_dbpath=`rpm --eval '%{_dbpath}' 2>/dev/null`
+    case "$_rpm_dbpath" in
+        ''|%*) _rpm_dbpath=/var/lib/rpm ;;
+    esac
+    [ -f "$_rpm_dbpath/rpmdb.sqlite" ] ||
+    [ -f "$_rpm_dbpath/Packages" ] ||
+    [ -f "$_rpm_dbpath/data.mdb" ]
+}
+
+# dpkg keeps its inventory in a single status file. Its presence and non-zero
+# size is what distinguishes a host dpkg actually manages from one that merely
+# has the binary installed.
+dpkg_database_present() {
+    [ -s /var/lib/dpkg/status ]
+}
+
+# True only when rpm is both installed AND has a database to read, so that
+# calling it cannot create one.
+rpm_usable() {
+    command_exists rpm && rpm_database_present
+}
+
+dpkg_usable() {
+    command_exists dpkg && dpkg_database_present
+}
+
 print_package_inventory() {
     _pkg_done=no
 
@@ -1833,10 +2137,10 @@ print_package_inventory() {
         return
     fi
 
-    if command_exists rpm; then
+    if rpm_usable; then
         printf 'Command: rpm -qa\n'
         rpm -qa 2>/dev/null || not_available
-    elif command_exists dpkg; then
+    elif dpkg_usable; then
         printf 'Command: dpkg -l\n'
         dpkg -l 2>/dev/null || not_available
     elif command_exists pkginfo; then
@@ -2668,10 +2972,10 @@ print_patch_update_summary() {
             ;;
     esac
 
-    if command_exists rpm; then
+    if rpm_usable; then
         printf 'Command: rpm -qa --last\n'
         rpm -qa --last 2>/dev/null || not_available
-    elif command_exists dpkg; then
+    elif dpkg_usable; then
         print_file_with_header /var/log/dpkg.log
     elif command_exists lslpp; then
         printf 'Command: lslpp -h\n'
@@ -4042,3 +4346,31 @@ _final_result=`collection_log_result`
     printf '  Full log: %s\n' "${LOG_FILE:-not created}"
     printf '================================================================\n'
 } >&3 2>/dev/null || :
+
+# Exit status, so that an automated caller learns the same thing a human reads.
+#
+# This previously exited 0 unconditionally. A collection that failed outright -
+# an unwritable output directory, no evidence directory, no log - still returned
+# success, so any wrapper script, scheduled job, or intake process that checked
+# $? was told the collection had worked. The verdict on screen said FAILED while
+# the exit status said fine, and automation believes the exit status.
+#
+#   0  the package is usable: COMPLETED_CLEAN, or COMPLETED_WITH_WARNINGS.
+#      Warnings are the normal outcome on a real host - they mean some evidence
+#      was limited, not that the collection failed - so they must not be treated
+#      as an error by a caller. The auditor reads them; the script succeeded.
+#
+#   1  the package is NOT usable: COMPLETED_WITH_ERRORS, or FAILED. A step
+#      failed or the collection could not be completed. Do not send the package
+#      without reading the log first.
+#
+# Deliberately only two values. A finer scale would invite callers to branch on
+# distinctions that belong in the log, and the log is the authoritative record.
+case "$_final_result" in
+    COMPLETED_CLEAN|COMPLETED_WITH_WARNINGS)
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
