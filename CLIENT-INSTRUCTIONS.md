@@ -1,54 +1,99 @@
 # Running the SOX ITGC evidence collection script
 
-This page is written to be sent to the system administrator who will run the
-script. It is deliberately self-contained: everything they need to decide whether
-to run it, how to run it, and what to send back.
+**For the system administrator who will run this script.**
+
+This page is self-contained. It covers what the script does to your server, how
+to satisfy yourself of that independently, how to run it, and what to send back.
 
 ---
 
-## What this is
+## In one paragraph
 
-A single shell script that reads operating-system configuration and packages it
-for review as part of a SOX IT General Controls audit. It covers accounts and
-group membership, privileged access and `sudo` rules, authentication
-configuration, SSH settings, scheduled jobs, logging, patching, time
-synchronisation, and file permissions.
+You will be asked to run a single shell script, once, as root. It reads
+operating-system configuration relevant to access control — accounts, groups,
+`sudo` rules, SSH settings, scheduled jobs, logging, patching, time sync, file
+permissions — writes what it read into an output directory you choose, and
+exits. It changes nothing, installs nothing, and sends nothing anywhere. It
+takes a few minutes and needs no maintenance window.
+
+---
 
 ## What it does to your system
 
-**Nothing.** The script is read-only. It does not create, modify, delete,
-enable, disable, restart, or reconfigure any user, group, service, job,
-permission, package, network setting, or authentication setting.
+**Nothing.** It is read-only.
 
-Where it runs a system command, it uses that command's query or status form
-only — for example `sshd -T`, which prints the SSH daemon's effective
-configuration and exits without starting, stopping, reloading, or otherwise
-touching the running daemon or any active session.
+It does not create, modify, delete, enable, disable, restart, or reconfigure any
+user, group, service, scheduled job, permission, package, network setting,
+firewall rule, log, or authentication setting.
 
-The only files it writes are inside the output directory you choose, plus the
-resulting archive in that same directory. It states this in its own output, and
-the collection log it produces records the same guarantee for your records.
+Every system command it runs is a query or status form — the same commands you
+would type to look at the system. It never runs an administrative command in a
+form that changes state.
 
-Two things worth knowing before you run it:
+| | |
+|---|---|
+| **Writes** | Only inside the `--output-dir` you choose, plus the archive in that same directory. Nothing in `/tmp`, nothing in any system path. |
+| **Sends** | Nothing. No network connections, no sockets, no outbound anything. |
+| **Reads** | OS configuration relevant to access control. No user data, no application data, no databases. |
+| **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets. |
+| **Needs** | Root via `sudo`, a few hundred MB of free space, typically 1–10 minutes. |
+| **Requires** | No reboot, no restart, no maintenance window, no installation. |
 
-- **Credentials are never collected.** Password hash files (`/etc/shadow`, AIX
-  `/etc/security/passwd`), SSH private keys, Kerberos keytabs, and LDAP bind
-  secrets are deliberately excluded. The script records their permissions and
-  ownership — evidence that they are protected — but never their contents. Files
-  treated this way are listed in `metadata/SENSITIVE_FILES_SKIPPED.txt` so you
-  can confirm it.
-- **Two sections walk the filesystem** and take longer than the rest: a scan for
-  world-writable files and a scan for SetUID/SetGID binaries. Both are limited to
-  system and application directories rather than the whole filesystem, and both
-  stop at filesystem boundaries so they cannot reach into NFS or SAN mounts. Each
-  reports its own runtime on screen as it goes.
+Two details worth knowing before you run it:
 
-## What you need
+- **Credential files are deliberately excluded.** For these the script records
+  permissions and ownership — evidence that they are *protected* — but never
+  contents. Every file treated this way is listed in
+  `metadata/SENSITIVE_FILES_SKIPPED.txt` in the output, so you can confirm
+  exactly what was withheld.
+- **Two sections walk the filesystem** and account for nearly all the runtime: a
+  scan for world-writable files and one for SetUID/SetGID binaries. Both are
+  limited to system and application directories rather than whole filesystems,
+  and **both stop at filesystem boundaries**, so neither can descend into NFS or
+  SAN mounts and put load on a remote filer. Each reports its own elapsed time
+  on screen as it runs.
 
-- Root access, via `sudo`
-- Somewhere with a few hundred megabytes free for the output
-- Typically 1–10 minutes, depending on the size of `/usr` and any application
-  directories included
+## Don't take that on trust — check it
+
+Each of these was run against the script itself and produces what is described.
+
+**See what it does, without root and without collecting anything privileged:**
+
+```sh
+sh linux-unix-evidence-gathering-script.sh --dry-run --output-dir /var/tmp/x
+```
+
+**Prove it opens no network socket.** This observes actual system calls rather
+than trusting the source or this page:
+
+```sh
+strace -f -e trace=network \
+  sh linux-unix-evidence-gathering-script.sh --dry-run --output-dir /var/tmp/x \
+  2>&1 >/dev/null | grep AF_INET
+```
+
+Prints nothing. On AIX or Solaris use `truss -f -t so_socket` instead.
+
+**See every file it can write to.** Each write target is a variable; this lists
+them:
+
+```sh
+grep -nE "^[^#]*(>|>>)[[:space:]]*\"?\\\$" \
+  linux-unix-evidence-gathering-script.sh | grep -oE '\$[A-Z_]+' | sort -u
+```
+
+Returns five names, all of them files inside the output directory you choose.
+
+**Read it.** It is plain text and commented throughout, including the reasoning
+behind each decision and an explicit statement of its limitations. The header
+block is written for you specifically.
+
+> **One thing that looks alarming and isn't:** grepping the script for `telnet`
+> or `ftp` returns matches. Those are in a section that searches *your*
+> `inetd`/`xinetd` configuration for those service names, because an enabled
+> telnet or ftp service is an audit finding. That is the script reading your
+> configuration in order to report on it. The `strace` check above is the
+> reliable test, because it observes behaviour rather than vocabulary.
 
 ---
 
@@ -60,14 +105,14 @@ Compare the checksum against the value supplied separately with this document:
 sha256sum linux-unix-evidence-gathering-script.sh
 ```
 
-On AIX, Solaris or HP-UX, use whichever of these exists:
+On AIX, Solaris or HP-UX use whichever exists:
 
 ```sh
 csum -h SHA256 linux-unix-evidence-gathering-script.sh   # AIX
 digest -a sha256 linux-unix-evidence-gathering-script.sh # Solaris
 ```
 
-If the checksums do not match, stop and request a fresh copy. Do not run it.
+**If the checksums do not match, stop and request a fresh copy. Do not run it.**
 
 ## Run it
 
@@ -75,33 +120,32 @@ If the checksums do not match, stop and request a fresh copy. Do not run it.
 sudo sh linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
 ```
 
-Notes:
-
-- Run it with `sh` as shown. The file does not need to be marked executable, and
+- Run it with `sh` as shown. It does not need to be marked executable, and
   invoking it this way avoids depending on the execute bit surviving transfer.
-- The file extension does not matter. If it arrived as `.txt` because a mail
-  gateway rejected `.sh`, run `sudo sh <filename>.txt` — it behaves identically.
+- **The file extension does not matter.** If it arrived as `.txt` because a mail
+  gateway rejected `.sh`, run `sudo sh <filename>.txt` — behaviour is identical.
 - Choose any `--output-dir` you prefer. If you omit it, the script asks.
 - To include an application installation directory in the evidence, add
-  `--app-dir /path/to/app`. The flag can be repeated. Please include the
-  directories named in the request that accompanied this document.
+  `--app-dir /path/to/app`. Repeatable. Please include the directories named in
+  the request that accompanied this document.
 
-To review what it will do without root and without collecting anything
-privileged:
+**You can stop it at any time with Ctrl-C.** It marks its own output as
+incomplete so a partial collection cannot be mistaken for a finished one, and
+exits. Nothing is left half-done, because nothing was being changed.
 
-```sh
-sh linux-unix-evidence-gathering-script.sh --dry-run --output-dir /var/tmp/audit
-sh linux-unix-evidence-gathering-script.sh --help
-```
+**Exit status**, if you are running it from a script:
 
-The script is plain text and can be read in full before it is run.
+| Code | Meaning |
+|---|---|
+| `0` | The package is usable. Either nothing limited the collection, or some evidence was limited and the log records what. |
+| `1` | The package is not usable — a step failed, or the arguments were invalid. |
 
 ---
 
 ## If it fails with strange syntax errors
 
-Errors like these usually mean the file picked up Windows line endings somewhere
-in transfer, not that the script is broken:
+Errors like these mean the file picked up Windows line endings in transfer, not
+that the script is broken:
 
 ```
 linux-unix-evidence-gathering-script.sh: 2: : not found
@@ -109,9 +153,8 @@ linux-unix-evidence-gathering-script.sh: 40: readonly: PATH: bad variable name
 syntax error near unexpected token
 ```
 
-The give-away is an error that names a line which looks perfectly ordinary when
-you open the file. Nothing is wrong with the script; each line simply has an
-invisible carriage return on the end.
+The give-away is an error naming a line that looks perfectly ordinary when you
+open the file. Each line simply has an invisible carriage return on the end.
 
 Repair it, then **verify the repaired copy before running it**:
 
@@ -124,17 +167,12 @@ The checksum of `collector.sh` **must equal the value supplied with this
 document**. Removing the carriage returns restores the file to exactly the bytes
 that were sent, so a correct repair reproduces the original checksum precisely.
 
-- **Checksums match** — the file is intact and was only damaged by line-ending
-  conversion. Run it:
+- **Match** — the file was only damaged by line-ending conversion. Run it:
+  `sudo sh collector.sh --output-dir /var/tmp/audit`
+- **No match** — something other than line endings changed in transfer. **Stop
+  and request a fresh copy.**
 
-  ```sh
-  sudo sh collector.sh --output-dir /var/tmp/audit
-  ```
-
-- **Checksums do not match** — something other than line endings changed in
-  transfer. Stop, and request a fresh copy. Do not run it.
-
-Please mention the repair when you return the results, so we can note it.
+Please mention the repair when you return the results.
 
 ---
 
@@ -143,7 +181,7 @@ Please mention the repair when you return the results, so we can note it.
 Inside your chosen output directory:
 
 ```
-SOX-ITGC-AUDIT-LINUX-UNIX/          the evidence, as a folder
+SOX-ITGC-AUDIT-LINUX-UNIX/                            the evidence, as a folder
 SOX-ITGC-AUDIT-LINUX-UNIX-<host>-<timestamp>.tar.gz   the same, archived
 ```
 
@@ -154,10 +192,9 @@ emailed, or uploaded without further root access. Because it describes access
 control on a production system, please transfer it over an encrypted channel and
 treat it as confidential.
 
-### Before sending, a 5-second check
+### Before sending — a five-second check
 
-The script prints a verdict for its own run when it finishes. It looks like this,
-and includes the path to its full log:
+The script prints a verdict for its own run when it finishes:
 
 ```
 ================================================================
@@ -168,41 +205,63 @@ COLLECTION RESULT: COMPLETED_CLEAN
 ================================================================
 ```
 
-If that has scrolled away, read it back from the log. Substitute the output
-directory you actually chose — the path below is only the example used in this
-document:
+If it has scrolled away, read it back from the log — substituting the output
+directory you actually chose:
 
 ```sh
 OUTDIR=/var/tmp/audit        # the --output-dir you used
 grep -E "^(FINAL_)?RESULT:" "$OUTDIR/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
 ```
 
-| Result | Meaning |
-| --- | --- |
+| Result | What to do |
+|---|---|
 | `COMPLETED_CLEAN` | Everything collected. Send it. |
-| `COMPLETED_WITH_WARNINGS` | Normal. Some evidence was limited — usually files the script could not read. Send it; we will review the warnings. |
+| `COMPLETED_WITH_WARNINGS` | **Normal, and not a problem.** Some evidence was limited — usually files that could not be read. Send it; we will review the warnings. |
 | `COMPLETED_WITH_ERRORS` or `FAILED` | Something went wrong. Please send the archive anyway **and** tell us, so we can work out what happened. |
 
-`COMPLETED_WITH_WARNINGS` is the common outcome on a real system and is not a
-problem. If `FINAL_RESULT` is present it supersedes `RESULT`.
+`COMPLETED_WITH_WARNINGS` is the common outcome on a real system. If
+`FINAL_RESULT` is present it supersedes `RESULT`.
+
+### What is in the package
+
+`COLLECTION-LOG.txt` is worth a look before you send it. It records what the
+script did, in plain language, and contains **no file contents, no credentials,
+and no command output** — only paths and outcomes. It is safe to read, forward
+internally, or attach to a change ticket even where the evidence package itself
+would not be.
 
 ---
 
-## Questions we are likely to be asked
+## Questions we are often asked
 
-**Can we review the script before running it?** Yes, please do. It is plain text
-and commented throughout, including the reasoning behind each decision.
+**Can we review the script first?** Yes, please do. It is plain text and
+commented throughout. The header block is addressed to you and states its
+limitations explicitly.
 
 **Can we run it in a test environment first?** Yes. `--dry-run` also works
 without root, on any host.
 
 **Will it affect performance?** The two filesystem scans generate metadata I/O
 for the minute or two they run. They are scoped to system and application paths
-and do not cross into network-mounted storage. If you would prefer to run it in a
-maintenance window, that is fine — nothing about it is time-sensitive.
+and do not cross into network-mounted storage. If you would prefer a maintenance
+window that is fine — nothing about it is time-sensitive.
 
-**Does it phone home or transmit anything?** No. It makes no network connections.
-It writes to the output directory and nowhere else.
+**Does it phone home or transmit anything?** No. It makes no network connections
+and contains no command that could. Verify it with the `strace` check above.
+
+**Could it lock accounts, expire passwords, or change a shell?** No. Where a
+platform's account-status command has a dangerous form — AIX `passwd -s` changes
+a login shell rather than showing status — the script selects the safe form
+explicitly per platform and never invokes the other. This is enforced by an
+automated test that fails the build if the unsafe command is ever called.
+
+**What if it is interrupted, or the server reboots mid-run?** Nothing is left in
+a partial state, because nothing is being changed. The output directory may hold
+an incomplete collection, which the script marks as incomplete. Delete it and
+re-run, or send it and tell us.
+
+**Does it need internet access?** No. It has been tested running with no network
+interfaces present at all.
 
 **What if we are not comfortable with part of it?** Tell us which part. The
 script is modular and we would rather scope a section out and document why than
