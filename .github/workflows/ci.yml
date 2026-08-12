@@ -85,6 +85,13 @@ jobs:
       - name: Assert credential stores are protected
         run: sh tests/test-sensitive-paths.sh
 
+      # /etc/passwd must stay collectable, so it cannot be protected by path.
+      # On a host that keeps hashes inline in field 2 - HP-UX without pwconv -
+      # a content check is the only thing standing between the collector and a
+      # credential leak through a file it is required to collect.
+      - name: Assert inline /etc/passwd hashes are detected
+        run: sh tests/test-inline-passwd-hashes.sh
+
   credential-leak:
     name: End-to-end credential leak
     runs-on: ubuntu-latest

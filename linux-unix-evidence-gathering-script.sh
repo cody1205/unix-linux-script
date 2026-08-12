@@ -428,15 +428,132 @@ is_sensitive_path() {
     esac
 }
 
+# Password hashes stored inline in /etc/passwd:
+#
+# On a modern Linux host /etc/passwd carries no credential material - field 2
+# holds a placeholder ("x") and the hash lives in /etc/shadow, which the table
+# above withholds. That is not universal. HP-UX in its historical non-shadow,
+# non-trusted configuration stores the crypt hash directly in field 2 of
+# /etc/passwd, and shadowing there is opt-in (pwconv) rather than the default.
+# Older Solaris and some minimal or appliance builds can be in the same state.
+#
+# /etc/passwd is referenced by roughly a dozen sections, so on such a host the
+# credential material this script exists to withhold would be copied into
+# raw_files/ through the front door while /etc/shadow was being carefully held
+# back. The classification table cannot catch this because the answer depends on
+# the CONTENT of the file on this particular host, not on its path - and the path
+# must stay collectable, since the account list is core evidence.
+#
+# The check is therefore a content test, evaluated once and cached. Placeholder
+# values across the Unix families are treated as "no hash present":
+#
+#   x     Linux, Solaris shadow indirection      *     locked / HP-UX trusted mode
+#   !, !! locked account (Linux, AIX)            NP, *NP*  Solaris "no password"
+#   ##user  AIX shadow indirection               empty  no password set at all
+#
+# Anything else in field 2 is assumed to be a real hash. Lines beginning with
+# + or - are NIS netgroup directives, not accounts, and are skipped.
+# The content test itself, against any path, with no caching and no dependence on
+# script state. Kept separate from the cached /etc/passwd wrapper below so it can
+# be extracted and unit-tested against fixture files representing each platform's
+# conventions - the same approach used for is_sensitive_path(), and for the same
+# reason: this is a credential guard, and a guard that has never been shown to
+# fire is not a guard.
+#
+# Returns 0 when at least one account line carries something in field 2 that is
+# not a recognised placeholder.
+file_has_inline_password_hashes() {
+    _inline_check_path=$1
+    [ -r "$_inline_check_path" ] || return 1
+    awk -F: '
+        /^[+-]/          { next }   # NIS netgroup directives, not accounts
+        /^[[:space:]]*#/ { next }   # comments
+        /^[[:space:]]*$/ { next }   # blank lines
+        NF < 2           { next }   # malformed, no field 2 to judge
+        $2 == ""      { next }
+        $2 == "x" || $2 == "*" || $2 == "!" || $2 == "!!" { next }
+        $2 == "NP" || $2 == "*NP*" || $2 == "*LK*"        { next }
+        $2 == "##" $1 { next }
+        { found = 1; exit }
+        END { exit(found ? 0 : 1) }
+    ' "$_inline_check_path" 2>/dev/null
+}
+
+PASSWD_INLINE_HASH_STATE=unknown
+
+passwd_file_has_inline_hashes() {
+    if [ "$PASSWD_INLINE_HASH_STATE" = "unknown" ]; then
+        if file_has_inline_password_hashes /etc/passwd; then
+            PASSWD_INLINE_HASH_STATE=yes
+        else
+            PASSWD_INLINE_HASH_STATE=no
+        fi
+    fi
+    [ "$PASSWD_INLINE_HASH_STATE" = "yes" ]
+}
+
+# A copy of /etc/passwd with field 2 replaced, for the case above. Every other
+# field is preserved exactly, so the account inventory - names, UIDs, GIDs,
+# GECOS, home directories, and login shells - remains complete evidence. Only
+# the credential is removed, and its removal is stated in the file itself so a
+# reviewer cannot mistake the redaction for the host's actual configuration.
+write_redacted_passwd_copy() {
+    _redact_source=$1
+    _redact_target=$2
+    {
+        printf '# NOTICE: This is a REDACTED copy of %s from %s.\n' "$_redact_source" "${HOSTNAME_VALUE:-this host}"
+        printf '# This host stores password hashes inline in field 2 of /etc/passwd\n'
+        printf '# rather than in a separate shadow file. The evidence collection\n'
+        printf '# script replaced field 2 of every account with the literal text\n'
+        printf '# <REDACTED-BY-COLLECTOR> so that no credential material leaves the\n'
+        printf '# host. Every other field is reproduced exactly as it was found.\n'
+        printf '#\n'
+        printf '# The redaction marker is NOT the value configured on this host.\n'
+        printf '# See metadata/SENSITIVE_FILES_SKIPPED.txt and the collection log.\n'
+        printf '#\n'
+        awk -F: 'BEGIN { OFS = ":" }
+            /^[+-]/ { print; next }
+            NF < 2  { print; next }
+            { $2 = "<REDACTED-BY-COLLECTOR>"; print }
+        ' "$_redact_source" 2>/dev/null
+    } > "$_redact_target" 2>/dev/null
+
+    # Confirm the redaction actually produced account lines. A truncated or empty
+    # result must be treated as a failure rather than delivered as evidence, and
+    # the caller removes the file in that case. Verifying the marker is present
+    # also proves the substitution ran rather than the original being echoed.
+    if [ -s "$_redact_target" ] && grep -q '<REDACTED-BY-COLLECTOR>' "$_redact_target" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 record_manifest_line() {
     if [ -f "$MANIFEST_FILE" ]; then
         printf '%s\n' "$1" >> "$MANIFEST_FILE"
     fi
 }
 
+# Record a file as deliberately withheld.
+#
+# SENSITIVE_FILES_SKIPPED.txt is the file the client is told to check in order to
+# confirm what was held back, so it has to be the complete list. It previously
+# was not: this function was called only from copy_file_to_collection, so a
+# sensitive file that went straight to print_sensitive_file_review - every
+# authorized_keys reached through Section 14, among others - was recorded in the
+# manifest as SENSITIVE_METADATA_ONLY and never appeared here at all. The two
+# records of the same decision disagreed, and the one the client was pointed at
+# was the incomplete one.
+#
+# Both call sites now record here, so entries can arrive twice for one file; the
+# duplicate check keeps the list readable as an inventory.
 record_sensitive_skip() {
     if [ -f "$SENSITIVE_SKIPPED_FILE" ]; then
-        printf '%s\n' "$1" >> "$SENSITIVE_SKIPPED_FILE"
+        if ! grep -Fxq "$1" "$SENSITIVE_SKIPPED_FILE" 2>/dev/null; then
+            printf '%s\n' "$1" >> "$SENSITIVE_SKIPPED_FILE"
+            log_event INFO sensitive "$1 held back from the package by the credential safeguards; metadata recorded instead of contents"
+        fi
+        return
     fi
     log_event INFO sensitive "$1 held back from the package by the credential safeguards; metadata recorded instead of contents"
 }
@@ -776,6 +893,25 @@ copy_file_to_collection() {
     fi
 
     if mkdir -p "$target_directory" 2>/dev/null; then
+        # A host that keeps password hashes inline in /etc/passwd gets a redacted
+        # copy instead of the file itself. Withholding the file entirely would
+        # remove the account inventory, which is core evidence referenced by a
+        # dozen sections; copying it verbatim would ship the credentials this
+        # script exists to protect. Redacting field 2 keeps all of the evidence
+        # and none of the secret.
+        if [ "$file_path" = "/etc/passwd" ] && passwd_file_has_inline_hashes; then
+            if write_redacted_passwd_copy "$file_path" "$target_path"; then
+                _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+                _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
+                record_manifest_line "COPIED_REDACTED|$file_path|field=2_password_hash|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+                record_sensitive_skip "$file_path (field 2 only; this host stores password hashes inline in /etc/passwd, so a redacted copy was delivered in place of the original)"
+                log_event WARN sensitive "/etc/passwd on this host carries password hashes inline in field 2 rather than in a shadow file; raw_files/etc/passwd is a REDACTED copy with field 2 removed and is not a byte-for-byte reproduction of the source"
+            else
+                log_event ERROR sensitive "/etc/passwd carries inline password hashes but the redacted copy could not be written; the file was deliberately NOT copied, so raw_files/ has no /etc/passwd"
+                rm -f "$target_path" 2>/dev/null
+            fi
+            return
+        fi
         if cp -p "$file_path" "$target_path" 2>/dev/null || cp "$file_path" "$target_path" 2>/dev/null; then
             # The permissions and ownership of the SOURCE file are a control fact
             # and are recorded here. The permissions of our copy are not evidence
@@ -795,6 +931,20 @@ copy_file_to_collection() {
 # The script attempts common checksum tools available across Unix-like systems.
 # These tools read file contents to calculate a reference value and do not
 # write to or alter the measured file.
+#
+# CHECKSUM_ALGORITHM names what the selected tool actually computes. The last
+# fallback, cksum, is a CRC and not a cryptographic hash at all, so any output
+# that presents a checksum has to say which of the two it is holding: a reviewer
+# comparing a CRC against an issued SHA-256 would otherwise see an unexplained
+# mismatch and reasonably conclude the file had been altered.
+CHECKSUM_ALGORITHM=unavailable
+if command_exists sha256sum || command_exists shasum || command_exists digest; then
+    CHECKSUM_ALGORITHM=sha256
+elif command_exists cksum; then
+    CHECKSUM_ALGORITHM=cksum-crc
+fi
+readonly CHECKSUM_ALGORITHM
+
 print_file_checksum() {
     file_path=$1
 
@@ -853,24 +1003,6 @@ print_noncomment_or_not_available() {
             :
         else
             no_entries_found
-        fi
-    else
-        not_available
-    fi
-}
-
-# Pattern-based evidence extraction:
-# This helper searches readable files for security-relevant settings and prints
-# matching lines. It performs read-only text matching and does not edit files.
-print_matching_lines_or_not_available() {
-    pattern=$1
-    file_path=$2
-
-    if file_readable "$file_path"; then
-        if grep -E "$pattern" "$file_path" 2>/dev/null; then
-            :
-        else
-            not_available
         fi
     else
         not_available
@@ -939,6 +1071,11 @@ print_sensitive_file_review() {
     esac
 
     record_manifest_line "SENSITIVE_METADATA_ONLY|$file_path"
+    # Also record it in the skip file. A file reviewed through this path is
+    # withheld just as deliberately as one stopped in copy_file_to_collection,
+    # and the client is directed to SENSITIVE_FILES_SKIPPED.txt to confirm what
+    # was withheld - so it has to be listed there too.
+    record_sensitive_skip "$file_path"
 }
 
 # Full-file evidence handling:
@@ -1009,32 +1146,67 @@ print_platform_details() {
 
 # Privileged group summary:
 # This function identifies membership in commonly privileged administrative
-# groups such as wheel and sudo. It reads group information only and does not
-# add or remove users from any group.
+# groups. It reads group information only and does not add or remove users from
+# any group.
+#
+# The group that confers administrative privilege is platform-specific, and
+# checking only wheel and sudo meant this section reported "not available" on
+# every AIX host - a platform where the privileged group is `system`, whose
+# members hold most root-equivalent authority. Reporting nothing on the exact
+# question the section exists to answer, on a platform in scope for these
+# engagements, made the evidence look clean rather than absent.
+#
+#   wheel     BSD, RHEL family, Solaris - traditional su/sudo gate
+#   sudo      Debian and Ubuntu - the sudoers-granted group
+#   system    AIX - members hold broad administrative authority
+#   adm/bin   AIX and HP-UX - historic administrative groups
+#   root      the root group itself, where it has members beyond root
+#   admin     HP-UX and some Linux builds
+privileged_group_names() {
+    printf 'wheel\nsudo\nroot\nadm\nadmin\n'
+    case "$OS_NAME" in
+        AIX)   printf 'system\nsecurity\nbin\n' ;;
+        HP-UX) printf 'sys\nbin\n' ;;
+        SunOS) printf 'sysadmin\n' ;;
+    esac
+}
+
 print_group_membership_summary() {
     found=no
 
     if command_exists getent; then
-        record_manifest_line "GETENT_QUERY|group wheel,sudo|source=name_service"
+        record_manifest_line "GETENT_QUERY|group privileged|source=name_service"
         record_file_reference /etc/group
-        if getent group wheel >/dev/null 2>&1; then
-            getent group wheel | awk -F: '{print "- wheel: " $4}'
-            found=yes
-        else
-            printf '%s\n' '- wheel: not available'
-        fi
-        if getent group sudo >/dev/null 2>&1; then
-            getent group sudo | awk -F: '{print "- sudo: " $4}'
-            found=yes
-        else
-            printf '%s\n' '- sudo: not available'
-        fi
+        for _priv_group in `privileged_group_names`; do
+            if getent group "$_priv_group" >/dev/null 2>&1; then
+                getent group "$_priv_group" | awk -F: '{print "- " $1 ": " $4}'
+                found=yes
+            else
+                printf '%s\n' "- $_priv_group: not present on this host"
+            fi
+        done
     elif file_readable /etc/group; then
         record_file_reference /etc/group
-        awk -F: '$1 == "wheel" || $1 == "sudo" { print "- " $1 ": " $4; found = 1 } END { if (!found) exit 1 }' /etc/group 2>/dev/null || no_entries_found
+        for _priv_group in `privileged_group_names`; do
+            if awk -F: '$1 == "'"$_priv_group"'" { print "- " $1 ": " $4; found = 1 } END { if (!found) exit 1 }' /etc/group 2>/dev/null; then
+                found=yes
+            else
+                printf '%s\n' "- $_priv_group: not present on this host"
+            fi
+        done
     else
         not_available
+        return
     fi
+
+    if [ "$found" = no ]; then
+        no_entries_found
+    fi
+    blank_line
+    printf 'Note: an empty member list does not mean the group grants nothing. Users\n'
+    printf '  whose PRIMARY group is one of the above are recorded by GID in\n'
+    printf '  /etc/passwd rather than in the member field here. Read this with the\n'
+    printf '  account inventory in Sections 13 and 24.\n'
 }
 
 # Duplicate identity review:
@@ -1148,13 +1320,36 @@ print_auth_summary() {
     subsection "Password Quality Summary:"
     case "$OS_NAME" in
         Linux)
+            # Three sources, all reported rather than the first match only.
+            # pwquality.conf holds the values on RHEL-family hosts;
+            # /etc/security/pwquality.conf.d/ overrides it on current releases;
+            # and Debian, Ubuntu, and SUSE configure the same module inline in
+            # /etc/pam.d/common-password, which the RHEL-oriented system-auth
+            # path never reads. Stopping at the first hit reported "not
+            # available" for quality settings on a Debian-family host that had
+            # them configured.
+            _pwq_found=no
             if file_readable /etc/security/pwquality.conf; then
                 record_file_reference /etc/security/pwquality.conf
-                grep -E '^(minlen|minclass|dcredit|ucredit|lcredit|ocredit)' /etc/security/pwquality.conf 2>/dev/null || not_available
-            elif file_readable /etc/pam.d/system-auth; then
-                record_file_reference /etc/pam.d/system-auth
-                grep -E 'pam_cracklib\.so|pam_pwquality\.so' /etc/pam.d/system-auth 2>/dev/null || not_available
-            else
+                if grep -E '^[[:space:]]*(minlen|minclass|maxrepeat|maxsequence|dcredit|ucredit|lcredit|ocredit|difok|dictcheck|enforcing|enforce_for_root)' /etc/security/pwquality.conf 2>/dev/null; then
+                    _pwq_found=yes
+                fi
+            fi
+            if directory_exists /etc/security/pwquality.conf.d; then
+                record_file_reference /etc/security/pwquality.conf.d
+                if grep -E '^[[:space:]]*(minlen|minclass|maxrepeat|maxsequence|dcredit|ucredit|lcredit|ocredit|difok|dictcheck|enforcing|enforce_for_root)' /etc/security/pwquality.conf.d/*.conf 2>/dev/null; then
+                    _pwq_found=yes
+                fi
+            fi
+            for _pwq_pam in /etc/pam.d/system-auth /etc/pam.d/password-auth /etc/pam.d/common-password; do
+                if file_readable "$_pwq_pam"; then
+                    record_file_reference "$_pwq_pam"
+                    if grep -E 'pam_cracklib\.so|pam_pwquality\.so|pam_passwdqc\.so' "$_pwq_pam" 2>/dev/null; then
+                        _pwq_found=yes
+                    fi
+                fi
+            done
+            if [ "$_pwq_found" = no ]; then
                 not_available
             fi
             ;;
@@ -1183,10 +1378,38 @@ print_auth_summary() {
     subsection "Account Lockout Summary:"
     case "$OS_NAME" in
         Linux)
+            # The PAM stack shows WHETHER lockout is enabled; faillock.conf shows
+            # WITH WHAT PARAMETERS. On RHEL 8 and later the module is enabled with
+            # no inline arguments and every value - deny, unlock_time,
+            # fail_interval, even whether root is subject to it - lives in
+            # /etc/security/faillock.conf. Reading only the pam.d lines proves a
+            # lockout control exists while saying nothing about its threshold,
+            # which is the number the control actually turns on.
+            _lockout_found=no
             if directory_exists /etc/pam.d; then
                 record_file_reference /etc/pam.d
-                grep -E 'pam_tally2\.so|pam_faillock\.so' /etc/pam.d/* 2>/dev/null || not_available
+                printf 'PAM lockout modules in use:\n'
+                if grep -E 'pam_tally2\.so|pam_faillock\.so' /etc/pam.d/* 2>/dev/null; then
+                    _lockout_found=yes
+                else
+                    printf '  none found\n'
+                fi
+            fi
+            blank_line
+            printf 'Lockout parameters from /etc/security/faillock.conf:\n'
+            if file_readable /etc/security/faillock.conf; then
+                record_file_reference /etc/security/faillock.conf
+                if grep -E '^[[:space:]]*(deny|unlock_time|fail_interval|even_deny_root|root_unlock_time|audit|silent|no_log_info|admin_group|dir)' /etc/security/faillock.conf 2>/dev/null; then
+                    _lockout_found=yes
+                else
+                    printf '  file present but no parameters are set; the pam_faillock\n'
+                    printf '  built-in defaults apply (deny=3, unlock_time=600)\n'
+                    _lockout_found=yes
+                fi
             else
+                printf '  not available\n'
+            fi
+            if [ "$_lockout_found" = no ]; then
                 not_available
             fi
             ;;
@@ -1223,10 +1446,18 @@ print_auth_full_content() {
             print_file_with_header /etc/login.defs
             subsection "Full File Content: /etc/security/pwquality.conf"
             print_file_with_header /etc/security/pwquality.conf
+            subsection "Full File Content: /etc/security/faillock.conf"
+            print_file_with_header /etc/security/faillock.conf
             subsection "Full File Content: /etc/pam.d/system-auth"
             print_file_with_header /etc/pam.d/system-auth
             subsection "Full File Content: /etc/pam.d/password-auth"
             print_file_with_header /etc/pam.d/password-auth
+            # Debian, Ubuntu, and SUSE keep the password and authentication
+            # stacks here rather than in the RHEL-style system-auth files.
+            subsection "Full File Content: /etc/pam.d/common-password"
+            print_file_with_header /etc/pam.d/common-password
+            subsection "Full File Content: /etc/pam.d/common-auth"
+            print_file_with_header /etc/pam.d/common-auth
             ;;
         AIX)
             subsection "Full File Content: /etc/security/user"
@@ -1403,22 +1634,124 @@ print_sudo_full_content() {
 # SSH settings are reviewed because SSH is commonly the primary administrative
 # access path. The script reads sshd configuration and does not restart or
 # reload the SSH daemon.
+#
+# /etc/ssh/sshd_config.d/ must be read alongside the main file, and on a current
+# Linux distribution it is the more authoritative of the two.
+#
+# RHEL 9, Ubuntu 22.04 and later, and current SUSE all ship an sshd_config whose
+# FIRST directive is "Include /etc/ssh/sshd_config.d/*.conf". sshd applies the
+# first occurrence of a keyword and ignores every later one, so a setting in an
+# included snippet wins outright over the same setting further down the main
+# file - and the distributions use exactly that mechanism to set PermitRootLogin
+# and PasswordAuthentication.
+#
+# Reading only the main file therefore does not merely risk missing a setting; it
+# can report a value the running daemon is not enforcing, with the report showing
+# "PermitRootLogin no" on a host where a drop-in has re-enabled it. Presenting
+# the wrong value confidently is worse than presenting none, so the include
+# directory is collected and printed, and the precedence rule is stated in the
+# report where the reviewer will see it.
+SSH_CONFIG_INCLUDE_DIRECTORY=/etc/ssh/sshd_config.d
+
 print_ssh_summary() {
     subsection "Summary: Relevant SSH Settings"
+
+    _ssh_setting_pattern='^[[:space:]]*(PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|PermitEmptyPasswords|X11Forwarding|Protocol|AllowUsers|AllowGroups|DenyUsers|DenyGroups|LoginGraceTime|MaxAuthTries)[[:space:]]+'
+
+    printf 'Settings from /etc/ssh/sshd_config:\n'
     if file_readable /etc/ssh/sshd_config; then
         record_file_reference /etc/ssh/sshd_config
-        grep -E '^[[:space:]]*(PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|PermitEmptyPasswords|X11Forwarding|Protocol|AllowUsers|AllowGroups|DenyUsers|DenyGroups|LoginGraceTime|MaxAuthTries)[[:space:]]+' /etc/ssh/sshd_config 2>/dev/null || not_available
+        grep -E "$_ssh_setting_pattern" /etc/ssh/sshd_config 2>/dev/null || not_available
     else
         not_available
+    fi
+    blank_line
+
+    subsection "Settings from $SSH_CONFIG_INCLUDE_DIRECTORY (these take precedence):"
+    if directory_exists "$SSH_CONFIG_INCLUDE_DIRECTORY"; then
+        record_file_reference "$SSH_CONFIG_INCLUDE_DIRECTORY"
+        _ssh_include_found=no
+        for _ssh_snippet in "$SSH_CONFIG_INCLUDE_DIRECTORY"/*; do
+            if [ -f "$_ssh_snippet" ]; then
+                _ssh_include_found=yes
+                printf 'From %s:\n' "$_ssh_snippet"
+                grep -E "$_ssh_setting_pattern" "$_ssh_snippet" 2>/dev/null || printf '  (no listed settings in this file)\n'
+            fi
+        done
+        if [ "$_ssh_include_found" = no ]; then
+            no_entries_found
+        fi
+    else
+        not_available
+    fi
+    blank_line
+
+    printf 'Precedence note: sshd applies the FIRST occurrence of a keyword and\n'
+    printf '  ignores later ones. Where sshd_config begins with an Include of the\n'
+    printf '  directory above - the default on RHEL 9, current Ubuntu, and current\n'
+    printf '  SUSE - a value set in an included file OVERRIDES the same keyword in\n'
+    printf '  the main file. Read the included settings above as authoritative and\n'
+    printf '  the main-file settings as the fallback.\n'
+    blank_line
+
+    subsection "Include Directives in Effect:"
+    if file_readable /etc/ssh/sshd_config; then
+        grep -nE '^[[:space:]]*Include[[:space:]]+' /etc/ssh/sshd_config 2>/dev/null || printf 'no Include directives found\n'
+    else
+        not_available
+    fi
+    blank_line
+
+    # The daemon's own resolved view, where it is available. This is the only
+    # output in this section that reflects what sshd will actually enforce after
+    # every include, Match block, and compiled-in default is resolved, so it
+    # settles any disagreement between the files above.
+    #
+    # FOR THE SYSTEM ADMINISTRATOR REVIEWING THIS SCRIPT: "sshd -T" is extended
+    # test mode. It parses the configuration, prints the effective settings, and
+    # exits. It does NOT start, stop, restart, reload, or reconfigure the SSH
+    # daemon, does not bind a port, and does not affect any existing session.
+    # The running sshd is untouched. Output is filtered to the access-control
+    # keywords this section is about, and stdin is closed so it cannot prompt.
+    subsection "Effective Configuration as Resolved by sshd (-T):"
+    if command_exists sshd; then
+        if sshd -T </dev/null 2>/dev/null | grep -iE '^(permitrootlogin|passwordauthentication|pubkeyauthentication|permitemptypasswords|x11forwarding|allowusers|allowgroups|denyusers|denygroups|logingracetime|maxauthtries)[[:space:]]'; then
+            record_manifest_line "COMMAND_OUTPUT|sshd -T|source=effective_sshd_configuration"
+        else
+            printf 'not available (sshd -T could not resolve the configuration on this\n'
+            printf '  host; the file evidence above stands on its own)\n'
+        fi
+    else
+        printf 'not available (sshd binary not found in the restricted PATH)\n'
     fi
 }
 
 # SSH source-file capture:
-# The SSH daemon configuration is printed and copied when readable. Collection
-# is read-only and does not alter access settings.
+# The SSH daemon configuration is printed and copied when readable, together with
+# every file in the include directory, which on current Linux distributions holds
+# the settings that actually take effect. Collection is read-only and does not
+# alter access settings.
 print_sshd_full_content() {
     subsection "Full File Content: /etc/ssh/sshd_config"
     print_file_with_header /etc/ssh/sshd_config
+
+    subsection "Full File Content: $SSH_CONFIG_INCLUDE_DIRECTORY"
+    if directory_exists "$SSH_CONFIG_INCLUDE_DIRECTORY"; then
+        _ssh_full_found=no
+        for _ssh_snippet in "$SSH_CONFIG_INCLUDE_DIRECTORY"/*; do
+            if [ -f "$_ssh_snippet" ]; then
+                _ssh_full_found=yes
+                print_file_with_header "$_ssh_snippet"
+            fi
+        done
+        if [ "$_ssh_full_found" = no ]; then
+            no_entries_found
+            blank_line
+        fi
+    else
+        not_available
+        blank_line
+    fi
 }
 
 # su activity log review:
@@ -1450,7 +1783,56 @@ print_sulog_content() {
 # Package inventory:
 # Native package-manager commands are used only in query/list mode. The script
 # does not install, remove, upgrade, downgrade, or reconfigure software.
+#
+# The NATIVE packaging system for the detected platform is queried first, before
+# falling back to whatever else is installed. Probing for rpm first is wrong on
+# any Unix that is not Linux, and wrong in a way that produces a confident,
+# complete-looking answer about the wrong population:
+#
+#   AIX      ships rpm by default for the AIX Toolbox for Open Source Software.
+#            "rpm -qa" there lists the Toolbox freeware and NOT the installp
+#            filesets that make up the operating system - the actual software
+#            inventory an ITGC review is asking about. lslpp is the native tool.
+#   HP-UX    can carry rpm from the Internet Express bundle; swlist is native.
+#   Solaris  can carry rpm from OpenCSW or the companion DVD; pkginfo is native.
+#
+# Getting this wrong does not fail loudly. It reports the wrong inventory as if
+# it were the right one, which is worse than reporting nothing.
 print_package_inventory() {
+    _pkg_done=no
+
+    case "$OS_NAME" in
+        AIX)
+            if command_exists lslpp; then
+                printf 'Command: lslpp -L (native AIX installp/RPM inventory)\n'
+                lslpp -L 2>/dev/null || not_available
+                _pkg_done=yes
+            fi
+            ;;
+        HP-UX)
+            if command_exists swlist; then
+                printf 'Command: swlist (native HP-UX SD-UX inventory)\n'
+                swlist 2>/dev/null || not_available
+                _pkg_done=yes
+            fi
+            ;;
+        SunOS)
+            if command_exists pkg; then
+                printf 'Command: pkg list (native IPS inventory)\n'
+                pkg list </dev/null 2>/dev/null || not_available
+                _pkg_done=yes
+            elif command_exists pkginfo; then
+                printf 'Command: pkginfo (native SVR4 package inventory)\n'
+                pkginfo 2>/dev/null || not_available
+                _pkg_done=yes
+            fi
+            ;;
+    esac
+
+    if [ "$_pkg_done" = "yes" ]; then
+        return
+    fi
+
     if command_exists rpm; then
         printf 'Command: rpm -qa\n'
         rpm -qa 2>/dev/null || not_available
@@ -1784,8 +2166,12 @@ print_setuid_setgid_files() {
     printf '  copied into this evidence package.\n'
     blank_line
 
+    # -perm -4000 matches "has at least the SetUID bit set". find interprets a
+    # leading digit as octal, so -4000 and -04000 are the same number written two
+    # ways; the pair that used to be here read as two distinct tests but was one
+    # test performed twice.
     subsection "SetUID Files:"
-    _suid_list=`find "$@" -xdev -type f \( -perm -4000 -o -perm -04000 \) -print 2>/dev/null | sort -u`
+    _suid_list=`find "$@" -xdev -type f -perm -4000 -print 2>/dev/null | sort -u`
     if [ -n "$_suid_list" ]; then
         printf '%s\n' "$_suid_list"
     else
@@ -1794,7 +2180,7 @@ print_setuid_setgid_files() {
     blank_line
 
     subsection "SetGID Files:"
-    _sgid_list=`find "$@" -xdev -type f \( -perm -2000 -o -perm -02000 \) -print 2>/dev/null | sort -u`
+    _sgid_list=`find "$@" -xdev -type f -perm -2000 -print 2>/dev/null | sort -u`
     if [ -n "$_sgid_list" ]; then
         printf '%s\n' "$_sgid_list"
     else
@@ -1850,7 +2236,13 @@ print_cron_content() {
         while IFS=: read -r user _password _uid _gid _gecos _home _shell; do
             printf 'Cron jobs for user: %s\n' "$user"
             if command_exists crontab; then
-                if crontab -u "$user" -l 2>/dev/null; then
+                # stdin from /dev/null: this loop is fed by "< /etc/passwd", and
+                # crontab reads stdin when it is not given a subcommand it
+                # recognises. On a platform where "crontab -u" is not supported
+                # (AIX, HP-UX, Solaris all use "crontab -l user" instead) the
+                # command would otherwise read the account list as if it were a
+                # new crontab being installed, consuming the loop's input.
+                if crontab -u "$user" -l </dev/null 2>/dev/null; then
                     :
                 elif print_user_cron_from_spool "$user"; then
                     :
@@ -1890,7 +2282,16 @@ print_service_accounts() {
     if file_readable /etc/passwd; then
         record_file_reference /etc/passwd
         printf 'Service account UID threshold: %s\n' "$uid_cutoff"
-        awk -F: -v cutoff="$uid_cutoff" '($3 < cutoff) { print $1 ":" $3 ":" $4 ":" $6 ":" $7; found = 1 } END { if (!found) exit 1 }' /etc/passwd 2>/dev/null || no_entries_found
+        # The threshold is substituted into the awk program text rather than
+        # passed with -v. Solaris /usr/bin/awk is the original pre-POSIX awk and
+        # does not support -v: the command fails outright, the || fallback fires,
+        # and the section prints "no entries found" on a host that is full of
+        # service accounts. A silent, clean-looking answer for a population that
+        # was never examined is the worst failure mode this collection has, so
+        # the portable form is used. The value is produced by
+        # service_uid_cutoff() from a fixed internal set (100/500/1000) and never
+        # comes from the environment, so there is nothing here to inject.
+        awk -F: '($3 < '"$uid_cutoff"') { print $1 ":" $3 ":" $4 ":" $6 ":" $7; found = 1 } END { if (!found) exit 1 }' /etc/passwd 2>/dev/null || no_entries_found
     else
         not_available
     fi
@@ -1900,20 +2301,64 @@ print_service_accounts() {
 # Tools such as passwd, chage, or lsuser are used only with status/list
 # options. The script does not reset passwords, lock accounts, unlock accounts,
 # change expiration dates, or modify login shells.
+#
+# The status flag is selected per platform rather than tried in sequence, and
+# that is a safety requirement rather than a tidiness one:
+#
+#   passwd -S user   Linux (shadow-utils) - print status. Safe.
+#   passwd -s user   Solaris and HP-UX    - show status. Safe.
+#   passwd -s user   AIX                  - CHANGE THE LOGIN SHELL. Not safe.
+#
+# AIX rejects -S, so a blind "try -S, fall back to -s" sequence lands on AIX's
+# shell-changing form, running as root, once per account. That is an attempted
+# modification of the client's account database from a script whose entire
+# premise is that it changes nothing. The flag is therefore chosen by platform
+# and AIX is served by lsuser, which is its native read-only query tool.
+#
+# Every per-account command in this file also redirects stdin from /dev/null.
+# These loops are fed by "< /etc/passwd", so any command inside that reads stdin
+# consumes the account list as its own input: the loop then skips accounts, and
+# an interactive tool receives passwd lines as its answers to prompts.
 print_account_status_summary() {
     subsection "Account Status Summary:"
     if file_readable /etc/passwd; then
         record_file_reference /etc/passwd
         found=no
-        if command_exists passwd; then
-            while IFS=: read -r user _rest; do
-                if passwd -S "$user" 2>/dev/null || passwd -s "$user" 2>/dev/null; then
-                    found=yes
+
+        case "$OS_NAME" in
+            AIX)
+                # AIX: never invoke passwd here. lsuser is the read-only query.
+                if command_exists lsuser; then
+                    printf 'Command: lsuser -a account_locked expires login shell ALL\n'
+                    if lsuser -a account_locked expires login shell ALL </dev/null 2>/dev/null; then
+                        found=yes
+                    fi
                 fi
-            done < /etc/passwd
-        fi
-        if [ "$found" = no ] && command_exists lsuser; then
-            lsuser -a account_locked expires login shell ALL 2>/dev/null && found=yes
+                ;;
+            SunOS|HP-UX)
+                if command_exists passwd; then
+                    printf 'Command: passwd -s (per account)\n'
+                    while IFS=: read -r user _rest; do
+                        if passwd -s "$user" </dev/null 2>/dev/null; then
+                            found=yes
+                        fi
+                    done < /etc/passwd
+                fi
+                ;;
+            *)
+                if command_exists passwd; then
+                    printf 'Command: passwd -S (per account)\n'
+                    while IFS=: read -r user _rest; do
+                        if passwd -S "$user" </dev/null 2>/dev/null; then
+                            found=yes
+                        fi
+                    done < /etc/passwd
+                fi
+                ;;
+        esac
+
+        if [ "$found" = no ] && command_exists lsuser && [ "$OS_NAME" != "AIX" ]; then
+            lsuser -a account_locked expires login shell ALL </dev/null 2>/dev/null && found=yes
         fi
         if [ "$found" = no ]; then
             not_available
@@ -1931,10 +2376,13 @@ print_password_expiry_details() {
     if file_readable /etc/passwd; then
         record_file_reference /etc/passwd
         found=no
+        # chage is Linux-only and read-only with -l. lsuser is the AIX
+        # equivalent. Both take stdin from /dev/null so they cannot consume the
+        # account list this loop is reading; see print_account_status_summary.
         if command_exists chage; then
             while IFS=: read -r user _rest; do
                 printf 'User: %s\n' "$user"
-                if chage -l "$user" 2>/dev/null; then
+                if chage -l "$user" </dev/null 2>/dev/null; then
                     found=yes
                 else
                     not_available
@@ -1942,7 +2390,7 @@ print_password_expiry_details() {
                 blank_line
             done < /etc/passwd
         elif command_exists lsuser; then
-            lsuser -a maxage minage pwdwarntime expires account_locked ALL 2>/dev/null && found=yes
+            lsuser -a maxage minage pwdwarntime expires account_locked ALL </dev/null 2>/dev/null && found=yes
         fi
         if [ "$found" = no ] && ! command_exists chage && ! command_exists lsuser; then
             not_available
@@ -2152,21 +2600,84 @@ print_network_exposure_summary() {
     print_file_with_header /etc/inet/inetd.conf
     record_file_reference /etc/services
     record_file_reference /etc/xinetd.d
-    grep -E '(telnet|rlogin|rexec|rsh|ftp)' /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/* /etc/services 2>/dev/null || not_available
+
+    # /etc/services is deliberately NOT searched for these names.
+    #
+    # That file is the IANA port-number registry shipped with every Unix ever
+    # made. It contains "telnet 23/tcp" and "ftp 21/tcp" on a host that has had
+    # telnet and ftp removed entirely, so including it guaranteed this check
+    # produced hits on 100% of hosts. The finding was therefore worthless as a
+    # signal and worse than worthless in practice: the client had to write a
+    # rebuttal explaining that a port-number definition is not a running service,
+    # for every engagement, and a reviewer who stopped reading at the match would
+    # record a legacy-service exposure that did not exist.
+    #
+    # What actually evidences the control is inetd/xinetd configuration, which
+    # says whether the service is CONFIGURED TO RUN. Commented-out lines are
+    # excluded for the same reason - a disabled entry is not an exposure.
+    printf 'Legacy service entries enabled in inetd/xinetd configuration:\n'
+    if grep -E '^[[:space:]]*[^#[:space:]].*(telnet|rlogin|rexec|rsh|tftp|ftp)' \
+        /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/* 2>/dev/null; then
+        :
+    else
+        printf '  no enabled legacy service entries found\n'
+    fi
+    blank_line
+    printf 'Note: /etc/services is collected as a reference file but is NOT searched\n'
+    printf '  for these service names. It is the IANA port-number registry present on\n'
+    printf '  every Unix host and defines telnet and ftp port numbers even where those\n'
+    printf '  services are not installed, so matching against it produces a finding on\n'
+    printf '  every host and evidences nothing.\n'
 }
 
 # Patch and update indicators:
 # Package metadata and history are queried to support change and maintenance
 # review. The script performs no patching, installation, removal, or update
 # action.
+#
+# Ordered by native packaging system per platform, for the same reason as the
+# inventory above: "rpm -qa --last" on AIX reports the install history of Toolbox
+# freeware rather than of the operating system's own filesets, which would
+# misrepresent the host's patch position rather than merely omit it.
 print_patch_update_summary() {
+    case "$OS_NAME" in
+        AIX)
+            if command_exists lslpp; then
+                printf 'Command: lslpp -h (native AIX fileset install/update history)\n'
+                lslpp -h 2>/dev/null || not_available
+                return
+            fi
+            ;;
+        HP-UX)
+            if command_exists swlist; then
+                printf 'Command: swlist -l product (native HP-UX product list)\n'
+                swlist -l product 2>/dev/null || not_available
+                return
+            fi
+            ;;
+        SunOS)
+            if command_exists pkg; then
+                printf 'Command: pkg list -u (IPS updates available)\n'
+                pkg list -u </dev/null 2>/dev/null || not_available
+                return
+            elif command_exists showrev; then
+                printf 'Command: showrev -p (native Solaris patch list)\n'
+                showrev -p 2>/dev/null || not_available
+                return
+            fi
+            ;;
+    esac
+
     if command_exists rpm; then
+        printf 'Command: rpm -qa --last\n'
         rpm -qa --last 2>/dev/null || not_available
     elif command_exists dpkg; then
         print_file_with_header /var/log/dpkg.log
     elif command_exists lslpp; then
+        printf 'Command: lslpp -h\n'
         lslpp -h 2>/dev/null || not_available
     elif command_exists swlist; then
+        printf 'Command: swlist -l product\n'
         swlist -l product 2>/dev/null || not_available
     else
         not_available
@@ -2199,6 +2710,41 @@ print_time_sync_summary() {
     print_file_with_header /etc/chrony/chrony.conf
     print_file_with_header /etc/ntp.conf
     print_file_with_header /etc/inet/ntp.conf
+    # systemd-timesyncd is the DEFAULT time client on Ubuntu Server and on
+    # several other current distributions, and it uses neither chrony nor ntpd.
+    # Without this file the section reported "not available" for every source on
+    # a host whose clock was in fact synchronised and disciplined - which reads
+    # as a missing control where there is none.
+    print_file_with_header /etc/systemd/timesyncd.conf
+    if directory_exists /etc/systemd/timesyncd.conf.d; then
+        record_file_reference /etc/systemd/timesyncd.conf.d
+        for _ts_snippet in /etc/systemd/timesyncd.conf.d/*; do
+            if [ -f "$_ts_snippet" ]; then
+                print_file_with_header "$_ts_snippet"
+            fi
+        done
+    fi
+
+    # Whether the clock is actually in sync, as distinct from how it is
+    # configured to sync. Configuration alone does not evidence a working
+    # control, in the same way Section 15's logging configuration does not
+    # evidence that logging is operating.
+    subsection "Synchronisation Status:"
+    if command_exists timedatectl; then
+        printf 'Command: timedatectl\n'
+        timedatectl </dev/null 2>/dev/null || not_available
+    elif command_exists chronyc; then
+        printf 'Command: chronyc tracking\n'
+        chronyc tracking </dev/null 2>/dev/null || not_available
+    elif command_exists ntpq; then
+        printf 'Command: ntpq -p\n'
+        ntpq -p </dev/null 2>/dev/null || not_available
+    elif command_exists lssrc; then
+        printf 'Command: lssrc -s xntpd (AIX)\n'
+        lssrc -s xntpd </dev/null 2>/dev/null || not_available
+    else
+        not_available
+    fi
 }
 
 # Supplemental scheduler evidence:
@@ -2239,6 +2785,45 @@ print_critical_file_integrity() {
     done
 }
 
+# Does this host resolve accounts from a directory service?
+#
+# Used to decide whether an empty name-service enumeration is worth a WARN. On a
+# standalone host, enumeration returning only local accounts is the correct and
+# complete answer, and warning about it would put a warning on the verdict of
+# every standalone collection - which is how a reviewer learns to stop reading
+# warnings. On a directory-joined host the same observation means the account
+# population is genuinely incomplete, and that must be surfaced.
+#
+# Indicators are read-only and cheap: the name service switch configuration, the
+# presence of an SSSD configuration, and PAM module references.
+host_uses_directory_service() {
+    if file_readable /etc/nsswitch.conf; then
+        if grep -Eq '^[[:space:]]*passwd:.*(ldap|sss|winbind|nis|ad)' /etc/nsswitch.conf 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if file_readable /etc/sssd/sssd.conf; then
+        return 0
+    fi
+    if directory_exists /etc/pam.d; then
+        if grep -lq 'pam_ldap\.so\|pam_sss\.so\|pam_winbind\.so\|pam_krb5\.so' /etc/pam.d/* 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if file_readable /etc/pam.conf; then
+        if grep -q 'pam_ldap\|pam_krb5' /etc/pam.conf 2>/dev/null; then
+            return 0
+        fi
+    fi
+    # AIX records the authentication registry per user in /etc/security/user.
+    if file_readable /etc/security/user; then
+        if grep -Eq '^[[:space:]]*SYSTEM[[:space:]]*=.*(LDAP|KRB5|NIS|compat)' /etc/security/user 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 # Interactive user account inventory:
 # Service accounts (Section 13) and UID 0 accounts (Section 1) are reviewed
 # elsewhere. This function lists the remaining accounts that a person could
@@ -2256,11 +2841,75 @@ print_interactive_user_accounts() {
     # Use getent passwd so that accounts sourced from LDAP, SSSD, NIS, or
     # Active Directory are included alongside local /etc/passwd entries.
     # Falling back to /etc/passwd only when getent is absent.
+    #
+    # The cutoff is substituted into the awk program text rather than passed with
+    # -v, because Solaris /usr/bin/awk does not support -v; see the equivalent
+    # comment in print_service_accounts.
     if command_exists getent; then
         record_manifest_line "GETENT_QUERY|passwd ALL|source=name_service"
         record_file_reference /etc/passwd
-        if getent passwd 2>/dev/null | awk -F: -v cutoff="$uid_cutoff" '
-            $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= cutoff) {
+
+        # Enumeration boundary, disclosed the same way Sections 10 and 11
+        # disclose their -xdev boundary.
+        #
+        # "getent passwd" with no argument asks the name service to ENUMERATE
+        # every account. Directory back-ends commonly refuse: SSSD ships with
+        # enum_users disabled by default, and winbind with "winbind enum users =
+        # no", both because enumerating a large directory is expensive. Those
+        # accounts still resolve perfectly when looked up BY NAME, so the host
+        # authenticates directory users normally while enumeration returns
+        # nothing but the local file.
+        #
+        # The practical consequence for this section is that on a host joined to
+        # AD or LDAP, this list may be local accounts only - while reading as the
+        # complete population of people who can log in. That cannot be silently
+        # assumed either way, so the counts are reported and the limitation is
+        # stated. Equal counts do not prove enumeration is disabled (a host with
+        # no directory at all looks identical); they mean the question has to be
+        # settled against the authentication evidence in Section 3.
+        _iua_getent_count=`getent passwd 2>/dev/null | grep -c . 2>/dev/null`
+        [ -n "$_iua_getent_count" ] || _iua_getent_count=0
+        _iua_local_count=0
+        if file_readable /etc/passwd; then
+            _iua_local_count=`grep -c . /etc/passwd 2>/dev/null`
+            [ -n "$_iua_local_count" ] || _iua_local_count=0
+        fi
+
+        printf 'Source: getent passwd (name service: local files plus any directory)\n'
+        printf 'Accounts returned by name service enumeration: %s\n' "$_iua_getent_count"
+        printf 'Accounts present in local /etc/passwd: %s\n' "$_iua_local_count"
+        if [ "$_iua_getent_count" -le "$_iua_local_count" ]; then
+            # Whether this is a real evidence gap depends on whether the host
+            # uses a directory at all. On a standalone host it is the complete
+            # and correct answer and must not raise a warning, or every
+            # standalone collection would carry one and reviewers would learn to
+            # ignore the warnings that matter.
+            if host_uses_directory_service; then
+                printf 'Enumeration boundary: THIS HOST IS CONFIGURED TO USE A DIRECTORY\n'
+                printf '  SERVICE (see Section 3), but name service enumeration returned no\n'
+                printf '  accounts beyond the local file. Directory accounts are therefore\n'
+                printf '  almost certainly NOT represented below: SSSD and winbind disable\n'
+                printf '  enumeration by default while still resolving accounts by name, so\n'
+                printf '  those users can log in to this host without appearing here.\n'
+                printf '  THIS LIST IS INCOMPLETE. Obtain the directory-sourced population\n'
+                printf '  from the directory itself.\n'
+                record_manifest_line "ENUMERATION_BOUNDARY|getent passwd|returned=$_iua_getent_count|local=$_iua_local_count|directory_configured=yes|directory_accounts_likely_absent=yes"
+                log_event WARN evidence "this host is configured for directory authentication but name service enumeration returned only local accounts ($_iua_getent_count vs $_iua_local_count); Section 24 does not contain directory accounts and the interactive-user population is incomplete"
+            else
+                printf 'Enumeration boundary: local accounts only, and no directory service\n'
+                printf '  is configured on this host (see Section 3), so this is the\n'
+                printf '  complete population rather than a truncated one.\n'
+                record_manifest_line "ENUMERATION_BOUNDARY|getent passwd|returned=$_iua_getent_count|local=$_iua_local_count|directory_configured=no|directory_accounts_likely_absent=no"
+            fi
+        else
+            printf 'Enumeration boundary: the name service returned more accounts than\n'
+            printf '  the local file holds, so directory-sourced accounts are included.\n'
+            record_manifest_line "ENUMERATION_BOUNDARY|getent passwd|returned=$_iua_getent_count|local=$_iua_local_count|directory_accounts_likely_absent=no"
+        fi
+        blank_line
+
+        if getent passwd 2>/dev/null | awk -F: '
+            $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= '"$uid_cutoff"') {
                 print $1 ":" $3 ":" $4 ":" $6 ":" $7
                 found = 1
             }
@@ -2271,8 +2920,13 @@ print_interactive_user_accounts() {
             no_entries_found
         fi
     elif file_readable /etc/passwd; then
-        if awk -F: -v cutoff="$uid_cutoff" '
-            $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= cutoff) {
+        printf 'Source: /etc/passwd (getent not available on this host)\n'
+        printf 'Enumeration boundary: local accounts only. Accounts sourced from a\n'
+        printf '  directory service are not represented in this list.\n'
+        record_manifest_line "ENUMERATION_BOUNDARY|/etc/passwd|getent=absent|directory_accounts_likely_absent=yes"
+        blank_line
+        if awk -F: '
+            $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= '"$uid_cutoff"') {
                 print $1 ":" $3 ":" $4 ":" $6 ":" $7
                 found = 1
             }
@@ -2844,7 +3498,7 @@ $entered_path"
 section1_source_files()  { printf '/etc/passwd\n/etc/group\n'; }
 section2_source_files()  {
     case "$OS_NAME" in
-        Linux)   printf '/etc/login.defs\n/etc/security/pwquality.conf\n/etc/pam.d/system-auth\n/etc/pam.d/password-auth\n' ;;
+        Linux)   printf '/etc/login.defs\n/etc/security/pwquality.conf\n/etc/security/faillock.conf\n/etc/pam.d/system-auth\n/etc/pam.d/password-auth\n/etc/pam.d/common-password\n/etc/pam.d/common-auth\n' ;;
         AIX)     printf '/etc/security/user\n' ;;
         SunOS|HP-UX) printf '/etc/default/passwd\n/etc/default/login\n' ;;
     esac
@@ -2860,7 +3514,7 @@ section3_source_files()  {
 section4_source_files()  { printf '/etc/sudoers\n/etc/sudoers.d\n'; }
 section5_source_files()  { printf '/etc/group\n'; }
 section6_source_files()  { sulog_candidates; }
-section7_source_files()  { printf '/etc/ssh/sshd_config\n'; }
+section7_source_files()  { printf '/etc/ssh/sshd_config\n%s\n' "$SSH_CONFIG_INCLUDE_DIRECTORY"; }
 section12_source_files() { printf '/etc/crontab\n/etc/cron.d\n/var/spool/cron/crontabs\n'; }
 section13_source_files() { printf '/etc/passwd\n'; }
 section14_source_files() { printf '/etc/passwd\n/etc/hosts.equiv\n/etc/issue\n/etc/issue.net\n/etc/motd\n/etc/ssh/banner\n/etc/profile\n'; }
@@ -2886,7 +3540,7 @@ section18_source_files() {
     esac
 }
 section19_source_files() { printf '/etc/logrotate.conf\n/etc/newsyslog.conf\n'; }
-section20_source_files() { printf '/etc/chrony.conf\n/etc/chrony/chrony.conf\n/etc/ntp.conf\n/etc/inet/ntp.conf\n'; }
+section20_source_files() { printf '/etc/chrony.conf\n/etc/chrony/chrony.conf\n/etc/ntp.conf\n/etc/inet/ntp.conf\n/etc/systemd/timesyncd.conf\n'; }
 section21_source_files() { printf '/etc/anacrontab\n/var/log/cron\n/var/log/cron.log\n'; }
 section22_source_files() {
     case "$OS_NAME" in
@@ -2965,6 +3619,87 @@ prompt_for_app_directories
 
 prepare_collection_directory
 
+# Interruption handling.
+#
+# The filesystem-walking sections can run for minutes, and an operator watching a
+# production host will sometimes stop the script - Ctrl-C, a closed session, a
+# terminated job. Until now that left behind a collection directory containing a
+# report cut off mid-section and a log with no verdict, which is indistinguishable
+# from a package that was damaged in transfer. The receipt verifier would reject
+# it correctly, but only after it had been sent, and nobody on either side would
+# know why.
+#
+# The trap marks the package as abandoned, in the log where the verdict is read
+# from and on the operator's terminal, so an interrupted run is recognisable as
+# an interrupted run. It writes a verdict and exits; it does not attempt to
+# finish the collection or build an archive, because the evidence is genuinely
+# incomplete and packaging it would disguise that.
+#
+# EXIT is deliberately not trapped: a normal completion must not be relabelled.
+handle_interruption() {
+    _interrupt_signal=$1
+    COLLECTION_STATUS="interrupted by $_interrupt_signal before completion"
+
+    log_event ERROR completion "collection was interrupted by $_interrupt_signal before it finished; this package is incomplete and must not be relied upon"
+
+    # Mark the report itself. At this point stdout is the report file, so this
+    # lands at the point of truncation where a reader will actually meet it. The
+    # report deliberately still lacks its "Execution Summary" heading, which is
+    # what the receipt verifier keys on to reject a partial delivery - this
+    # notice explains the truncation to a human without concealing it from the
+    # tool.
+    printf '\n'
+    printf '==================================================\n'
+    printf 'COLLECTION INTERRUPTED - THIS REPORT IS INCOMPLETE\n'
+    printf '==================================================\n'
+    printf 'The collection was stopped by %s before it finished.\n' "$_interrupt_signal"
+    printf 'Sections below this point were never collected. Do not rely on\n'
+    printf 'this report, and do not treat an absent section as evidence that\n'
+    printf 'the corresponding control is absent.\n'
+    printf 'Nothing on the host was changed; the script is read-only.\n'
+
+    if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+        recount_log_levels
+        {
+            printf '\n'
+            printf '================================================================\n'
+            printf 'SUMMARY (INTERRUPTED RUN)\n'
+            printf '================================================================\n'
+            printf '\n'
+            printf 'RESULT: FAILED\n'
+            printf 'ERRORS: %s\n' "$LOG_ERROR_COUNT"
+            printf 'WARNINGS: %s\n' "$LOG_WARN_COUNT"
+            printf 'INTERRUPTED_BY: %s\n' "$_interrupt_signal"
+            printf 'HOST: %s\n' "$HOSTNAME_VALUE"
+            printf 'STARTED: %s\n' "$TIMESTAMP"
+            printf 'FINISHED: %s\n' "`log_timestamp`"
+            printf 'CONFIGURATION_CHANGES_MADE: none\n'
+            printf '\n'
+            printf 'What this means\n'
+            printf '  The collection was stopped before it completed. The evidence in\n'
+            printf '  this directory is partial: sections after the interruption never\n'
+            printf '  ran, and no archive was created. Do not send this package as\n'
+            printf '  evidence. Re-run the collection when convenient.\n'
+            printf '\n'
+            printf '  Nothing on this host was changed. The script is read-only, and\n'
+            printf '  being interrupted cannot leave the system in a modified state.\n'
+        } >> "$LOG_FILE" 2>/dev/null
+    fi
+
+    {
+        printf '\n'
+        printf '================================================================\n'
+        printf 'COLLECTION INTERRUPTED (%s)\n' "$_interrupt_signal"
+        printf '  The evidence in %s is incomplete.\n' "$COLLECTION_DIRECTORY"
+        printf '  No archive was created. Do not send this package as evidence.\n'
+        printf '  Nothing on this host was changed; the script is read-only.\n'
+        printf '  Full log: %s\n' "${LOG_FILE:-not created}"
+        printf '================================================================\n'
+    } >&3 2>/dev/null || :
+
+    exit 130
+}
+
 # Startup context. Recorded first so a reader can tell what was run, where, and
 # under what privileges without needing the report.
 log_event INFO startup "collection started on $HOSTNAME_VALUE (platform $OS_NAME)"
@@ -2990,6 +3725,15 @@ fi
 # report to the report file first, then replays the completed report to the
 # operator at the end of the run.
 exec 3>&1
+
+# Installed only now that file descriptor 3 exists, since the handler reports the
+# interruption on the operator's terminal through it. Everything before this
+# point is prompt handling and directory creation, which completes in
+# milliseconds; the minutes-long work all happens after here.
+trap 'handle_interruption SIGINT' INT
+trap 'handle_interruption SIGTERM' TERM
+trap 'handle_interruption SIGHUP' HUP
+
 if [ "$COLLECTION_STATUS" = "ready" ]; then
     exec > "$REPORT_FILE"
 fi
@@ -3007,6 +3751,46 @@ printf 'Manifest File: %s\n' "$MANIFEST_FILE"
 printf 'Sensitive Skip File: %s\n' "$SENSITIVE_SKIPPED_FILE"
 printf 'Client Elevated Run Instruction: sudo sh %s\n' "$SCRIPT_NAME"
 printf 'Client Non-Root Test Instruction: sh %s --dry-run\n' "$SCRIPT_NAME"
+
+# Identify the exact script that produced this package.
+#
+# The client is given a SHA-256 with the instructions and asked to confirm it
+# before running anything. That check happens on their host and leaves no trace,
+# so nothing in the delivered evidence has so far tied the package back to a
+# specific version of the collector. Recording the checksum here closes the loop:
+# the value in the report can be compared against the value issued to the client
+# and against the file in version control, which is what lets a reviewer of the
+# workpapers establish which code produced which evidence.
+#
+# $0 is the path the script was invoked by, so this measures the file that is
+# actually running rather than a file of the same name elsewhere.
+printf 'Collector Script Path: %s\n' "$0"
+if [ -f "$0" ]; then
+    # The algorithm is named from the tool that was actually used rather than
+    # assumed to be SHA-256. print_file_checksum falls back to cksum where no
+    # SHA-256 tool exists, and cksum is a CRC: reporting a CRC under a SHA-256
+    # heading would be a false statement in an audit artifact, and a reviewer
+    # comparing it against the issued SHA-256 would find a mismatch with no
+    # explanation for it.
+    _self_checksum=`print_file_checksum "$0" | awk 'NR == 1 { print $1 }'`
+    if [ -n "$_self_checksum" ]; then
+        printf 'Collector Script Checksum: %s (%s)\n' "$_self_checksum" "$CHECKSUM_ALGORITHM"
+        record_manifest_line "COLLECTOR_SELF|$0|algorithm=$CHECKSUM_ALGORITHM|checksum=$_self_checksum"
+        log_event INFO startup "collector script $0 measured as $CHECKSUM_ALGORITHM $_self_checksum"
+        if [ "$CHECKSUM_ALGORITHM" != "sha256" ]; then
+            printf '  NOTE: no SHA-256 tool is available on this host, so the value\n'
+            printf '  above is a %s and will NOT match the SHA-256 issued with the\n' "$CHECKSUM_ALGORITHM"
+            printf '  run instructions. Compare it against a %s of the same file.\n' "$CHECKSUM_ALGORITHM"
+            log_event WARN startup "no SHA-256 tool on this host; the collector self-checksum is a $CHECKSUM_ALGORITHM and cannot be compared against the issued SHA-256"
+        fi
+    else
+        printf 'Collector Script Checksum: not available (no checksum tool on this host)\n'
+        record_manifest_line "COLLECTOR_SELF|$0|checksum=unavailable"
+    fi
+else
+    printf 'Collector Script Checksum: not available (script path not resolvable)\n'
+    record_manifest_line "COLLECTOR_SELF|$0|checksum=unavailable"
+fi
 
 if [ "$TEST_MODE" = "yes" ] && [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
     printf 'Test Mode Notice: running without sudo; privileged-only files and commands may show not available.\n'

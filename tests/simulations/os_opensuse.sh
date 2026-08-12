@@ -15,6 +15,14 @@ UNAME_M=x86_64
 NODENAME=suse-erp-db02.ad.globexmfg.local
 APPDIR=/opt/globex-erp
 BLOCKERS=""
+# This fixture is an AD-joined host (passwd: compat winbind), and winbind ships
+# with enumeration disabled by default, so "getent passwd" returns only local
+# accounts. That is precisely the condition Section 24 now discloses: the
+# interactive-user population it lists is incomplete, because domain users can
+# log in without ever appearing in an enumeration. A WARNINGS verdict is the
+# correct outcome for a host configured this way, and verify_os below asserts
+# that the warning raised is that specific one rather than any warning at all.
+EXPECTED_RESULT=COMPLETED_WITH_WARNINGS
 
 write_os_shims() {
     cat > "$RSHIMS/rpm" <<'EOF'
@@ -488,6 +496,21 @@ EOF
 verify_os() {
     assert_report_matches 'Kernel Release: 5\.14\.21-150500' 'openSUSE kernel release reported'
     assert_report_matches 'passwd: compat winbind' 'winbind detected as the identity source'
+
+    # The enumeration boundary must be stated, and stated as a limitation rather
+    # than as a complete population. Relaxing EXPECTED_RESULT to WARNINGS above
+    # would otherwise let any unrelated warning satisfy this fixture, so the
+    # specific disclosure and the specific log line are both asserted here.
+    assert_report_matches 'THIS HOST IS CONFIGURED TO USE A DIRECTORY' \
+        'Section 24 discloses that directory accounts are missing from the population'
+    assert_report_matches 'THIS LIST IS INCOMPLETE' \
+        'Section 24 states the account list is incomplete rather than implying it is whole'
+    sim_check
+    if grep -q 'configured for directory authentication but name service enumeration returned only local accounts' "$LOGFILE" 2>/dev/null; then
+        sim_pass "the enumeration gap is logged as a WARN for the auditor"
+    else
+        sim_fail "the enumeration gap was not logged as a WARN"
+    fi
     assert_report_matches 'SSSD configuration present: no' 'correctly reports no SSSD on this host'
     assert_report_matches 'pam_winbind\.so' 'PAM winbind module reference captured'
     assert_report_matches '%AD__domain_admins ALL=\(ALL\) NOPASSWD: ALL' 'AD break-glass sudo rule captured'

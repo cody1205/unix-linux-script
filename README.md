@@ -141,8 +141,19 @@ verdict on their terminal at the end of the run.
 
 Credential-bearing files (`/etc/shadow`, AIX `/etc/security/passwd`, SSH keys,
 keytabs, LDAP bind secrets) are never printed or copied. The script records
-their metadata and a safe summary instead, and logs them as
-`SENSITIVE_METADATA_ONLY`.
+their metadata and a safe summary instead, logs them as
+`SENSITIVE_METADATA_ONLY`, and lists them in `SENSITIVE_FILES_SKIPPED.txt`.
+
+One credential store cannot be handled by path, because the file itself is
+required evidence: **HP-UX without `pwconv`, and some older Solaris and
+appliance builds, keep the password hash inline in field 2 of `/etc/passwd`.**
+On such a host the script detects the hashes by content and delivers a
+**redacted** copy — field 2 replaced with `<REDACTED-BY-COLLECTOR>`, every other
+field reproduced exactly — so the account inventory survives intact and the
+credentials do not leave the host. The substitution is stated in the file, in
+the manifest as `COPIED_REDACTED`, in the skip list, and as a `WARN` in the
+collection log, so a redacted value can never be mistaken for the host's real
+configuration.
 
 ## Impact on the target host
 
@@ -176,6 +187,7 @@ the evidence — but it should be a considered choice rather than a surprise.
 
 ```sh
 sh tests/test-sensitive-paths.sh           # no root needed
+sh tests/test-inline-passwd-hashes.sh      # no root needed
 sudo sh tests/test-no-credential-leak.sh   # runs a real collection
 sudo sh tests/test-verify-package.sh       # the receipt verifier
 sudo sh tests/simulations/run-all.sh       # all four simulated platforms
@@ -186,6 +198,15 @@ sudo sh tests/simulations/run-all.sh       # all four simulated platforms
   platform-specific hash stores are checked even on a Linux runner. It also
   asserts that policy files (AIX `/etc/security/user`, HP-UX
   `/etc/default/passwd`) stay collectable, guarding against over-blocking.
+- **`test-inline-passwd-hashes.sh`** covers the credential leak that a path
+  table cannot catch. `/etc/passwd` must stay collectable — the account
+  inventory is core evidence — but HP-UX without `pwconv` stores the crypt hash
+  directly in field 2 of that file, so on such a host the collector would carry
+  credentials out inside a file it is required to collect. The guard is a
+  *content* check, and this asserts it against fixtures for each platform's
+  conventions: DES, MD5, SHA-512, and yescrypt hashes must be detected, while
+  `x`, `*`, `!`, `!!`, AIX `##user`, Solaris `NP`/`*LK*`, and NIS netgroup
+  directives must not be mistaken for them.
 - **`test-no-credential-leak.sh`** plants sentinel credentials, runs a full
   collection as root, then fails if any sentinel or credential-shaped content
   reaches `raw_files/`, if a sensitive file read is not recorded, or if the
