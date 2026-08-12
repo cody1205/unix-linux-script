@@ -368,8 +368,28 @@ maxrepeat = 3
 enforcing = 1
 EOF
 
+    # A drop-in that CONTRADICTS the hardened main file below.
+    #
+    # This is the RHEL 9 / current-Ubuntu layout: sshd_config opens with an
+    # Include of this directory, and sshd honours the FIRST occurrence of a
+    # keyword, so what is set here WINS over the main file. A vendor or a change
+    # ticket dropping a file in here is how a host that reads as hardened ends up
+    # permitting root login and password authentication.
+    #
+    # The fixture is built this way deliberately: a collector that reads only
+    # sshd_config reports "PermitRootLogin no" on this host, which is not what
+    # the daemon enforces. Reporting the wrong value confidently is worse than
+    # reporting nothing, so verify_os asserts that BOTH values reach the report
+    # and that the precedence is explained.
+    mkdir -p "$R/etc/ssh/sshd_config.d"
+    cat > "$R/etc/ssh/sshd_config.d/50-vendor-remote-support.conf" <<'EOF'
+# Added by vendor remote-support onboarding, CHG0041882
+PermitRootLogin yes
+PasswordAuthentication yes
+EOF
     cat > "$R/etc/ssh/sshd_config" <<'EOF'
 # Acme Financial hardened sshd (CIS RHEL8 baseline)
+Include /etc/ssh/sshd_config.d/*.conf
 Port 22
 Protocol 2
 PermitRootLogin no
@@ -573,6 +593,33 @@ EOF
 
 verify_os() {
     assert_report_matches 'Kernel Release: 4\.18\.0-553' 'RHEL kernel release reported'
+
+    # sshd_config.d precedence. The fixture's drop-in re-enables root login and
+    # password authentication over a main file that forbids both, which is the
+    # scenario that makes reading only sshd_config actively misleading rather
+    # than merely incomplete.
+    assert_report_matches '50-vendor-remote-support\.conf' \
+        'sshd_config.d drop-in file located and read'
+    assert_report_matches 'PermitRootLogin yes' \
+        'the drop-in value that actually takes effect is reported'
+    assert_report_matches 'PermitRootLogin no' \
+        'the overridden main-file value is still reported for comparison'
+    assert_report_matches 'a value set in an included file OVERRIDES' \
+        'precedence between the two is explained rather than left to the reader'
+    assert_report_matches 'Include /etc/ssh/sshd_config\.d' \
+        'the Include directive that creates the precedence is shown'
+    sim_check
+    if grep -q 'COPIED|/etc/ssh/sshd_config.d/50-vendor-remote-support.conf' "$E/metadata/MANIFEST.txt" 2>/dev/null; then
+        sim_pass "the drop-in is delivered in raw_files/ and recorded in the manifest"
+    else
+        sim_fail "the drop-in was not copied into the evidence package"
+    fi
+
+    # Enumeration boundary: this fixture is SSSD-joined, so Section 24's
+    # population is local-only and must say so.
+    assert_report_matches 'THIS HOST IS CONFIGURED TO USE A DIRECTORY' \
+        'Section 24 discloses that SSSD accounts are missing from the population'
+
     assert_report_matches 'passwd: +sss files' 'SSSD detected as the identity source'
     assert_report_matches 'SSSD configuration present: yes' 'sssd.conf detected'
     assert_report_matches 'pam_sss\.so' 'PAM SSSD module reference captured'

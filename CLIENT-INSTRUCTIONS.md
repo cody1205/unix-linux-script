@@ -20,6 +20,11 @@ synchronisation, and file permissions.
 enable, disable, restart, or reconfigure any user, group, service, job,
 permission, package, network setting, or authentication setting.
 
+Where it runs a system command, it uses that command's query or status form
+only — for example `sshd -T`, which prints the SSH daemon's effective
+configuration and exits without starting, stopping, reloading, or otherwise
+touching the running daemon or any active session.
+
 The only files it writes are inside the output directory you choose, plus the
 resulting archive in that same directory. It states this in its own output, and
 the collection log it produces records the same guarantee for your records.

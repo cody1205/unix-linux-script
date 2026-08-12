@@ -33,6 +33,13 @@ APPDIR=/opt/corebank
 # AIX one, so they must be made to appear absent. Names the host lacks are
 # skipped harmlessly.
 BLOCKERS="dpkg chage rpm ss systemctl journalctl pkginfo swlist"
+# This fixture authenticates against a directory (SYSTEM=LDAP in
+# /etc/security/user), and its getent returns local accounts only - the normal
+# state for a directory-joined host, since enumeration is generally disabled.
+# Section 24 now discloses that its interactive-user population is therefore
+# incomplete, which is a warning-level finding. verify_os asserts the specific
+# warning so that relaxing the verdict here cannot mask an unrelated one.
+EXPECTED_RESULT=COMPLETED_WITH_WARNINGS
 
 write_os_shims() {
     cat > "$RSHIMS/lslpp" <<'EOF'
@@ -140,8 +147,27 @@ udp4       0      0  *.123                  *.*
 L
 EOF
 
-    # AIX passwd has no -S; force the collector onto its lsuser fallback.
-    printf '#!/bin/sh\nexit 1\n' > "$RSHIMS/passwd"
+    # passwd tripwire.
+    #
+    # On AIX, "passwd -s USER" does not show status the way it does on Solaris
+    # and HP-UX - it CHANGES THE USER'S LOGIN SHELL. A collector that tries -S
+    # and falls back to -s therefore lands on an account-modifying command, run
+    # as root, once per account, on a client production host. That is a direct
+    # breach of the read-only guarantee this whole script is sold on, and it
+    # would not fail visibly: AIX would reject the malformed input and the run
+    # would look normal.
+    #
+    # This shim records every invocation instead of just failing, so verify_os
+    # can assert that the collector did not invoke passwd AT ALL on this
+    # platform. Asserting the absence of a call is the only way to test for a
+    # dangerous command not being run; checking the report for a missing section
+    # would pass just as well if the command had run and simply failed.
+    cat > "$RSHIMS/passwd" <<'EOF'
+#!/bin/sh
+printf 'passwd %s\n' "$*" >> /tmp/.sim_passwd_invocations
+exit 1
+EOF
+    : > "$R/tmp/.sim_passwd_invocations" 2>/dev/null || :
 
     chmod 0755 "$RSHIMS/lslpp" "$RSHIMS/lssrc" "$RSHIMS/lsuser" \
                "$RSHIMS/getent" "$RSHIMS/netstat" "$RSHIMS/passwd"
@@ -553,6 +579,30 @@ verify_os() {
     assert_report_matches 'contract1       ALL=\(ALL\) NOPASSWD: ALL' 'contractor sudo rule captured'
     assert_report_matches 'account_locked=true|account_locked = true' 'locked account status captured'
     assert_report_matches 'maxage = 13' 'AIX password aging policy captured'
+
+    # The read-only guarantee, asserted as the absence of a dangerous call.
+    # See the passwd tripwire in write_os_shims for why this matters on AIX.
+    sim_check
+    if [ -s "$R/tmp/.sim_passwd_invocations" ]; then
+        sim_fail "the collector invoked passwd on AIX, where 'passwd -s' CHANGES the login shell"
+        sed 's/^/            /' "$R/tmp/.sim_passwd_invocations" >&2
+    else
+        sim_pass "passwd was never invoked on AIX (account status came from lsuser)"
+    fi
+    assert_report_matches 'lsuser -a account_locked' \
+        'AIX account status was read with lsuser, its native read-only query'
+
+    # The enumeration boundary, asserted specifically. This fixture's directory
+    # is detected from the AIX SYSTEM=LDAP stanzas rather than from nsswitch or
+    # SSSD, so this also exercises the AIX branch of host_uses_directory_service.
+    assert_report_matches 'THIS HOST IS CONFIGURED TO USE A DIRECTORY' \
+        'Section 24 discloses that LDAP accounts are missing from the population'
+    sim_check
+    if grep -q 'configured for directory authentication but name service enumeration returned only local accounts' "$LOGFILE" 2>/dev/null; then
+        sim_pass "the enumeration gap is logged as a WARN for the auditor"
+    else
+        sim_fail "the enumeration gap was not logged as a WARN"
+    fi
     assert_report_matches 'Service account UID threshold: 100' 'AIX service-account cutoff applied'
     # On AIX the collector shows lssrc output for the startup section and lists
     # /etc/inittab as a source file rather than printing it inline, so the
