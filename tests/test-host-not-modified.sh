@@ -127,11 +127,19 @@ printf '== comparing ==\n'
 # not lost among them, and so that log growth is visible rather than suppressed.
 diff "$WORK/before.txt" "$WORK/after.txt" > "$WORK/diff.txt" 2>&1 || :
 
-changed_logs=`grep '^[<>]' "$WORK/diff.txt" 2>/dev/null | grep -c -E '\|/var/(log|adm)/' 2>/dev/null`
+# The snapshot format puts the PATH FIRST - "/var/log/syslog|640|0|..." - and
+# diff prefixes each line with "< " or "> ". The exclusion must therefore anchor
+# on the start of the line. An earlier version matched "\|/var/log/", requiring a
+# pipe immediately before the path, which can never occur: the pattern silently
+# matched nothing, so log churn was counted as a genuine host modification. It
+# passed anyway on a quiet development container and only failed on a CI runner
+# where journald, rsyslog, and sysstat are all actively writing - which is the
+# whole reason to run these somewhere other than where they were written.
+changed_logs=`grep -c -E '^[<>] /var/(log|adm)/' "$WORK/diff.txt" 2>/dev/null`
 [ -n "$changed_logs" ] || changed_logs=0
 
 # Anything outside the log directories is a genuine modification.
-grep '^[<>]' "$WORK/diff.txt" 2>/dev/null | grep -v -E '\|/var/(log|adm)/' > "$WORK/real_changes.txt" 2>/dev/null || :
+grep '^[<>]' "$WORK/diff.txt" 2>/dev/null | grep -v -E '^[<>] /var/(log|adm)/' > "$WORK/real_changes.txt" 2>/dev/null || :
 # The leading "< " / "> " markers make the same path appear twice; count paths.
 sed 's/^[<>] //' "$WORK/real_changes.txt" 2>/dev/null | cut -d'|' -f1 | sort -u > "$WORK/changed_paths.txt"
 changed_count=`grep -c . "$WORK/changed_paths.txt" 2>/dev/null`
@@ -151,10 +159,13 @@ fi
 # Disclosure, not a failure: log growth caused by the run.
 if [ "$changed_logs" -gt 0 ]; then
     printf '\ninfo      %s entr(y/ies) under /var/log or /var/adm changed during the run.\n' "$changed_logs"
-    printf '          This is expected and is not caused by the collector writing to\n'
-    printf '          logs: running anything under sudo causes the system to record an\n'
-    printf '          authentication event. Shown here so the effect is disclosed.\n'
-    grep '^[<>]' "$WORK/diff.txt" | grep -E '\|/var/(log|adm)/' | sed 's/^/            /' | head -10
+    printf '          This is NOT the collector writing to logs. Two things cause it:\n'
+    printf '          running anything under sudo makes the system record an\n'
+    printf '          authentication event, and daemons unrelated to this collection\n'
+    printf '          (journald, rsyslog, sysstat) write continuously on their own\n'
+    printf '          schedule. Shown here so the effect is disclosed rather than\n'
+    printf '          quietly filtered.\n'
+    grep -E '^[<>] /var/(log|adm)/' "$WORK/diff.txt" | sed 's/^/            /' | head -8
 fi
 
 # Access times: disclosed, never failed on. See the header for why.
