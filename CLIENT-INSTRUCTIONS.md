@@ -108,15 +108,28 @@ The give-away is an error that names a line which looks perfectly ordinary when
 you open the file. Nothing is wrong with the script; each line simply has an
 invisible carriage return on the end.
 
-Fix it in place and run the corrected copy:
+Repair it, then **verify the repaired copy before running it**:
 
 ```sh
 tr -d '\r' < linux-unix-evidence-gathering-script.sh > collector.sh
-sudo sh collector.sh --output-dir /var/tmp/audit
+sha256sum collector.sh
 ```
 
-If you do this, please mention it when you return the results, and note that the
-checksum above will no longer match the corrected copy.
+The checksum of `collector.sh` **must equal the value supplied with this
+document**. Removing the carriage returns restores the file to exactly the bytes
+that were sent, so a correct repair reproduces the original checksum precisely.
+
+- **Checksums match** — the file is intact and was only damaged by line-ending
+  conversion. Run it:
+
+  ```sh
+  sudo sh collector.sh --output-dir /var/tmp/audit
+  ```
+
+- **Checksums do not match** — something other than line endings changed in
+  transfer. Stop, and request a fresh copy. Do not run it.
+
+Please mention the repair when you return the results, so we can note it.
 
 ---
 
@@ -138,10 +151,25 @@ treat it as confidential.
 
 ### Before sending, a 5-second check
 
-The script writes a verdict for its own run. Confirm it:
+The script prints a verdict for its own run when it finishes. It looks like this,
+and includes the path to its full log:
+
+```
+================================================================
+COLLECTION RESULT: COMPLETED_CLEAN
+  errors: 0   warnings: 0
+  The collection completed and nothing limited the evidence gathered.
+  Full log: /var/tmp/audit/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt
+================================================================
+```
+
+If that has scrolled away, read it back from the log. Substitute the output
+directory you actually chose — the path below is only the example used in this
+document:
 
 ```sh
-grep -E "^(FINAL_)?RESULT:" /var/tmp/audit/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt
+OUTDIR=/var/tmp/audit        # the --output-dir you used
+grep -E "^(FINAL_)?RESULT:" "$OUTDIR/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
 ```
 
 | Result | Meaning |
