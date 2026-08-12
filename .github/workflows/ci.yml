@@ -33,6 +33,22 @@ jobs:
             dash -n "$t"
           done
 
+      # A carriage return anywhere in these files survives into whatever is sent
+      # to a client, where /bin/sh fails on it with errors that name lines which
+      # look perfectly ordinary when opened. It is the most common way a working
+      # script appears broken on arrival, and it is invisible in review, so it is
+      # rejected here rather than left to be discovered on a production host.
+      - name: Reject carriage returns
+        run: |
+          if git ls-files | xargs grep -lIU "$(printf '\r')" 2>/dev/null | grep . ; then
+            echo "" >&2
+            echo "The files above contain carriage returns (CRLF line endings)." >&2
+            echo "They will fail on the client's host. Convert with:" >&2
+            echo "    tr -d '\r' < FILE > FILE.new && mv FILE.new FILE" >&2
+            exit 1
+          fi
+          echo "no carriage returns found"
+
       - name: Flag bashisms
         run: |
           sudo apt-get update -qq

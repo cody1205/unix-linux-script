@@ -17,6 +17,18 @@ BSD. It makes no configuration changes to the host.
 sudo sh linux-unix-evidence-gathering-script.sh
 ```
 
+Run it with `sh` rather than making it executable. The execute bit does not
+survive email, FTP, or SharePoint, and naming the interpreter explicitly avoids
+depending on the shebang being honoured — which matters on AIX and HP-UX, where
+`/bin/sh` is not the shell a Linux user would expect. The file extension is
+irrelevant to `sh`, so if a mail gateway rejects `.sh` you can send it as `.txt`
+and the instruction is unchanged.
+
+**[`CLIENT-INSTRUCTIONS.md`](CLIENT-INSTRUCTIONS.md) is the page to send to the
+client's system administrator** — self-contained, covering what the script does
+and does not do, how to verify it arrived intact, how to run it, how to recover
+from Windows line endings, and what to send back.
+
 | Flag | Purpose |
 | --- | --- |
 | `--output-dir PATH` | Where the collection folder and archive are written. Prompts interactively if omitted. |
