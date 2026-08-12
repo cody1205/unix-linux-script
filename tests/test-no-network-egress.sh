@@ -92,10 +92,59 @@ printf '\n== 2. syscall trace: no network socket is opened ==\n'
 OUT1="$WORK/traced"
 mkdir -p "$OUT1"
 checks=`expr $checks + 1`
+# Both subprocess runs below are bounded by a timeout.
+#
+# An unbounded run here is not acceptable in a gate: this job was observed
+# running for over an hour on a CI host, where the collection's filesystem scans
+# cover a very large /opt and strace multiplies the cost of every syscall in
+# every child process. A gate that can hang indefinitely blocks every other
+# change and eventually gets removed.
+#
+# A timeout is also diagnostically useful rather than merely defensive - see the
+# namespace test below, where exceeding it is itself a finding.
+NET_TEST_TIMEOUT=600
+
+run_bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$NET_TEST_TIMEOUT" "$@"
+    else
+        "$@"
+    fi
+}
+
 if command -v strace >/dev/null 2>&1; then
-    strace -f -qq -e trace=socket,connect,sendto,sendmsg \
+    # --seccomp-bpf is the difference between a usable gate and an unusable one.
+    #
+    # Plain "strace -f" ptrace-stops EVERY syscall in every child in order to
+    # filter them, and this collection makes an enormous number of them while
+    # walking the filesystem. Measured on a small container: 2 seconds without
+    # strace, 94 seconds with it - a 47x multiplier. On a CI host, where the
+    # plain collection already takes minutes because /opt is very large, that
+    # multiplier produced a job still running after an hour.
+    #
+    # --seccomp-bpf installs a seccomp filter so the kernel only stops the
+    # process for the syscalls actually being traced. Same evidence, 3 seconds
+    # instead of 94 - and verified to still capture thousands of syscalls, so it
+    # is genuinely tracing rather than silently observing nothing.
+    _strace_mode=""
+    if strace --help 2>&1 | grep -q -- '--seccomp-bpf'; then
+        _strace_mode="--seccomp-bpf"
+    fi
+
+    run_bounded strace $_strace_mode -f -qq -e trace=socket,connect,sendto,sendmsg \
         -o "$WORK/strace.txt" \
         sh "$COLLECTOR" --output-dir "$OUT1" </dev/null >/dev/null 2>&1 || :
+
+    # A trace that captured nothing at all would make the "zero network sockets"
+    # conclusion vacuous - it would be indistinguishable from strace having
+    # failed to attach. Require evidence that tracing actually happened.
+    _traced_lines=`grep -c . "$WORK/strace.txt" 2>/dev/null`
+    [ -n "$_traced_lines" ] || _traced_lines=0
+    if [ "$_traced_lines" -eq 0 ]; then
+        printf 'NOT OK    strace produced no output at all, so it cannot be concluded\n'
+        printf '          that no sockets were opened - the trace itself did not work\n'
+        failures=`expr $failures + 1`
+    fi
 
     # AF_INET / AF_INET6 are the network families. AF_UNIX (local IPC),
     # AF_NETLINK (kernel interface), and AF_LOCAL never leave the machine.
@@ -140,9 +189,16 @@ OUT2="$WORK/isolated"
 mkdir -p "$OUT2"
 checks=`expr $checks + 1`
 if command -v unshare >/dev/null 2>&1; then
-    # A fresh network namespace has no interfaces and no loopback route. Any
-    # attempt to reach anything, including 127.0.0.1, fails immediately.
-    if unshare -n sh "$COLLECTOR" --output-dir "$OUT2" </dev/null >"$WORK/iso.log" 2>&1; then
+    # A fresh network namespace has no interfaces and no loopback route.
+    #
+    # Exceeding the timeout here is a genuine finding rather than a test defect,
+    # and is reported as one. It would mean some command in the collection
+    # attempts a network operation and then WAITS for it to time out - "last"
+    # performing reverse DNS on login records is the usual candidate. On a
+    # client host that matters: a server whose DNS resolver is unreachable would
+    # stall the collection in exactly the same way, which is the failure mode
+    # this whole section exists to rule out.
+    if run_bounded unshare -n sh "$COLLECTOR" --output-dir "$OUT2" </dev/null >"$WORK/iso.log" 2>&1; then
         _iso_rc=0
     else
         _iso_rc=$?
@@ -152,7 +208,16 @@ if command -v unshare >/dev/null 2>&1; then
     _iso_sections=`grep -c '^[0-9]\{1,2\}\. ' "$OUT2/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt" 2>/dev/null`
     [ -n "$_iso_sections" ] || _iso_sections=0
 
-    if [ "$_iso_rc" -eq 0 ] && [ "$_iso_sections" -ge 20 ]; then
+    if [ "$_iso_rc" -eq 124 ]; then
+        printf 'NOT OK    the collection did not finish within %ss with no network.\n' "$NET_TEST_TIMEOUT"
+        printf '          It reached section %s of 25 before being stopped.\n' "$_iso_sections"
+        printf '          Either something in it waits on a network operation instead\n'
+        printf '          of failing fast - "last" doing reverse DNS on login records\n'
+        printf '          is the usual candidate - or the collection is simply too slow\n'
+        printf '          on this host. The first matters to a client: a server whose\n'
+        printf '          DNS resolver is unreachable would stall the same way.\n'
+        failures=`expr $failures + 1`
+    elif [ "$_iso_rc" -eq 0 ] && [ "$_iso_sections" -ge 20 ]; then
         printf 'ok        completed with no network interfaces at all (exit %s, %s sections, verdict %s)\n' \
             "$_iso_rc" "$_iso_sections" "${_iso_verdict:-none}"
         printf '          The tool has no network dependency, so it cannot stall waiting\n'
