@@ -386,21 +386,69 @@ wrap_text() {
     '
 }
 
+# Long-format listing of a single path, human-readable size where supported.
+#
+# -h is a GNU/BSD extension and does not exist on AIX, HP-UX, or Solaris, so it
+# is attempted first and the portable form is used when it is rejected. Without
+# the fallback the listing would be empty on exactly the platforms where this
+# evidence is hardest to obtain a second time.
+long_listing_of() {
+    ls -ldh "$1" 2>/dev/null || ls -ld "$1" 2>/dev/null
+}
+
+# The source-file block printed under every section heading.
+#
+# WHY THIS IS HERE
+# A reviewer reading a section needs to know which file on the CLIENT's server
+# the evidence below it came from, and what that file's permissions, ownership,
+# and last-modified date were at the moment of collection. Previously the header
+# printed only the path. The permissions and ownership are themselves control
+# evidence - "who could have changed this file" - and the modification date
+# frequently matters more than the contents, because it establishes when the
+# configuration last changed relative to the audit period.
+#
+# It is printed at the top of the section, before the evidence, so the reader
+# has the provenance in hand before reading the findings rather than having to
+# reconcile them afterwards against the manifest.
+print_section_source_files() {
+    _sec_files=$1
+    _sec_copy=$2
+
+    printf '\n'
+    printf 'File name and directory path on client server where the file that is\n'
+    printf 'referenced in the section below is from:\n'
+
+    printf '%s\n' "$_sec_files" | while IFS= read -r _sec_path; do
+        if [ -z "$_sec_path" ]; then
+            continue
+        fi
+        printf 'Directory: %s\n' "$_sec_path"
+        if path_exists "$_sec_path"; then
+            _sec_listing=`long_listing_of "$_sec_path"`
+            if [ -n "$_sec_listing" ]; then
+                # A directory listed with ls -ld yields one line; a path that
+                # cannot be stat'd yields none, which is reported rather than
+                # left blank.
+                printf 'File Ownership, Access Rights, Last Modified Date: %s\n' "$_sec_listing"
+            else
+                printf 'File Ownership, Access Rights, Last Modified Date: not available\n'
+            fi
+        else
+            printf 'File Ownership, Access Rights, Last Modified Date: file not present on this host\n'
+        fi
+        if [ "$_sec_copy" = "yes" ]; then
+            record_file_reference "$_sec_path"
+        fi
+    done
+}
+
 section_with_explanation() {
     _sec_copy_mode=${4:-yes}
     printf '\n==================================================\n'
     printf '%s\n' "$1"
     wrap_text "$2"
     if [ -n "${3:-}" ]; then
-        printf '\n'
-        printf '%s\n' "$3" | while IFS= read -r _sec_path; do
-            if [ -n "$_sec_path" ]; then
-                printf 'File Path: %s\n' "$_sec_path"
-                if [ "$_sec_copy_mode" = "yes" ]; then
-                    record_file_reference "$_sec_path"
-                fi
-            fi
-        done
+        print_section_source_files "$3" "$_sec_copy_mode"
     fi
     printf '==================================================\n\n'
 }
@@ -1202,6 +1250,28 @@ print_file_checksum() {
 # where available. This information is obtained through read-only inspection
 # commands and is useful for validating sensitive file posture without changing
 # the file itself.
+# THE RULE: if a file is named in the report, its contents are in the package.
+#
+# This function reports a file's permissions, ownership, and checksum. It used
+# to stop there, and that was a hole in the evidence chain rather than a
+# deliberate limit: Section 22 is built entirely on this function and names a
+# platform-specific list of a dozen or more files - auditd.conf, audit.rules,
+# rsyslog.conf, chrony.conf, inittab, pam.conf, the bootloader configuration.
+# Every one of those was cited in the report, with a checksum inviting the
+# reader to compare it against something, while the file itself was never
+# delivered. An auditor reading the report had no way to see what any of them
+# actually contained.
+#
+# The copy is now unconditional here, so the rule holds no matter which code
+# path happens to reach a file first. copy_file_to_collection is idempotent - it
+# returns early when the file is already in the package - so a file reached by
+# several sections is still copied once and recorded once.
+#
+# Credential-bearing files are the deliberate exception and are unaffected:
+# copy_file_to_collection routes them to the sensitive-file safeguards, which
+# withhold the contents and record the decision in both the manifest and
+# SENSITIVE_FILES_SKIPPED.txt. Section 22 naming /etc/shadow and delivering only
+# its metadata is the intended behaviour, and is why the skip list exists.
 print_path_metadata() {
     file_path=$1
 
@@ -1216,6 +1286,7 @@ print_path_metadata() {
         if [ -f "$file_path" ]; then
             printf 'Checksum: '
             print_file_checksum "$file_path"
+            copy_file_to_collection "$file_path"
         fi
     else
         not_available
@@ -2390,6 +2461,18 @@ print_world_writable_review() {
         if [ -d "$_ww_shared" ]; then
             printf 'Directory: %s\n' "$_ww_shared"
             ls -ld "$_ww_shared" 2>/dev/null || not_available
+
+            # Recorded in the manifest as examined-for-metadata-only.
+            #
+            # These directories are named in the report, so under the rule that
+            # anything referenced must be accounted for, they belong in the
+            # chain of custody. Their CONTENTS are deliberately not collected -
+            # /tmp on a live server holds other people's data and none of the
+            # audit's business - and their mode is the evidence being gathered,
+            # so the verb records exactly that rather than implying a file was
+            # copied.
+            record_reference_outcome "DIRECTORY_METADATA_ONLY" "$_ww_shared" \
+                "reason=world_writable_by_design|evidence=mode_and_sticky_bit|contents_not_collected=yes"
 
             # The sticky bit only matters where the directory is actually
             # world-writable. Reporting a missing sticky bit on a directory that

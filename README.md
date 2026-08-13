@@ -26,7 +26,7 @@ Each claim below is asserted by a test that fails the build.
 | **It changes nothing on the host** | Records mode, owner, size, mtime and ctime for ~100,000 paths before and after a real collection; requires zero difference | `test-host-not-modified.sh` |
 | **Nothing is transmitted** | Static audit for network-capable commands, `strace` syscall trace showing zero `AF_INET` sockets, and a full run inside a network namespace with no interfaces at all | `test-no-network-egress.sh` |
 | **No credentials leave the host** | Sentinel credentials planted and a real collection run against them; plus a content-based guard for hosts that store hashes in `/etc/passwd` | `test-no-credential-leak.sh`, `test-inline-passwd-hashes.sh` |
-| **Every source is accounted for** | Every path the report cites must be recorded in the manifest, and every delivered file must be explained — in both directions | `test-evidence-chain.sh` |
+| **Every source is accounted for** | Every path the report cites must be recorded in the manifest **and its contents delivered in `raw_files/`**, and every delivered file must be explained — in both directions | `test-evidence-chain.sh` |
 
 Three further properties matter for evidence quality rather than safety:
 
@@ -77,6 +77,33 @@ SOX-ITGC-AUDIT-LINUX-UNIX/
 The report says what the host is **configured to do**. The collection log
 answers a different question — *did this collection work, and is the evidence
 complete?*
+
+### If the report names a file, the file is in the package
+
+Every source path the report cites has its contents delivered under
+`raw_files/`, mirroring its path on the client system — `/etc/sudoers` arrives
+as `raw_files/etc/sudoers`. A reader should never encounter a file cited in the
+report and be unable to open it.
+
+There is exactly one exception, and it is recorded rather than silent:
+credential-bearing files are withheld by design, and every one is listed in
+`metadata/SENSITIVE_FILES_SKIPPED.txt`. Section 22 naming `/etc/shadow` and
+delivering only its permissions and checksum is the intended behaviour.
+
+Each section heading also names its sources with the permissions, ownership, and
+last-modified date they had on the client system at the moment of collection:
+
+```
+File name and directory path on client server where the file that is
+referenced in the section below is from:
+Directory: /etc/sudoers
+File Ownership, Access Rights, Last Modified Date: -r--r----- 1 root root 1.7K Jun 27 2023 /etc/sudoers
+```
+
+The mode and ownership are themselves control evidence — who could have changed
+this file — and the modification date often matters more than the contents,
+because it establishes when the configuration last changed relative to the audit
+period.
 
 ### Receiving and opening the package
 
