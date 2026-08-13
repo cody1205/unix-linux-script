@@ -147,6 +147,31 @@ Permissions inside the package are deliberately **not** uniform:
 `MANIFEST.txt` records the permissions and ownership each file had on the source
 system, which survives transfer even when filesystem metadata does not.
 
+### Which version of the collector produced this package?
+
+Check this first when a package looks wrong. The report header records it:
+
+```
+Collector Script Path: /home/pi/linux-unix-evidence-gathering-script.sh
+Collector Script Checksum: 379bb16d… (sha256)
+```
+
+Compare that checksum against `sha256sum` of the script you issued. If they
+match, the package came from the version you think it did.
+
+**If the `Collector Script Checksum` line is absent entirely, the package was
+produced by a script older than that line** — which is the fastest way to spot a
+stale copy still in circulation. Two other tells, both from packages predating
+the changes that removed or added them:
+
+| Symptom | Means the script predates |
+| --- | --- |
+| A `commands/` folder containing an empty `.txt` file | 12 June — that artifact was created but never written to, and was removed |
+| No `metadata/COLLECTION-LOG.txt` | 30 July — the collection log did not exist yet |
+
+A current package contains `report/`, `raw_files/`, and `metadata/` and nothing
+else at the top level besides `HOW-TO-READ-THIS-EVIDENCE.txt`.
+
 ### Verify the package on receipt
 
 A package can look complete — right folders, plausible file sizes — while being a
