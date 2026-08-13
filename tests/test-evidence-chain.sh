@@ -91,23 +91,13 @@ checks=`expr $checks + 1`
 : > "$WORK/unexplained.txt"
 if [ -d "$RAW" ]; then
     ( cd "$RAW" && find . -type f -print 2>/dev/null ) | sed 's/^\.//' | sort -u > "$WORK/delivered.txt"
-    # Two verbs besides COPIED put a file in the package, and both exist because
-    # what was delivered is NOT a verbatim copy of the source:
-    #
-    #   COPIED_REDACTED       /etc/passwd with the password field removed, on a
-    #                         host that stores hashes inline
-    #   LOG_SAMPLE_DELIVERED  the last N lines of an authentication log, as a
-    #                         labelled extract; its manifest line carries the
-    #                         delivered path in a delivered_as= field, since the
-    #                         delivered name differs from the source name
-    #
-    # Recording them under distinct verbs is deliberate - a reviewer must be able
-    # to tell a verbatim copy from a transformed one - so this check has to know
-    # about each of them rather than assuming everything arrives as COPIED.
-    {
-        sed -n -e 's/^COPIED|//p' -e 's/^COPIED_REDACTED|//p' "$MANIFEST" | cut -d'|' -f1
-        sed -n 's/.*|delivered_as=raw_files\([^|]*\).*/\1/p' "$MANIFEST"
-    } | sort -u > "$WORK/accounted.txt"
+    # COPIED_REDACTED is the second verb that puts a file in the package: the
+    # /etc/passwd of a host that stores password hashes inline, delivered with
+    # the password field removed. It is recorded under a distinct verb precisely
+    # because it is NOT a verbatim copy, and a reviewer must be able to tell the
+    # difference - so this check has to know about it rather than assuming
+    # everything in the package arrived as COPIED.
+    sed -n -e 's/^COPIED|//p' -e 's/^COPIED_REDACTED|//p' "$MANIFEST" | cut -d'|' -f1 | sort -u > "$WORK/accounted.txt"
     while IFS= read -r p; do
         [ -n "$p" ] || continue
         grep -Fxq "$p" "$WORK/accounted.txt" || printf '%s\n' "$p" >> "$WORK/unexplained.txt"
@@ -212,13 +202,22 @@ while IFS= read -r p; do
         _withheld=`expr $_withheld + 1`
         continue
     fi
-    # Second permitted exception: an authentication log, delivered as a
-    # clearly-labelled extract rather than in full. Production auth logs run to
-    # gigabytes and record activity for every user of the system, so the sample
-    # is what the evidence consists of - but the sample must genuinely BE in the
-    # package. A manifest line claiming a sample was delivered is not accepted
-    # on its own; the file has to exist.
-    if ls "$RAW$p".SAMPLE-* >/dev/null 2>&1; then
+    # Second permitted exception: an authentication log that was SAMPLED.
+    #
+    # These are deliberately not copied, in full or in part. On a production
+    # server an auth log routinely runs to hundreds of megabytes or gigabytes,
+    # and records authentication activity for EVERY user of the system - the
+    # overwhelming majority of it outside the scope of the audit and none of the
+    # auditors' business to be carrying off the client's server.
+    #
+    # What the report relies on is that authentication logging was OPERATING at
+    # the time of collection, and the sampled lines quoted in the report
+    # evidence exactly that. The full file stays where it belongs, on the
+    # client's system, and can be requested if a sample ever raises a question.
+    #
+    # The exception is narrow: it requires an explicit LOG_SAMPLED record naming
+    # this path in the manifest. A file that is simply missing does not qualify.
+    if grep -Fq "LOG_SAMPLED|$p|" "$MANIFEST" 2>/dev/null; then
         _sampled=`expr ${_sampled:-0} + 1`
         continue
     fi
@@ -226,7 +225,7 @@ while IFS= read -r p; do
 done < "$WORK/referenced.txt"
 _n=`grep -c . "$WORK/undelivered.txt" 2>/dev/null`; [ -n "$_n" ] || _n=0
 if [ "$_n" -eq 0 ]; then
-    pass "$_delivered delivered, $_sampled delivered as labelled extracts, $_withheld withheld by design, 0 unexplained"
+    pass "$_delivered delivered, $_sampled sampled-not-copied by design, $_withheld withheld by design, 0 unexplained"
 else
     fail "$_n file(s) are named in the report but their contents were not delivered:"
     sed 's/^/            /' "$WORK/undelivered.txt" | head -15

@@ -90,15 +90,16 @@ There are exactly two exceptions, and both are recorded rather than silent:
 1. **Credential-bearing files are withheld**, and every one is listed in
    `metadata/SENSITIVE_FILES_SKIPPED.txt`. Section 22 naming `/etc/shadow` and
    delivering only its permissions and checksum is the intended behaviour.
-2. **Authentication logs are delivered as a labelled extract, not in full.** On
-   a production server these routinely run to hundreds of megabytes and record
-   activity for *every* user of the system, most of it outside the audit's
-   scope. The sampled lines the report quotes are delivered as
-   `raw_files/var/log/auth.log.SAMPLE-LAST-50-LINES.txt`, carrying a header that
-   states plainly it is an extract, the source path, and the source file's
-   metadata at collection time. The manifest records it as
-   `LOG_SAMPLE_DELIVERED` with `complete_file_not_collected=yes`. The full log
-   stays on the client's server if a follow-up request needs it.
+2. **Authentication logs are sampled, not copied.** Section 25 quotes the last
+   50 lines of the host's auth log in the report and records the source in the
+   manifest as `LOG_SAMPLED`. The file itself is deliberately not collected, in
+   full or in part: on a production server these routinely run to hundreds of
+   megabytes and record authentication activity for *every* user of the system,
+   the majority of it outside the audit's scope and none of it the auditors' to
+   be carrying off the client's server. What the section evidences is that
+   authentication logging was *operating* at the time of collection, and the
+   quoted lines show exactly that. The full log stays on the client's system and
+   can be requested if a sample raises a question.
 
 Each section heading also names its sources with the permissions, ownership, and
 last-modified date they had on the client system at the moment of collection:
