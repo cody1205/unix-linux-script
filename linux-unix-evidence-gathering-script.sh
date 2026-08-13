@@ -44,6 +44,18 @@
 #                   Nothing is written anywhere else - not to /tmp, not to the
 #                   home directory, not to any system path.
 #
+#                   ONE DISCLOSED SIDE EFFECT, so nobody finds it unannounced:
+#                   asking your package manager for the installed software list
+#                   (Section 8) opens its database, and an SQLite-backed rpm
+#                   database updates its own write-ahead log files
+#                   - rpmdb.sqlite-wal and rpmdb.sqlite-shm - whenever it is
+#                   opened, even for a read-only query. The database CONTENTS
+#                   are untouched, no package state changes, and this is
+#                   identical to what happens when you type "rpm -qa" yourself.
+#                   If your file integrity monitoring watches /var/lib/rpm, it
+#                   will see those two files' timestamps move. Nothing else on
+#                   the system is written to.
+#
 # WHAT IT SENDS:    Nothing. It makes no network connections, opens no sockets,
 #                   and contacts no host. It cannot "phone home" because there
 #                   is no code in it that could. (Name-service lookups such as
