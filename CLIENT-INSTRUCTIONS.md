@@ -107,33 +107,50 @@ block is written for you specifically.
 
 ---
 
-## Before you run it: confirm the file arrived intact
+## Before you run it: confirm it arrived intact
 
-Compare the checksum against the value supplied separately with this document:
+You will normally receive a single bundle, `sox-itgc-collector-<version>.tar.gz`,
+containing the script and this document. **Check it against the SHA-256 you were
+sent separately, before unpacking it:**
 
 ```sh
-sha256sum linux-unix-evidence-gathering-script.sh
+sha256sum sox-itgc-collector-<version>.tar.gz
 ```
 
 On AIX, Solaris or HP-UX use whichever exists:
 
 ```sh
-csum -h SHA256 linux-unix-evidence-gathering-script.sh   # AIX
-digest -a sha256 linux-unix-evidence-gathering-script.sh # Solaris
+csum -h SHA256 sox-itgc-collector-<version>.tar.gz   # AIX
+digest -a sha256 sox-itgc-collector-<version>.tar.gz # Solaris
 ```
 
-**If the checksums do not match, stop and request a fresh copy. Do not run it.**
+**If the checksums do not match, stop and request a fresh copy. Do not unpack or
+run it.**
+
+That value is sent to you separately — a different email, or by phone — on
+purpose. Sending the file and its checksum together would prove nothing, since
+anyone able to alter one in transit could alter the other.
+
+Then unpack it:
+
+```sh
+tar xzf sox-itgc-collector-<version>.tar.gz
+```
+
+You get two files: the script, already executable, and this document.
+
+> **If you were sent the `.sh` on its own** rather than as a bundle, checksum
+> that file instead, and see *Running it from a loose file* below — everything
+> else is identical.
 
 ## Run it
 
 ```sh
-sudo sh linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
+sudo ./linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
 ```
 
-- Run it with `sh` as shown. It does not need to be marked executable, and
-  invoking it this way avoids depending on the execute bit surviving transfer.
-- **The file extension does not matter.** If it arrived as `.txt` because a mail
-  gateway rejected `.sh`, run `sudo sh <filename>.txt` — behaviour is identical.
+- No `chmod` is needed. The bundle stores the executable permission, so the
+  script is runnable the moment you unpack it.
 - Choose any `--output-dir` you prefer. If you omit it, the script asks.
 - To include an application installation directory in the evidence, add
   `--app-dir /path/to/app`. Repeatable. Please include the directories named in
@@ -142,6 +159,24 @@ sudo sh linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
 **You can stop it at any time with Ctrl-C.** It marks its own output as
 incomplete so a partial collection cannot be mistaken for a finished one, and
 exits. Nothing is left half-done, because nothing was being changed.
+
+### Running it from a loose file
+
+If the script reached you on its own rather than in the bundle — forwarded as an
+email attachment, downloaded from a portal, copied off a file share — it will
+almost certainly have arrived **without** the executable permission. That is
+normal: those transports do not carry Unix file permissions. Run it with `sh`
+instead, which works either way and needs no permission change:
+
+```sh
+sudo sh linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
+```
+
+**The file extension does not matter.** If it arrived as `.txt` because a mail
+gateway rejected `.sh`, run `sudo sh <filename>.txt` — behaviour is identical.
+
+If you would rather mark it executable yourself, `chmod +x` is safe and changes
+nothing about what the script does.
 
 **Exit status**, if you are running it from a script:
 
@@ -153,6 +188,10 @@ exits. Nothing is left half-done, because nothing was being changed.
 ---
 
 ## If it fails with strange syntax errors
+
+**This applies only if the script reached you as a loose file.** If you unpacked
+the `.tar.gz` bundle, this cannot happen — an archive carries the bytes through
+unchanged, which is one of the reasons the bundle is used.
 
 Errors like these mean the file picked up Windows line endings in transfer, not
 that the script is broken:
@@ -173,9 +212,15 @@ tr -d '\r' < linux-unix-evidence-gathering-script.sh > collector.sh
 sha256sum collector.sh
 ```
 
-The checksum of `collector.sh` **must equal the value supplied with this
-document**. Removing the carriage returns restores the file to exactly the bytes
-that were sent, so a correct repair reproduces the original checksum precisely.
+The checksum of `collector.sh` **must equal the checksum you were given for the
+script itself**. Removing the carriage returns restores the file to exactly the
+bytes that were sent, so a correct repair reproduces the original checksum
+precisely.
+
+> Note: if you were given a checksum for the **bundle** (`.tar.gz`), that is a
+> different value and will not match a single file. Ask us for the script's own
+> checksum — we hold both, and the report the script produces records the
+> script's checksum too.
 
 - **Match** — the file was only damaged by line-ending conversion. Run it:
   `sudo sh collector.sh --output-dir /var/tmp/audit`

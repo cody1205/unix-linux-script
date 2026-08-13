@@ -13,6 +13,39 @@ makes no configuration changes to the host.
 is the page to send to their system administrator — self-contained, and written
 to answer their questions rather than ours.
 
+## Building a release for a client
+
+```sh
+sh tools/make-release.sh v1.0
+```
+
+Produces `dist/sox-itgc-collector-v1.0.tar.gz` containing the collector at mode
+`0755` and `CLIENT-INSTRUCTIONS.md` at `0644`, and prints two checksums: one for
+the bundle, and one for the collector inside it.
+
+A tarball is used rather than sending the `.sh` directly because **the execute
+bit only survives transports that store POSIX file modes.** Email, SharePoint,
+and HTTP downloads all deliver a script as `0644`. `tar` records the mode, so
+the client extracts a file that is already executable and runs
+`sudo ./linux-unix-evidence-gathering-script.sh` with no `chmod` step. It also
+gives the engagement a single checksum covering the script *and* the
+instructions, and a version number citable in workpapers — which is what stops a
+stale copy circulating unnoticed.
+
+Send the bundle by your usual secure file transfer and **the checksum
+separately** — a different email, or by phone. Sending both together proves
+nothing, since anyone able to alter one in transit could alter the other. The
+client's server needs no internet access at any point: their administrator moves
+the file onto it by whatever path they already use.
+
+The collector checksum printed by the build is the same value the report records
+as `Collector Script Checksum`, so a returned evidence package can be tied back
+to the exact release that produced it.
+
+The builder refuses to package a script that contains carriage returns or does
+not parse — the last point at which either can be caught before it becomes a
+client's problem.
+
 ---
 
 ## The four claims this tool makes, and how each is proved

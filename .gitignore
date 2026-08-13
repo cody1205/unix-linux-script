@@ -1,3 +1,8 @@
 SOX-ITGC-AUDIT-LINUX-UNIX/
 SOX-ITGC-AUDIT-LINUX-UNIX-*.tar.gz
 SOX-ITGC-AUDIT-LINUX-UNIX-*.tar
+
+# Release bundles built by tools/make-release.sh. These are delivery artifacts,
+# not source: rebuild them with the script rather than committing them, so a
+# bundle can never drift from the code it claims to contain.
+dist/
