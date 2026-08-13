@@ -75,7 +75,8 @@ normalise() {
         -e 's/^TIMING|.*/TIMING|<TIMING>/' \
         -e 's/^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9:]\{8\} /<TS> /' \
         -e '/^[^ ][^ ]*  *[0-9][0-9]*  *[0-9][0-9]*  *[0-9][0-9]*  *[0-9][0-9]*% /s/.*/<DF-CAPACITY>/' \
-        -e 's/^\(d[rwxsStT-]\{9\}\) *[0-9]\{1,\} \(.*\) \(\/tmp\|\/var\/tmp\|\/dev\/shm\|\/var\/lock\)$/\1 <LINKS> <META> \3/' \
+        -e 's/^\([dlbcps-][rwxsStT-]\{9\}[.+]*\)  *[0-9][0-9]*  */\1 <LINKS> /' \
+        -e 's/^\([dlbcps-][rwxsStT-]\{9\}[.+]* <LINKS> \)\(.*\) \(\/tmp\|\/var\/tmp\|\/dev\/shm\|\/var\/lock\)$/\1<META> \3/' \
         -e 's/^\([[:space:]]*\(Local time\|Universal time\|RTC time\|System clock synchronized\|NTP service\)\):.*/\1: <CLOCK>/' \
         "$1"
 }
@@ -87,14 +88,27 @@ normalise() {
 #                 wrote an evidence package to the same filesystem. Requiring it
 #                 to be identical would assert something false about filesystems.
 #
-#   /tmp link count
-#                 Section 10 lists the shared temporary directories to verify
-#                 their sticky bit. A directory's link count rises when anything
-#                 on the system creates a subdirectory inside it - including this
-#                 test's own mktemp between the two runs. The MODE STRING is
-#                 deliberately still compared, because the sticky bit is the
-#                 actual evidence; only the link count, size, and date are
-#                 normalised away.
+#   link count    Normalised on EVERY long-format listing line, not just the
+#                 shared temporary directories where it first showed up.
+#
+#                 A directory's link count is its number of subdirectories, and
+#                 that changes whenever anything on the system creates or removes
+#                 one. Two separate cases have now hit this: /tmp, whose count
+#                 rose because this test's own mktemp ran between the two
+#                 collections; and /var/cache/man - the "man" account's home
+#                 directory on Debian, listed by the home-directory permission
+#                 review - which fell from 36 to 2 when man-db cleaned its cache
+#                 mid-test. Both were the host changing underneath the
+#                 collection, reported accurately both times.
+#
+#                 The MODE, OWNER, GROUP and SIZE are deliberately still
+#                 compared. Those are the evidence - who can write to this
+#                 directory, who owns it - and normalising them away would gut
+#                 the check. Only the count of subdirectories is discarded.
+#
+#   /tmp size and date
+#                 Additionally normalised for the shared temporary directories
+#                 only, whose mtime and size change as files come and go in them.
 #
 #   clock lines   timedatectl reports the current time, which necessarily differs
 #                 between two runs. The synchronisation STATE is what the section
