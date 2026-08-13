@@ -13,6 +13,39 @@ makes no configuration changes to the host.
 is the page to send to their system administrator — self-contained, and written
 to answer their questions rather than ours.
 
+## Building a release for a client
+
+```sh
+sh tools/make-release.sh v1.0
+```
+
+Produces `dist/sox-itgc-collector-v1.0.tar.gz` containing the collector at mode
+`0755` and `CLIENT-INSTRUCTIONS.md` at `0644`, and prints two checksums: one for
+the bundle, and one for the collector inside it.
+
+A tarball is used rather than sending the `.sh` directly because **the execute
+bit only survives transports that store POSIX file modes.** Email, SharePoint,
+and HTTP downloads all deliver a script as `0644`. `tar` records the mode, so
+the client extracts a file that is already executable and runs
+`sudo ./linux-unix-evidence-gathering-script.sh` with no `chmod` step. It also
+gives the engagement a single checksum covering the script *and* the
+instructions, and a version number citable in workpapers — which is what stops a
+stale copy circulating unnoticed.
+
+Send the bundle by your usual secure file transfer and **the checksum
+separately** — a different email, or by phone. Sending both together proves
+nothing, since anyone able to alter one in transit could alter the other. The
+client's server needs no internet access at any point: their administrator moves
+the file onto it by whatever path they already use.
+
+The collector checksum printed by the build is the same value the report records
+as `Collector Script Checksum`, so a returned evidence package can be tied back
+to the exact release that produced it.
+
+The builder refuses to package a script that contains carriage returns or does
+not parse — the last point at which either can be caught before it becomes a
+client's problem.
+
 ---
 
 ## The four claims this tool makes, and how each is proved
@@ -147,6 +180,31 @@ Permissions inside the package are deliberately **not** uniform:
 `MANIFEST.txt` records the permissions and ownership each file had on the source
 system, which survives transfer even when filesystem metadata does not.
 
+### Which version of the collector produced this package?
+
+Check this first when a package looks wrong. The report header records it:
+
+```
+Collector Script Path: /home/pi/linux-unix-evidence-gathering-script.sh
+Collector Script Checksum: 379bb16d… (sha256)
+```
+
+Compare that checksum against `sha256sum` of the script you issued. If they
+match, the package came from the version you think it did.
+
+**If the `Collector Script Checksum` line is absent entirely, the package was
+produced by a script older than that line** — which is the fastest way to spot a
+stale copy still in circulation. Two other tells, both from packages predating
+the changes that removed or added them:
+
+| Symptom | Means the script predates |
+| --- | --- |
+| A `commands/` folder containing an empty `.txt` file | 12 June — that artifact was created but never written to, and was removed |
+| No `metadata/COLLECTION-LOG.txt` | 30 July — the collection log did not exist yet |
+
+A current package contains `report/`, `raw_files/`, and `metadata/` and nothing
+else at the top level besides `HOW-TO-READ-THIS-EVIDENCE.txt`.
+
 ### Verify the package on receipt
 
 A package can look complete — right folders, plausible file sizes — while being a
@@ -264,6 +322,7 @@ Stated here rather than discovered during an engagement:
 # No root required
 sh tests/test-sensitive-paths.sh
 sh tests/test-inline-passwd-hashes.sh
+sh tests/test-release-bundle.sh
 
 # Require root; run a real collection
 sudo sh tests/test-host-not-modified.sh
@@ -298,6 +357,15 @@ a test that only ever passes provides false assurance.
   collection as root, then fails if any sentinel or credential-shaped content
   reaches `raw_files/`, if a sensitive read is not recorded, or if the manifest
   overclaims. Restores `/etc` on exit; intended for ephemeral CI runners.
+- **`test-release-bundle.sh`** covers the artifact that actually reaches a
+  client. It builds a bundle and asserts the collector extracts **executable** —
+  the entire reason for bundling — that the printed checksums match the real
+  files, that the modes do not depend on the operator's umask, and that the
+  build guards refuse a CRLF-damaged or unparsable script **with the right
+  diagnosis**. That last point is not pedantry: the CRLF guard once sat after
+  the parse check, and because carriage returns also break `sh -n`, a
+  CRLF-damaged file was reported as "does not parse" — sending the operator
+  after a syntax error when the repair is one `tr` command.
 - **`test-verify-package.sh`** produces a real package, then damages copies the
   way a delivery actually degrades — report cut short, log without its verdict,
   manifest naming files that never arrived, archive truncated — and requires the
