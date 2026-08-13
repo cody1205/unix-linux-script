@@ -3344,6 +3344,64 @@ auth_log_candidates() {
     printf '/var/log/auth.log\n/var/log/secure\n/var/log/authlog\n/var/adm/authlog\n'
 }
 
+# Deliver the sampled lines as a file, alongside the report that quotes them.
+#
+# THE TENSION THIS RESOLVES
+# The operating rule is that a file named in the report has its contents in the
+# package, so a reader never meets a citation they cannot open. Authentication
+# logs are the one case where copying the whole file is the wrong answer:
+#
+#   - on a production server they routinely run to hundreds of megabytes or
+#     gigabytes, which would dwarf the rest of the evidence; and
+#   - they record authentication activity for EVERY user of the system, the
+#     overwhelming majority of it outside the scope of the audit and none of
+#     the auditors' business.
+#
+# So the sample is what the evidence actually consists of, and the sample is
+# what gets delivered - as a real file, at a path that mirrors the source, with
+# a suffix and a header making unmistakably clear that it is an extract rather
+# than the complete log. Nothing is presented as something it is not, and the
+# reader can open exactly what the report quotes.
+#
+# The full log stays on the client's server, where a follow-up request can
+# retrieve it if the sample raises a question.
+deliver_log_sample() {
+    _sample_source=$1
+
+    if [ "$COLLECTION_STATUS" != "ready" ]; then
+        return
+    fi
+
+    _sample_target="$RAW_FILES_DIRECTORY$_sample_source.SAMPLE-LAST-$AUTH_LOG_SAMPLE_LINES-LINES.txt"
+    _sample_dir=`dirname "$_sample_target" 2>/dev/null || echo "$RAW_FILES_DIRECTORY"`
+    mkdir -p "$_sample_dir" 2>/dev/null || return
+
+    {
+        printf '# NOTICE: THIS IS AN EXTRACT, NOT THE COMPLETE LOG FILE.\n'
+        printf '#\n'
+        printf '# Source file on %s: %s\n' "$HOSTNAME_VALUE" "$_sample_source"
+        printf '# Contents below: the last %s lines only, as at the time of collection.\n' "$AUTH_LOG_SAMPLE_LINES"
+        printf '#\n'
+        printf '# The complete log was deliberately not collected. Authentication logs\n'
+        printf '# on a production server are frequently very large and record activity\n'
+        printf '# for every user of the system, most of which is outside the scope of\n'
+        printf '# this audit. The sample evidences that authentication logging was\n'
+        printf '# operating at the time of collection, which is what the report relies\n'
+        printf '# on. The full file remains on the source system if it is needed.\n'
+        printf '#\n'
+        printf '# Source file metadata at collection time:\n'
+        printf '# %s\n' "`long_listing_of "$_sample_source"`"
+        printf '#\n'
+        printf '# ---------------- begin extract ----------------\n'
+        tail -n "$AUTH_LOG_SAMPLE_LINES" "$_sample_source" 2>/dev/null
+    } > "$_sample_target" 2>/dev/null
+
+    if [ -s "$_sample_target" ]; then
+        record_manifest_line "LOG_SAMPLE_DELIVERED|$_sample_source|lines=$AUTH_LOG_SAMPLE_LINES|delivered_as=raw_files$_sample_source.SAMPLE-LAST-$AUTH_LOG_SAMPLE_LINES-LINES.txt|complete_file_not_collected=yes"
+        log_event INFO evidence "sampled the last $AUTH_LOG_SAMPLE_LINES lines of $_sample_source and delivered them as a clearly-labelled extract; the complete log was deliberately not collected because production authentication logs are large and record activity for users outside the audit scope"
+    fi
+}
+
 print_auth_log_samples() {
     found=no
 
@@ -3352,6 +3410,7 @@ print_auth_log_samples() {
             printf 'Log file: %s (last %s lines)\n' "$log_path" "$AUTH_LOG_SAMPLE_LINES"
             if tail -n "$AUTH_LOG_SAMPLE_LINES" "$log_path" 2>/dev/null; then
                 record_manifest_line "LOG_SAMPLED|$log_path|lines=$AUTH_LOG_SAMPLE_LINES"
+                deliver_log_sample "$log_path"
                 found=yes
             else
                 not_available

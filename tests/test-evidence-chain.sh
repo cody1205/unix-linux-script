@@ -91,9 +91,23 @@ checks=`expr $checks + 1`
 : > "$WORK/unexplained.txt"
 if [ -d "$RAW" ]; then
     ( cd "$RAW" && find . -type f -print 2>/dev/null ) | sed 's/^\.//' | sort -u > "$WORK/delivered.txt"
-    # COPIED_REDACTED is the redacted /etc/passwd path; it is delivered but is
-    # recorded under a different verb precisely because it is not a verbatim copy.
-    sed -n -e 's/^COPIED|//p' -e 's/^COPIED_REDACTED|//p' "$MANIFEST" | cut -d'|' -f1 | sort -u > "$WORK/accounted.txt"
+    # Two verbs besides COPIED put a file in the package, and both exist because
+    # what was delivered is NOT a verbatim copy of the source:
+    #
+    #   COPIED_REDACTED       /etc/passwd with the password field removed, on a
+    #                         host that stores hashes inline
+    #   LOG_SAMPLE_DELIVERED  the last N lines of an authentication log, as a
+    #                         labelled extract; its manifest line carries the
+    #                         delivered path in a delivered_as= field, since the
+    #                         delivered name differs from the source name
+    #
+    # Recording them under distinct verbs is deliberate - a reviewer must be able
+    # to tell a verbatim copy from a transformed one - so this check has to know
+    # about each of them rather than assuming everything arrives as COPIED.
+    {
+        sed -n -e 's/^COPIED|//p' -e 's/^COPIED_REDACTED|//p' "$MANIFEST" | cut -d'|' -f1
+        sed -n 's/.*|delivered_as=raw_files\([^|]*\).*/\1/p' "$MANIFEST"
+    } | sort -u > "$WORK/accounted.txt"
     while IFS= read -r p; do
         [ -n "$p" ] || continue
         grep -Fxq "$p" "$WORK/accounted.txt" || printf '%s\n' "$p" >> "$WORK/unexplained.txt"
@@ -186,6 +200,7 @@ checks=`expr $checks + 1`
 : > "$WORK/undelivered.txt"
 _delivered=0
 _withheld=0
+_sampled=0
 while IFS= read -r p; do
     [ -n "$p" ] || continue
     [ -f "$p" ] || continue          # only regular files that exist on this host
@@ -197,11 +212,21 @@ while IFS= read -r p; do
         _withheld=`expr $_withheld + 1`
         continue
     fi
+    # Second permitted exception: an authentication log, delivered as a
+    # clearly-labelled extract rather than in full. Production auth logs run to
+    # gigabytes and record activity for every user of the system, so the sample
+    # is what the evidence consists of - but the sample must genuinely BE in the
+    # package. A manifest line claiming a sample was delivered is not accepted
+    # on its own; the file has to exist.
+    if ls "$RAW$p".SAMPLE-* >/dev/null 2>&1; then
+        _sampled=`expr ${_sampled:-0} + 1`
+        continue
+    fi
     printf '%s\n' "$p" >> "$WORK/undelivered.txt"
 done < "$WORK/referenced.txt"
 _n=`grep -c . "$WORK/undelivered.txt" 2>/dev/null`; [ -n "$_n" ] || _n=0
 if [ "$_n" -eq 0 ]; then
-    pass "$_delivered referenced file(s) delivered, $_withheld withheld by design, 0 unexplained"
+    pass "$_delivered delivered, $_sampled delivered as labelled extracts, $_withheld withheld by design, 0 unexplained"
 else
     fail "$_n file(s) are named in the report but their contents were not delivered:"
     sed 's/^/            /' "$WORK/undelivered.txt" | head -15

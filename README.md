@@ -85,10 +85,20 @@ Every source path the report cites has its contents delivered under
 as `raw_files/etc/sudoers`. A reader should never encounter a file cited in the
 report and be unable to open it.
 
-There is exactly one exception, and it is recorded rather than silent:
-credential-bearing files are withheld by design, and every one is listed in
-`metadata/SENSITIVE_FILES_SKIPPED.txt`. Section 22 naming `/etc/shadow` and
-delivering only its permissions and checksum is the intended behaviour.
+There are exactly two exceptions, and both are recorded rather than silent:
+
+1. **Credential-bearing files are withheld**, and every one is listed in
+   `metadata/SENSITIVE_FILES_SKIPPED.txt`. Section 22 naming `/etc/shadow` and
+   delivering only its permissions and checksum is the intended behaviour.
+2. **Authentication logs are delivered as a labelled extract, not in full.** On
+   a production server these routinely run to hundreds of megabytes and record
+   activity for *every* user of the system, most of it outside the audit's
+   scope. The sampled lines the report quotes are delivered as
+   `raw_files/var/log/auth.log.SAMPLE-LAST-50-LINES.txt`, carrying a header that
+   states plainly it is an extract, the source path, and the source file's
+   metadata at collection time. The manifest records it as
+   `LOG_SAMPLE_DELIVERED` with `complete_file_not_collected=yes`. The full log
+   stays on the client's server if a follow-up request needs it.
 
 Each section heading also names its sources with the permissions, ownership, and
 last-modified date they had on the client system at the moment of collection:
