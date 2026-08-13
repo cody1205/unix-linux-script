@@ -452,7 +452,7 @@ verify_os() {
     assert_report_matches 'PASSLENGTH=8' 'HP-UX password policy captured'
     assert_report_matches 'MAXWEEKS=9' 'HP-UX password aging captured'
     assert_report_matches 'LOCK_AFTER_RETRIES=YES' 'HP-UX lockout policy captured'
-    assert_report_matches 'Command: swlist' 'SD-UX inventory labelled with its command'
+    assert_report_matches 'Command: swlist -l product' 'HP-UX patch/product history labelled with its command'
     assert_report_matches 'HPUX-LDAP-Auth' 'LDAP-UX bundle captured in inventory'
     assert_report_matches 'vendorsup   ALL=\(ALL\) NOPASSWD: ALL' 'vendor sudo rule captured'
     assert_report_matches 'SSHD_START=1' 'rc.config startup evidence captured'
@@ -463,7 +463,7 @@ verify_os() {
     assert_report_matches 'File: /var/adm/sulog' 'su history located at the HP-UX path'
     assert_report_matches 'awright-root' 'su events captured'
 
-    # Section 10: this host's /var/tmp is world-writable with no sticky bit.
+    # Section 9: this host's /var/tmp is world-writable with no sticky bit.
     assert_report_matches 'Sticky bit: ABSENT' 'missing sticky bit reported on shared temp directory'
     assert_report_matches '/opt/policyadmin/etc/policy\.conf' 'world-writable application config surfaced'
 

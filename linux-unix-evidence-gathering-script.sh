@@ -45,8 +45,8 @@
 #                   home directory, not to any system path.
 #
 #                   ONE DISCLOSED SIDE EFFECT, so nobody finds it unannounced:
-#                   asking your package manager for the installed software list
-#                   (Section 8) opens its database, and an SQLite-backed rpm
+#                   asking your package manager for patch and update history
+#                   (Section 17) opens its database, and an SQLite-backed rpm
 #                   database updates its own write-ahead log files
 #                   - rpmdb.sqlite-wal and rpmdb.sqlite-shm - whenever it is
 #                   opened, even for a read-only query. The database CONTENTS
@@ -130,7 +130,7 @@
 #
 # A NOTE ON SEARCHING FOR NETWORK COMMANDS: grepping this file for words like
 # "telnet" or "ftp" DOES return matches, and they are not what they look like.
-# Section 17 searches YOUR inetd and xinetd configuration for those service
+# Section 16 searches YOUR inetd and xinetd configuration for those service
 # names, because an enabled telnet or ftp service is an audit finding. That is
 # this script reading your configuration in order to report on it. Check 2 above
 # is the reliable test, because it observes behaviour rather than vocabulary.
@@ -176,7 +176,7 @@
 #                     mount points, so a separately mounted subdirectory beneath
 #                     a scanned path is not traversed. Deliberate: it prevents
 #                     load on client network storage. Disclosed in the report.
-#                   - Section 24 lists accounts the name service will enumerate.
+#                   - Section 23 lists accounts the name service will enumerate.
 #                     SSSD and winbind disable enumeration by default, so on a
 #                     directory-joined host the list may be local accounts only.
 #                     The script detects this case and says so.
@@ -765,7 +765,7 @@ record_manifest_line() {
 # confirm what was held back, so it has to be the complete list. It previously
 # was not: this function was called only from copy_file_to_collection, so a
 # sensitive file that went straight to print_sensitive_file_review - every
-# authorized_keys reached through Section 14, among others - was recorded in the
+# authorized_keys reached through Section 13, among others - was recorded in the
 # manifest as SENSITIVE_METADATA_ONLY and never appeared here at all. The two
 # records of the same decision disagreed, and the one the client was pointed at
 # was the incomplete one.
@@ -1266,7 +1266,7 @@ print_file_checksum() {
 #
 # This function reports a file's permissions, ownership, and checksum. It used
 # to stop there, and that was a hole in the evidence chain rather than a
-# deliberate limit: Section 22 is built entirely on this function and names a
+# deliberate limit: Section 21 is built entirely on this function and names a
 # platform-specific list of a dozen or more files - auditd.conf, audit.rules,
 # rsyslog.conf, chrony.conf, inittab, pam.conf, the bootloader configuration.
 # Every one of those was cited in the report, with a checksum inviting the
@@ -1282,7 +1282,7 @@ print_file_checksum() {
 # Credential-bearing files are the deliberate exception and are unaffected:
 # copy_file_to_collection routes them to the sensitive-file safeguards, which
 # withhold the contents and record the decision in both the manifest and
-# SENSITIVE_FILES_SKIPPED.txt. Section 22 naming /etc/shadow and delivering only
+# SENSITIVE_FILES_SKIPPED.txt. Section 21 naming /etc/shadow and delivering only
 # its metadata is the intended behaviour, and is why the skip list exists.
 print_path_metadata() {
     file_path=$1
@@ -1521,7 +1521,7 @@ print_group_membership_summary() {
     printf 'Note: an empty member list does not mean the group grants nothing. Users\n'
     printf '  whose PRIMARY group is one of the above are recorded by GID in\n'
     printf '  /etc/passwd rather than in the member field here. Read this with the\n'
-    printf '  account inventory in Sections 13 and 24.\n'
+    printf '  account inventory in Sections 12 and 23.\n'
 }
 
 # Duplicate identity review:
@@ -2104,142 +2104,6 @@ print_sulog_content() {
     fi
 }
 
-# Package inventory:
-# Native package-manager commands are used only in query/list mode. The script
-# does not install, remove, upgrade, downgrade, or reconfigure software.
-#
-# The NATIVE packaging system for the detected platform is queried first, before
-# falling back to whatever else is installed. Probing for rpm first is wrong on
-# any Unix that is not Linux, and wrong in a way that produces a confident,
-# complete-looking answer about the wrong population:
-#
-#   AIX      ships rpm by default for the AIX Toolbox for Open Source Software.
-#            "rpm -qa" there lists the Toolbox freeware and NOT the installp
-#            filesets that make up the operating system - the actual software
-#            inventory an ITGC review is asking about. lslpp is the native tool.
-#   HP-UX    can carry rpm from the Internet Express bundle; swlist is native.
-#   Solaris  can carry rpm from OpenCSW or the companion DVD; pkginfo is native.
-#
-# Getting this wrong does not fail loudly. It reports the wrong inventory as if
-# it were the right one, which is worse than reporting nothing.
-#
-# INVOKING rpm WHEN IT IS NOT THE NATIVE PACKAGE MANAGER MODIFIES THE HOST.
-#
-# This is the reason the selection below tests for a package DATABASE rather
-# than for a binary. On a Debian or Ubuntu host that happens to have the rpm
-# package installed - not unusual; it arrives with alien and various vendor
-# tooling - "rpm -qa" run as root finds no RPM database and CREATES ONE:
-#
-#     /root/.rpmdb/rpmdb.sqlite
-#     /root/.rpmdb/rpmdb.sqlite-shm
-#     /root/.rpmdb/rpmdb.sqlite-wal
-#
-# Three files written into root's home directory by a script whose entire
-# premise is that it writes nothing outside its own output directory. On a
-# client running file integrity monitoring that is an alert, raised against the
-# auditors, during an audit. It was found by tests/test-host-not-modified.sh and
-# reproduced directly before this fix was written.
-#
-# Selecting on the database also fixes the accuracy problem in the same stroke:
-# a host with an rpm binary and no rpm database has no RPM-managed software to
-# report, so querying rpm there could only ever produce an empty or misleading
-# answer.
-# Testing for the directory /var/lib/rpm is NOT sufficient, and the first
-# attempt at this fix failed for exactly that reason. On Debian and Ubuntu:
-#
-#   - the rpm package ships /var/lib/rpm as an EMPTY directory, so the
-#     directory exists on a host that has no RPM-managed software at all; and
-#   - it configures rpm's database path to ~/.rpmdb - a per-user database -
-#     rather than to /var/lib/rpm, which is why the file it creates lands in
-#     root's home directory.
-#
-# The reliable test is therefore to ask rpm where its database actually is, and
-# then check whether a database FILE exists there. "rpm --eval" only expands a
-# macro; it was verified to create nothing. The three filenames cover the
-# backends in use: sqlite (rpm 4.16+), Berkeley DB (older), and ndb/lmdb.
-rpm_database_present() {
-    command_exists rpm || return 1
-    _rpm_dbpath=`rpm --eval '%{_dbpath}' 2>/dev/null`
-    case "$_rpm_dbpath" in
-        ''|%*) _rpm_dbpath=/var/lib/rpm ;;
-    esac
-    [ -f "$_rpm_dbpath/rpmdb.sqlite" ] ||
-    [ -f "$_rpm_dbpath/Packages" ] ||
-    [ -f "$_rpm_dbpath/data.mdb" ]
-}
-
-# dpkg keeps its inventory in a single status file. Its presence and non-zero
-# size is what distinguishes a host dpkg actually manages from one that merely
-# has the binary installed.
-dpkg_database_present() {
-    [ -s /var/lib/dpkg/status ]
-}
-
-# True only when rpm is both installed AND has a database to read, so that
-# calling it cannot create one.
-rpm_usable() {
-    command_exists rpm && rpm_database_present
-}
-
-dpkg_usable() {
-    command_exists dpkg && dpkg_database_present
-}
-
-print_package_inventory() {
-    _pkg_done=no
-
-    case "$OS_NAME" in
-        AIX)
-            if command_exists lslpp; then
-                printf 'Command: lslpp -L (native AIX installp/RPM inventory)\n'
-                lslpp -L 2>/dev/null || not_available
-                _pkg_done=yes
-            fi
-            ;;
-        HP-UX)
-            if command_exists swlist; then
-                printf 'Command: swlist (native HP-UX SD-UX inventory)\n'
-                swlist 2>/dev/null || not_available
-                _pkg_done=yes
-            fi
-            ;;
-        SunOS)
-            if command_exists pkg; then
-                printf 'Command: pkg list (native IPS inventory)\n'
-                pkg list </dev/null 2>/dev/null || not_available
-                _pkg_done=yes
-            elif command_exists pkginfo; then
-                printf 'Command: pkginfo (native SVR4 package inventory)\n'
-                pkginfo 2>/dev/null || not_available
-                _pkg_done=yes
-            fi
-            ;;
-    esac
-
-    if [ "$_pkg_done" = "yes" ]; then
-        return
-    fi
-
-    if rpm_usable; then
-        printf 'Command: rpm -qa\n'
-        rpm -qa 2>/dev/null || not_available
-    elif dpkg_usable; then
-        printf 'Command: dpkg -l\n'
-        dpkg -l 2>/dev/null || not_available
-    elif command_exists pkginfo; then
-        printf 'Command: pkginfo\n'
-        pkginfo 2>/dev/null || not_available
-    elif command_exists swlist; then
-        printf 'Command: swlist\n'
-        swlist 2>/dev/null || not_available
-    elif command_exists lslpp; then
-        printf 'Command: lslpp -L\n'
-        lslpp -L 2>/dev/null || not_available
-    else
-        not_available
-    fi
-}
-
 # Recent login activity:
 # The script queries available login history records to support review of
 # account usage. It does not alter login records or session state.
@@ -2262,8 +2126,8 @@ print_recent_login_activity() {
 # administrative access. If the file is application configuration or data in
 # financial-reporting scope, unauthorized modification of that data is possible,
 # which defeats the integrity of the reported figures. The findings here are
-# intended to be read together with the cron evidence in Sections 12 and 21, the
-# startup evidence in Section 16, and the sudo evidence in Section 4, so a
+# intended to be read together with the cron evidence in Sections 11 and 20, the
+# startup evidence in Section 15, and the sudo evidence in Section 4, so a
 # reviewer can determine whether anything privileged actually executes a
 # world-writable path.
 #
@@ -2428,7 +2292,7 @@ print_world_writable_review() {
             # known once the cap is exceeded. Record that honestly rather than
             # reporting the probe count as if it were the true total.
             ww_file_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
-            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable files exist; Section 10 lists the first $WORLD_WRITABLE_MAX_ENTRIES only and the full population is not in this package"
+            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable files exist; Section 9 lists the first $WORLD_WRITABLE_MAX_ENTRIES only and the full population is not in this package"
         fi
         printf '%s\n' "$ww_files" | while IFS= read -r _ww_entry; do
             if [ -n "$_ww_entry" ]; then
@@ -2456,7 +2320,7 @@ print_world_writable_review() {
             blank_line
             ww_dirs=`printf '%s\n' "$ww_dirs" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
             ww_dir_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
-            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable directories without a sticky bit exist; Section 10 lists the first $WORLD_WRITABLE_MAX_ENTRIES only"
+            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable directories without a sticky bit exist; Section 9 lists the first $WORLD_WRITABLE_MAX_ENTRIES only"
         fi
         printf '%s\n' "$ww_dirs" | while IFS= read -r _ww_entry; do
             if [ -n "$_ww_entry" ]; then
@@ -2517,7 +2381,7 @@ print_world_writable_review() {
 # each one is a potential privilege-escalation path, so the population is
 # inventoried for review. SetGID behaves the same way for group privileges.
 #
-# The scan is bounded exactly as the world-writable scan in Section 10 is, and for
+# The scan is bounded exactly as the world-writable scan in Section 9 is, and for
 # the same reason: this runs on live client production systems.
 #
 # - Scope is pruned to binary and application paths rather than whole filesystems.
@@ -3029,15 +2893,66 @@ print_network_exposure_summary() {
     printf '  every host and evidences nothing.\n'
 }
 
+# Which package manager actually MANAGES this host.
+#
+# Selection is made on the package DATABASE rather than on the presence of a
+# binary, and this matters twice over.
+#
+# First, safety. Running "rpm -qa" on a host with no RPM database CREATES one -
+# /root/.rpmdb/rpmdb.sqlite and its side files - which is a script that promises
+# to write nothing outside its output directory writing three files into root's
+# home. Debian and Ubuntu ship the rpm binary readily (it arrives with alien and
+# assorted vendor tooling), so probing for the binary was not a theoretical
+# problem.
+#
+# Second, accuracy, and the subtler of the two. Testing merely that an rpm
+# database FILE exists is not enough either: once anything has run rpm on a
+# Debian host - an administrator, or an earlier version of this script - an
+# EMPTY database is left behind permanently. rpm then looks "usable" forever
+# after, wins the selection, returns nothing, and the patch section reports "not
+# available" on a host whose real history sits in /var/lib/dpkg and
+# /var/log/dpkg.log. Patch timeliness is a testable ITGC control, so silently
+# losing that evidence is the more damaging of the two failures.
+#
+# dpkg is therefore consulted first and its status file is tested for CONTENT.
+# A host with package records in /var/lib/dpkg/status is a Debian-family host
+# and dpkg is its native manager, regardless of what else is installed.
+rpm_database_present() {
+    command_exists rpm || return 1
+    _rpm_dbpath=`rpm --eval '%{_dbpath}' 2>/dev/null`
+    case "$_rpm_dbpath" in
+        ''|%*) _rpm_dbpath=/var/lib/rpm ;;
+    esac
+    [ -f "$_rpm_dbpath/rpmdb.sqlite" ] ||
+    [ -f "$_rpm_dbpath/Packages" ] ||
+    [ -f "$_rpm_dbpath/data.mdb" ]
+}
+
+dpkg_database_present() {
+    [ -s /var/lib/dpkg/status ] || return 1
+    grep -q '^Package:' /var/lib/dpkg/status 2>/dev/null
+}
+
+dpkg_usable() {
+    command_exists dpkg && dpkg_database_present
+}
+
+# True only when rpm is installed, has a database, and dpkg has not already
+# established that this is a Debian-family host.
+rpm_usable() {
+    dpkg_usable && return 1
+    command_exists rpm && rpm_database_present
+}
+
 # Patch and update indicators:
 # Package metadata and history are queried to support change and maintenance
 # review. The script performs no patching, installation, removal, or update
 # action.
 #
-# Ordered by native packaging system per platform, for the same reason as the
-# inventory above: "rpm -qa --last" on AIX reports the install history of Toolbox
-# freeware rather than of the operating system's own filesets, which would
-# misrepresent the host's patch position rather than merely omit it.
+# Ordered by native packaging system per platform: "rpm -qa --last" on AIX
+# reports the install history of Toolbox freeware rather than of the operating
+# system's own filesets, which would misrepresent the host's patch position
+# rather than merely omit it.
 print_patch_update_summary() {
     case "$OS_NAME" in
         AIX)
@@ -3126,7 +3041,7 @@ print_time_sync_summary() {
 
     # Whether the clock is actually in sync, as distinct from how it is
     # configured to sync. Configuration alone does not evidence a working
-    # control, in the same way Section 15's logging configuration does not
+    # control, in the same way Section 14's logging configuration does not
     # evidence that logging is operating.
     subsection "Synchronisation Status:"
     if command_exists timedatectl; then
@@ -3224,7 +3139,7 @@ host_uses_directory_service() {
 }
 
 # Interactive user account inventory:
-# Service accounts (Section 13) and UID 0 accounts (Section 1) are reviewed
+# Service accounts (Section 12) and UID 0 accounts (Section 1) are reviewed
 # elsewhere. This function lists the remaining accounts that a person could
 # plausibly log in with: UID 0 accounts plus accounts at or above the
 # platform service-account threshold whose login shell is not a known
@@ -3248,7 +3163,7 @@ print_interactive_user_accounts() {
         record_manifest_line "GETENT_QUERY|passwd ALL|source=name_service"
         record_file_reference /etc/passwd
 
-        # Enumeration boundary, disclosed the same way Sections 10 and 11
+        # Enumeration boundary, disclosed the same way Sections 9 and 10
         # disclose their -xdev boundary.
         #
         # "getent passwd" with no argument asks the name service to ENUMERATE
@@ -3293,7 +3208,7 @@ print_interactive_user_accounts() {
                 printf '  THIS LIST IS INCOMPLETE. Obtain the directory-sourced population\n'
                 printf '  from the directory itself.\n'
                 record_manifest_line "ENUMERATION_BOUNDARY|getent passwd|returned=$_iua_getent_count|local=$_iua_local_count|directory_configured=yes|directory_accounts_likely_absent=yes"
-                log_event WARN evidence "this host is configured for directory authentication but name service enumeration returned only local accounts ($_iua_getent_count vs $_iua_local_count); Section 24 does not contain directory accounts and the interactive-user population is incomplete"
+                log_event WARN evidence "this host is configured for directory authentication but name service enumeration returned only local accounts ($_iua_getent_count vs $_iua_local_count); Section 23 does not contain directory accounts and the interactive-user population is incomplete"
             else
                 printf 'Enumeration boundary: local accounts only, and no directory service\n'
                 printf '  is configured on this host (see Section 3), so this is the\n'
@@ -3914,10 +3829,10 @@ section4_source_files()  { printf '/etc/sudoers\n/etc/sudoers.d\n'; }
 section5_source_files()  { printf '/etc/group\n'; }
 section6_source_files()  { sulog_candidates; }
 section7_source_files()  { printf '/etc/ssh/sshd_config\n%s\n' "$SSH_CONFIG_INCLUDE_DIRECTORY"; }
-section12_source_files() { printf '/etc/crontab\n/etc/cron.d\n/var/spool/cron/crontabs\n'; }
-section13_source_files() { printf '/etc/passwd\n'; }
-section14_source_files() { printf '/etc/passwd\n/etc/hosts.equiv\n/etc/issue\n/etc/issue.net\n/etc/motd\n/etc/ssh/banner\n/etc/profile\n'; }
-section15_source_files() {
+section11_source_files() { printf '/etc/crontab\n/etc/cron.d\n/var/spool/cron/crontabs\n'; }
+section12_source_files() { printf '/etc/passwd\n'; }
+section13_source_files() { printf '/etc/passwd\n/etc/hosts.equiv\n/etc/issue\n/etc/issue.net\n/etc/motd\n/etc/ssh/banner\n/etc/profile\n'; }
+section14_source_files() {
     case "$OS_NAME" in
         Linux)   printf '/etc/audit/auditd.conf\n/etc/systemd/journald.conf\n/etc/rsyslog.conf\n/etc/rsyslog.d\n/etc/syslog-ng/syslog-ng.conf\n/etc/sudoers\n/etc/sudoers.d\n' ;;
         AIX)     printf '/etc/security/audit/config\n/etc/syslog.conf\n' ;;
@@ -3925,23 +3840,23 @@ section15_source_files() {
         HP-UX)   printf '/etc/syslog.conf\n' ;;
     esac
 }
-section16_source_files() {
+section15_source_files() {
     case "$OS_NAME" in
         HP-UX)   printf '/etc/rc.config\n/etc/inittab\n' ;;
         Linux)   printf '' ;;
         *)       printf '/etc/inittab\n' ;;
     esac
 }
-section17_source_files() { printf '/etc/exports\n/etc/inetd.conf\n/etc/inet/inetd.conf\n/etc/services\n'; }
-section18_source_files() {
+section16_source_files() { printf '/etc/exports\n/etc/inetd.conf\n/etc/inet/inetd.conf\n/etc/services\n'; }
+section17_source_files() {
     case "$OS_NAME" in
         Linux) if command_exists dpkg; then printf '/var/log/dpkg.log\n'; fi ;;
     esac
 }
-section19_source_files() { printf '/etc/logrotate.conf\n/etc/newsyslog.conf\n'; }
-section20_source_files() { printf '/etc/chrony.conf\n/etc/chrony/chrony.conf\n/etc/ntp.conf\n/etc/inet/ntp.conf\n/etc/systemd/timesyncd.conf\n'; }
-section21_source_files() { printf '/etc/anacrontab\n/var/log/cron\n/var/log/cron.log\n'; }
-section22_source_files() {
+section18_source_files() { printf '/etc/logrotate.conf\n/etc/newsyslog.conf\n'; }
+section19_source_files() { printf '/etc/chrony.conf\n/etc/chrony/chrony.conf\n/etc/ntp.conf\n/etc/inet/ntp.conf\n/etc/systemd/timesyncd.conf\n'; }
+section20_source_files() { printf '/etc/anacrontab\n/var/log/cron\n/var/log/cron.log\n'; }
+section21_source_files() {
     case "$OS_NAME" in
         Linux)   printf '/etc/passwd\n/etc/shadow\n/etc/group\n/etc/sudoers\n/etc/ssh/sshd_config\n/etc/login.defs\n/etc/audit/auditd.conf\n/etc/rsyslog.conf\n/etc/chrony.conf\n' ;;
         AIX)     printf '/etc/passwd\n/etc/security/passwd\n/etc/security/user\n/etc/security/audit/config\n/etc/syslog.conf\n/etc/inittab\n' ;;
@@ -3950,8 +3865,8 @@ section22_source_files() {
         *)       printf '/etc/passwd\n/etc/group\n/etc/ssh/sshd_config\n' ;;
     esac
 }
-section24_source_files() { printf '/etc/passwd\n'; }
-section25_source_files() {
+section23_source_files() { printf '/etc/passwd\n'; }
+section24_source_files() {
     for log_candidate in `auth_log_candidates`; do
         if [ -f "$log_candidate" ]; then
             printf '%s\n' "$log_candidate"
@@ -4263,32 +4178,30 @@ blank_line
 subsection "Full Content Review Files"
 print_sshd_full_content
 
-section_with_explanation "8. Installed Packages" "Explanation: This section provides the installed software inventory as reported by the platform package management tools. It can help identify security agents, administration tools, database clients, and unexpected software that may affect the control environment." ""
-print_package_inventory
 
-section_with_explanation "9. Recent Login Activity" "Explanation: This section shows recent login history using the system's available login records. It is limited to a manageable amount of output to reduce noise while still supporting review of privileged and unusual logins." ""
+section_with_explanation "8. Recent Login Activity" "Explanation: This section shows recent login history using the system's available login records. It is limited to a manageable amount of output to reduce noise while still supporting review of privileged and unusual logins." ""
 print_recent_login_activity
 
-section_with_explanation "10. World-Writable Files and Directories" "Explanation: This section identifies files and directories that any account on the host can modify. A world-writable file that is executed by a privileged account allows an unprivileged user to obtain privileged execution, and a world-writable application file allows unauthorized modification of data or programs in financial-reporting scope. Read this together with the cron evidence in Sections 12 and 21, the startup evidence in Section 16, and the sudo evidence in Section 4 to determine whether anything privileged executes a world-writable path. The scan is deliberately pruned to system binary, system configuration, and application installation paths, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host; the resulting limits are stated in the output. Directories that are world-writable by design, such as /tmp, are not enumerated. Instead their sticky bit is verified, which is the actual control on a shared temporary directory. Only path, permission, and ownership metadata is recorded. The contents of a world-writable file are never printed or copied into this evidence package." ""
+section_with_explanation "9. World-Writable Files and Directories" "Explanation: This section identifies files and directories that any account on the host can modify. A world-writable file that is executed by a privileged account allows an unprivileged user to obtain privileged execution, and a world-writable application file allows unauthorized modification of data or programs in financial-reporting scope. Read this together with the cron evidence in Sections 11 and 20, the startup evidence in Section 15, and the sudo evidence in Section 4 to determine whether anything privileged executes a world-writable path. The scan is deliberately pruned to system binary, system configuration, and application installation paths, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host; the resulting limits are stated in the output. Directories that are world-writable by design, such as /tmp, are not enumerated. Instead their sticky bit is verified, which is the actual control on a shared temporary directory. Only path, permission, and ownership metadata is recorded. The contents of a world-writable file are never printed or copied into this evidence package." ""
 scan_timer_start "Scanning system and application paths for world-writable files"
 print_world_writable_review
-scan_timer_end "10 (world-writable)"
+scan_timer_end "9 (world-writable)"
 
-section_with_explanation "11. SetUID and SetGID Files" "Explanation: A SetUID program runs with the privileges of the file owner rather than those of the user who started it, so a SetUID root binary allows an unprivileged user to execute code with root privileges. A small number of system tools legitimately require this, but each one is a potential privilege-escalation path, so the population is inventoried for review. SetGID behaves the same way for group privileges. The scan is deliberately pruned to standard system and application binary paths rather than the entire filesystem, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host. The resulting limits are stated in the output so a reviewer can see the bound on the evidence rather than assuming the population is complete. Application directories supplied at runtime are scanned as roots in their own right so that an application tree residing on its own mount is still covered." ""
+section_with_explanation "10. SetUID and SetGID Files" "Explanation: A SetUID program runs with the privileges of the file owner rather than those of the user who started it, so a SetUID root binary allows an unprivileged user to execute code with root privileges. A small number of system tools legitimately require this, but each one is a potential privilege-escalation path, so the population is inventoried for review. SetGID behaves the same way for group privileges. The scan is deliberately pruned to standard system and application binary paths rather than the entire filesystem, and does not cross filesystem boundaries, so that it cannot place load on data volumes or network-mounted filesystems on a production host. The resulting limits are stated in the output so a reviewer can see the bound on the evidence rather than assuming the population is complete. Application directories supplied at runtime are scanned as roots in their own right so that an application tree residing on its own mount is still covered." ""
 scan_timer_start "Scanning system and application paths for SetUID/SetGID files"
 print_setuid_setgid_files
-scan_timer_end "11 (SetUID/SetGID)"
+scan_timer_end "10 (SetUID/SetGID)"
 
-_sec12_files=`section12_source_files`
-section_with_explanation "12. Scheduled Cron Jobs" "Explanation: This section shows system-wide and user cron jobs where available. Scheduled jobs matter because they can run automatically with elevated or application-specific permissions and can therefore affect controlled processing." "$_sec12_files"
+_sec11_files=`section11_source_files`
+section_with_explanation "11. Scheduled Cron Jobs" "Explanation: This section shows system-wide and user cron jobs where available. Scheduled jobs matter because they can run automatically with elevated or application-specific permissions and can therefore affect controlled processing." "$_sec11_files"
 print_cron_content
 
-_sec13_files=`section13_source_files`
-section_with_explanation "13. Service Accounts" "Explanation: This section lists lower-UID accounts that are commonly used for system services, background processes, or applications rather than normal human users." "$_sec13_files"
+_sec12_files=`section12_source_files`
+section_with_explanation "12. Service Accounts" "Explanation: This section lists lower-UID accounts that are commonly used for system services, background processes, or applications rather than normal human users." "$_sec12_files"
 print_service_accounts
 
-_sec14_files=`section14_source_files`
-section_with_explanation "14. Account Status, SSH Keys, and Legacy Trust" "Explanation: This section summarizes account status, password expiry, home directory and SSH permission posture, and legacy trust files. Sensitive files such as authorized_keys and trust files are reviewed through metadata and safe summaries rather than full content output." "$_sec14_files"
+_sec13_files=`section13_source_files`
+section_with_explanation "13. Account Status, SSH Keys, and Legacy Trust" "Explanation: This section summarizes account status, password expiry, home directory and SSH permission posture, and legacy trust files. Sensitive files such as authorized_keys and trust files are reviewed through metadata and safe summaries rather than full content output." "$_sec13_files"
 print_account_status_summary
 blank_line
 print_password_expiry_details
@@ -4299,39 +4212,39 @@ print_legacy_trust_content
 blank_line
 print_shell_timeout_and_banner_summary
 
-_sec15_files=`section15_source_files`
-section_with_explanation "15. Audit Logging and Log Forwarding" "Explanation: This section captures platform-relevant logging configuration, indicators of log forwarding, and sudo logging settings. It avoids printing large amounts of irrelevant logging configuration for other operating systems." "$_sec15_files"
+_sec14_files=`section14_source_files`
+section_with_explanation "14. Audit Logging and Log Forwarding" "Explanation: This section captures platform-relevant logging configuration, indicators of log forwarding, and sudo logging settings. It avoids printing large amounts of irrelevant logging configuration for other operating systems." "$_sec14_files"
 print_audit_logging_summary
 
-_sec16_files=`section16_source_files`
-section_with_explanation "16. Service and Startup Configuration" "Explanation: This section captures service and startup information using the native service model for the detected operating system, such as systemd, SRC, SMF, or traditional startup files." "$_sec16_files"
+_sec15_files=`section15_source_files`
+section_with_explanation "15. Service and Startup Configuration" "Explanation: This section captures service and startup information using the native service model for the detected operating system, such as systemd, SRC, SMF, or traditional startup files." "$_sec15_files"
 print_service_startup_summary
 
-_sec17_files=`section17_source_files`
-section_with_explanation "17. Network Exposure and Firewall Configuration" "Explanation: This section shows listening network services, selected firewall or export configuration, and indicators of older insecure network services." "$_sec17_files"
+_sec16_files=`section16_source_files`
+section_with_explanation "16. Network Exposure and Firewall Configuration" "Explanation: This section shows listening network services, selected firewall or export configuration, and indicators of older insecure network services." "$_sec16_files"
 print_network_exposure_summary
 
-_sec18_files=`section18_source_files`
-section_with_explanation "18. Patch, Update, and Change Indicators" "Explanation: This section captures host-level evidence of package or patch maintenance using the native package history or package listing tools available on the detected operating system." "$_sec18_files"
+_sec17_files=`section17_source_files`
+section_with_explanation "17. Patch, Update, and Change Indicators" "Explanation: This section captures host-level evidence of package or patch maintenance using the native package history or package listing tools available on the detected operating system." "$_sec17_files"
 print_patch_update_summary
 
-_sec19_files=`section19_source_files`
-section_with_explanation "19. Backup, Capacity, and Operational Indicators" "Explanation: This section gathers practical operations evidence such as filesystem capacity and selected backup or log rotation configuration files." "$_sec19_files"
+_sec18_files=`section18_source_files`
+section_with_explanation "18. Backup, Capacity, and Operational Indicators" "Explanation: This section gathers practical operations evidence such as filesystem capacity and selected backup or log rotation configuration files." "$_sec18_files"
 print_backup_operational_summary
 
-_sec20_files=`section20_source_files`
-section_with_explanation "20. Time Synchronization" "Explanation: This section captures available time synchronization configuration files such as chrony or NTP." "$_sec20_files"
+_sec19_files=`section19_source_files`
+section_with_explanation "19. Time Synchronization" "Explanation: This section captures available time synchronization configuration files such as chrony or NTP." "$_sec19_files"
 print_time_sync_summary
 
-_sec21_files=`section21_source_files`
-section_with_explanation "21. Additional Scheduled Tasks and Timers" "Explanation: This section captures supplemental scheduler files such as anacron and cron log files where present." "$_sec21_files"
+_sec20_files=`section20_source_files`
+section_with_explanation "20. Additional Scheduled Tasks and Timers" "Explanation: This section captures supplemental scheduler files such as anacron and cron log files where present." "$_sec20_files"
 print_additional_scheduler_content
 
-_sec22_files=`section22_source_files`
-section_with_explanation "22. Critical File Integrity and Sensitive File Permissions" "Explanation: This section shows metadata and checksums for selected sensitive operating-system files, using an operating-system-specific file list so the output stays relevant to the detected platform." "$_sec22_files"
+_sec21_files=`section21_source_files`
+section_with_explanation "21. Critical File Integrity and Sensitive File Permissions" "Explanation: This section shows metadata and checksums for selected sensitive operating-system files, using an operating-system-specific file list so the output stays relevant to the detected platform." "$_sec21_files"
 print_critical_file_integrity
 
-section_with_explanation "23. Application Installation Directory Recursive Listing" "Explanation: This section captures a recursive directory listing for one or more application installation directories specified by the operator at runtime. It supports SOX / ITGC reviews of application file inventories by recording filenames, ownership, permissions, sizes, and modification times for every file under the supplied roots. The ls command is read-only and does not change file content, ownership, or permissions. The flags are adjusted per operating system because the desired Linux flag set ls -RlthBA includes GNU extensions (-h human-readable sizes and -B ignore backups) that are not present, or that have different meanings, on AIX, Solaris, HP-UX, and BSD. Equivalent flag sets are used on those platforms so the resulting evidence remains comparable across hosts. Application directories are listed as metadata only; the script does not copy the contents of these directories into the evidence package." "$APP_DIRECTORIES" "no"
+section_with_explanation "22. Application Installation Directory Recursive Listing" "Explanation: This section captures a recursive directory listing for one or more application installation directories specified by the operator at runtime. It supports SOX / ITGC reviews of application file inventories by recording filenames, ownership, permissions, sizes, and modification times for every file under the supplied roots. The ls command is read-only and does not change file content, ownership, or permissions. The flags are adjusted per operating system because the desired Linux flag set ls -RlthBA includes GNU extensions (-h human-readable sizes and -B ignore backups) that are not present, or that have different meanings, on AIX, Solaris, HP-UX, and BSD. Equivalent flag sets are used on those platforms so the resulting evidence remains comparable across hosts. Application directories are listed as metadata only; the script does not copy the contents of these directories into the evidence package." "$APP_DIRECTORIES" "no"
 if [ -z "$APP_DIRECTORIES" ]; then
     printf 'No application directories were specified.\n'
     printf 'Application directories can be supplied with the --app-dir flag,\n'
@@ -4343,15 +4256,15 @@ else
             print_application_directory_listing "$app_path_entry"
         fi
     done
-    scan_timer_end "23 (application directory listing)"
+    scan_timer_end "22 (application directory listing)"
 fi
 
-_sec24_files=`section24_source_files`
-section_with_explanation "24. Interactive User Accounts" "Explanation: This section lists the accounts that a person could plausibly use to log in to this host: UID 0 accounts plus accounts at or above the platform service-account threshold whose login shell is not a known non-interactive shell. For a SOX IT audit, this provides the population of named human users for logical access review, complementing the UID 0 review in Section 1 and the service-account inventory in Section 13." "$_sec24_files"
+_sec23_files=`section23_source_files`
+section_with_explanation "23. Interactive User Accounts" "Explanation: This section lists the accounts that a person could plausibly use to log in to this host: UID 0 accounts plus accounts at or above the platform service-account threshold whose login shell is not a known non-interactive shell. For a SOX IT audit, this provides the population of named human users for logical access review, complementing the UID 0 review in Section 1 and the service-account inventory in Section 12." "$_sec23_files"
 print_interactive_user_accounts
 
-_sec25_files=`section25_source_files`
-section_with_explanation "25. Authentication Log Samples" "Explanation: This section shows the most recent entries from the host's authentication logs to demonstrate that login and privilege activity was actually being recorded at the time of collection. It complements Section 15, which shows how logging is configured, by providing evidence that logging is operating. Only the sampled lines shown here are included in the evidence; the full log files are intentionally not copied because production authentication logs can be very large. Each sampled log is recorded in the manifest as LOG_SAMPLED." "$_sec25_files" "no"
+_sec24_files=`section24_source_files`
+section_with_explanation "24. Authentication Log Samples" "Explanation: This section shows the most recent entries from the host's authentication logs to demonstrate that login and privilege activity was actually being recorded at the time of collection. It complements Section 14, which shows how logging is configured, by providing evidence that logging is operating. Only the sampled lines shown here are included in the evidence; the full log files are intentionally not copied because production authentication logs can be very large. Each sampled log is recorded in the manifest as LOG_SAMPLED." "$_sec24_files" "no"
 print_auth_log_samples
 
 section "Execution Summary"

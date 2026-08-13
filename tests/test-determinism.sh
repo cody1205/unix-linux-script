@@ -122,15 +122,15 @@ normalise() {
 
 printf '== 1. the report describes the same host both times ==\n'
 checks=`expr $checks + 1`
-# Section 9 (login history) and Section 25 (auth log samples) read live logs
+# Section 8 (login history) and Section 24 (auth log samples) read live logs
 # that legitimately gain entries between two runs - including the entries
 # created by the first run's own sudo. Those two sections are compared
 # separately below rather than being allowed to mask differences elsewhere.
 extract_stable() {
     awk '
-        /^9\. Recent Login Activity/       { skip = 1 }
-        /^10\. World-Writable/             { skip = 0 }
-        /^25\. Authentication Log Samples/ { skip = 1 }
+        /^8\. Recent Login Activity/       { skip = 1 }
+        /^9\. World-Writable/             { skip = 0 }
+        /^24\. Authentication Log Samples/ { skip = 1 }
         /^Execution Summary/               { skip = 0 }
         !skip { print }
     ' "$1"

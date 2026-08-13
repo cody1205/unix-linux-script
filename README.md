@@ -88,9 +88,9 @@ report and be unable to open it.
 There are exactly two exceptions, and both are recorded rather than silent:
 
 1. **Credential-bearing files are withheld**, and every one is listed in
-   `metadata/SENSITIVE_FILES_SKIPPED.txt`. Section 22 naming `/etc/shadow` and
+   `metadata/SENSITIVE_FILES_SKIPPED.txt`. Section 21 naming `/etc/shadow` and
    delivering only its permissions and checksum is the intended behaviour.
-2. **Authentication logs are sampled, not copied.** Section 25 quotes the last
+2. **Authentication logs are sampled, not copied.** Section 24 quotes the last
    50 lines of the host's auth log in the report and records the source in the
    manifest as `LOG_SAMPLED`. The file itself is deliberately not collected, in
    full or in part: on a production server these routinely run to hundreds of
@@ -229,13 +229,13 @@ the report and manifest.
 | 11 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev` |
 | 23 — application directory listing | **unbounded**; only runs when `--app-dir` is given | not capped and not `-xdev`; the operator chooses the roots |
 
-Sections 10 and 11 are pruned to system binary, system configuration, and
+Sections 9 and 10 are pruned to system binary, system configuration, and
 application installation paths rather than scanning whole filesystems, and both
 use `find -xdev` so they cannot descend into NFS or SAN mounts and place load on
 a remote filer. Both state their scope and limits in the report, so a reviewer
 sees the bound on the evidence rather than assuming the population is complete.
 
-Section 23 is the one to watch on a large estate. It is opt-in, but when a root
+Section 22 is the one to watch on a large estate. It is opt-in, but when a root
 is supplied it recursively lists **every** file beneath it with no cap and without
 stopping at filesystem boundaries. That is intentional — the operator named the
 directory and the listing is the evidence — but it should be a considered choice.
@@ -247,7 +247,7 @@ Stated here rather than discovered during an engagement:
 - **`find -xdev` under-reports by design.** A separately mounted subdirectory
   beneath a scanned path is not traversed. The trade is deliberate — it prevents
   load on client network storage — and the boundary is disclosed in the report.
-- **Section 24 depends on name-service enumeration.** SSSD and winbind disable
+- **Section 23 depends on name-service enumeration.** SSSD and winbind disable
   enumeration by default while still resolving accounts by name, so on a
   directory-joined host the interactive-user list may be local accounts only. The
   script detects this case, says so in the report, and raises a `WARN`.
@@ -256,7 +256,7 @@ Stated here rather than discovered during an engagement:
   enough to have caught a real credential leak and a real account-modification
   bug, but **a dry run on client hardware before the engagement remains
   advisable.**
-- **Section 23 is unbounded** when used. See the table above.
+- **Section 22 is unbounded** when used. See the table above.
 
 ## Tests
 

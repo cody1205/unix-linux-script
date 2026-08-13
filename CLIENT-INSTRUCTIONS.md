@@ -47,7 +47,7 @@ Two details worth knowing before you run it:
   `metadata/SENSITIVE_FILES_SKIPPED.txt` in the output, so you can confirm
   exactly what was withheld.
 - **One side effect, disclosed rather than left to be discovered.** Asking your
-  package manager for the installed software list (Section 8) opens its
+  package manager for patch and update history (Section 17) opens its
   database. An SQLite-backed `rpm` database — RHEL 9, current Fedora, SUSE —
   updates its own write-ahead log files, `rpmdb.sqlite-wal` and
   `rpmdb.sqlite-shm`, whenever it is opened, **even for a read-only query**.

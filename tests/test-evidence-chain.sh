@@ -117,7 +117,7 @@ printf '\n== 3. every source path the report names is accounted for ==\n'
 #
 # EVERY form in which the report names a source path is collected, not just the
 # section headers. That matters: an earlier version of this test looked only for
-# "File Path:", which meant Section 22 - a dozen or more files reported with
+# "File Path:", which meant Section 21 - a dozen or more files reported with
 # permissions and a checksum but never delivered - was invisible to it. When the
 # header format later changed, that same narrow pattern would have matched
 # nothing at all and the check would have passed while examining zero paths.
@@ -184,7 +184,7 @@ printf '\n== 3b. every referenced file is DELIVERED, not merely recorded ==\n'
 # reason the skip list exists: it converts "missing" into "deliberately
 # withheld, and here is the record of it".
 #
-# This is the check that would have caught Section 22 delivering a dozen files'
+# This is the check that would have caught Section 21 delivering a dozen files'
 # checksums with none of their contents.
 checks=`expr $checks + 1`
 : > "$WORK/undelivered.txt"

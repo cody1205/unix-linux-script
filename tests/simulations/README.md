@@ -61,7 +61,7 @@ Every platform is checked for (see `common.sh`):
 - every `COPIED|` manifest entry actually exists in `raw_files/` — the chain of
   custody never claims a file it did not deliver
 - manifest paths are well formed (no double slashes)
-- all 25 numbered sections render
+- all 24 numbered sections render
 
 Each fixture then adds platform-specific assertions (`verify_os`) covering its
 identity source, package tooling, sudo rules, password policy, and startup
