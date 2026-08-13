@@ -92,6 +92,20 @@ jobs:
       - name: Assert inline /etc/passwd hashes are detected
         run: sh tests/test-inline-passwd-hashes.sh
 
+  release-bundle:
+    name: Client release bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # tools/make-release.sh produces the artifact that actually reaches a
+      # client. It is the one thing on the critical path to an engagement, so it
+      # is gated like everything else: the collector must extract EXECUTABLE
+      # (the whole reason for bundling), the printed checksums must match the
+      # real files, and the build guards must refuse bad input with the right
+      # diagnosis rather than a misleading one.
+      - name: Build a bundle and verify what a client would receive
+        run: sh tests/test-release-bundle.sh
+
   credential-leak:
     name: End-to-end credential leak
     runs-on: ubuntu-latest

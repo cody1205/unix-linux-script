@@ -322,6 +322,7 @@ Stated here rather than discovered during an engagement:
 # No root required
 sh tests/test-sensitive-paths.sh
 sh tests/test-inline-passwd-hashes.sh
+sh tests/test-release-bundle.sh
 
 # Require root; run a real collection
 sudo sh tests/test-host-not-modified.sh
@@ -356,6 +357,15 @@ a test that only ever passes provides false assurance.
   collection as root, then fails if any sentinel or credential-shaped content
   reaches `raw_files/`, if a sensitive read is not recorded, or if the manifest
   overclaims. Restores `/etc` on exit; intended for ephemeral CI runners.
+- **`test-release-bundle.sh`** covers the artifact that actually reaches a
+  client. It builds a bundle and asserts the collector extracts **executable** —
+  the entire reason for bundling — that the printed checksums match the real
+  files, that the modes do not depend on the operator's umask, and that the
+  build guards refuse a CRLF-damaged or unparsable script **with the right
+  diagnosis**. That last point is not pedantry: the CRLF guard once sat after
+  the parse check, and because carriage returns also break `sh -n`, a
+  CRLF-damaged file was reported as "does not parse" — sending the operator
+  after a syntax error when the repair is one `tr` command.
 - **`test-verify-package.sh`** produces a real package, then damages copies the
   way a delivery actually degrades — report cut short, log without its verdict,
   manifest naming files that never arrived, archive truncated — and requires the
