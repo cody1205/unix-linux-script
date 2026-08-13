@@ -184,7 +184,7 @@ printf '\n== 6. interruption leaves an honest FAILED verdict ==\n'
 for sig in INT TERM; do
     checks=`expr $checks + 1`
     O="$WORK/sig$sig"; mkdir -p "$O"
-    # --app-dir /usr makes Section 23 list a large tree recursively, which
+    # --app-dir /usr makes Section 22 list a large tree recursively, which
     # guarantees the collection is still running when the signal arrives.
     # A fixed "sleep 1" raced: on a fast host the collection had already
     # finished, kill silently did nothing, and the test then read a legitimately

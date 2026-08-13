@@ -17,7 +17,7 @@ APPDIR=/opt/globex-erp
 BLOCKERS=""
 # This fixture is an AD-joined host (passwd: compat winbind), and winbind ships
 # with enumeration disabled by default, so "getent passwd" returns only local
-# accounts. That is precisely the condition Section 24 now discloses: the
+# accounts. That is precisely the condition Section 23 now discloses: the
 # interactive-user population it lists is incomplete, because domain users can
 # log in without ever appearing in an enumeration. A WARNINGS verdict is the
 # correct outcome for a host configured this way, and verify_os below asserts
@@ -520,9 +520,9 @@ verify_os() {
     # would otherwise let any unrelated warning satisfy this fixture, so the
     # specific disclosure and the specific log line are both asserted here.
     assert_report_matches 'THIS HOST IS CONFIGURED TO USE A DIRECTORY' \
-        'Section 24 discloses that directory accounts are missing from the population'
+        'Section 23 discloses that directory accounts are missing from the population'
     assert_report_matches 'THIS LIST IS INCOMPLETE' \
-        'Section 24 states the account list is incomplete rather than implying it is whole'
+        'Section 23 states the account list is incomplete rather than implying it is whole'
     sim_check
     if grep -q 'configured for directory authentication but name service enumeration returned only local accounts' "$LOGFILE" 2>/dev/null; then
         sim_pass "the enumeration gap is logged as a WARN for the auditor"
@@ -533,7 +533,7 @@ verify_os() {
     assert_report_matches 'pam_winbind\.so' 'PAM winbind module reference captured'
     assert_report_matches '%AD__domain_admins ALL=\(ALL\) NOPASSWD: ALL' 'AD break-glass sudo rule captured'
     assert_report_matches '%AD__erp-linux-sudo' 'sudo rights granted to an AD group captured'
-    assert_report_matches 'samba-winbind' 'SUSE package inventory captured'
+    assert_report_matches 'samba-winbind-4\.19' 'SUSE patch history captured'
     assert_report_matches 'PASS_MAX_DAYS   60' 'password aging policy captured'
     assert_report_matches 'postgresql' 'database service evidence captured'
     assert_report_matches 'sampling systemd journal auth/authpriv' 'filtered journal used when no dedicated auth log exists'

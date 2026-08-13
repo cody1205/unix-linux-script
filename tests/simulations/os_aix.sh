@@ -36,7 +36,7 @@ BLOCKERS="dpkg chage rpm ss systemctl journalctl pkginfo swlist"
 # This fixture authenticates against a directory (SYSTEM=LDAP in
 # /etc/security/user), and its getent returns local accounts only - the normal
 # state for a directory-joined host, since enumeration is generally disabled.
-# Section 24 now discloses that its interactive-user population is therefore
+# Section 23 now discloses that its interactive-user population is therefore
 # incomplete, which is a warning-level finding. verify_os asserts the specific
 # warning so that relaxing the verdict here cannot mask an unrelated one.
 EXPECTED_RESULT=COMPLETED_WITH_WARNINGS
@@ -515,7 +515,7 @@ SU 06/14 03:10 + ??? root-db2inst1
 EOF
     # No dedicated /var/adm/authlog on this host and no systemd journal, so auth
     # events are only in the general syslog file. This is what exercises the
-    # collector's last-resort general-syslog fallback for Section 25; the mixed
+    # collector's last-resort general-syslog fallback for Section 24; the mixed
     # non-auth lines are deliberate, since that log is unfiltered on a real host.
     cat > "$R/var/adm/messages" <<'EOF'
 Jun 16 01:58:44 aix-fin-batch01 syslog:info syslogd: restart
@@ -571,8 +571,7 @@ verify_os() {
     # The AIX authentication summary parses per-user SYSTEM= stanzas.
     assert_report_matches 'SYSTEM = "LDAP' 'LDAP-backed authentication detected'
     assert_report_matches 'jbanks.*SYSTEM|SYSTEM.*LDAP or compat' 'per-user auth source captured'
-    assert_report_matches 'Command: lslpp -L' 'fileset inventory labelled with its command'
-    assert_report_matches 'bos\.rte\.security' 'AIX fileset inventory captured'
+    assert_report_matches 'Command: lslpp -h' 'AIX patch history labelled with its command'
     assert_report_matches 'Command: lssrc -a' 'SRC subsystem listing labelled'
     assert_report_matches 'secldapclntd' 'LDAP client subsystem captured'
     assert_report_matches 'Command: netstat -an' 'network listing labelled'
@@ -596,7 +595,7 @@ verify_os() {
     # is detected from the AIX SYSTEM=LDAP stanzas rather than from nsswitch or
     # SSSD, so this also exercises the AIX branch of host_uses_directory_service.
     assert_report_matches 'THIS HOST IS CONFIGURED TO USE A DIRECTORY' \
-        'Section 24 discloses that LDAP accounts are missing from the population'
+        'Section 23 discloses that LDAP accounts are missing from the population'
     sim_check
     if grep -q 'configured for directory authentication but name service enumeration returned only local accounts' "$LOGFILE" 2>/dev/null; then
         sim_pass "the enumeration gap is logged as a WARN for the auditor"
@@ -634,13 +633,13 @@ verify_os() {
     assert_report_matches 'sampling general syslog /var/adm/messages' 'general syslog fallback used as last resort'
     assert_report_matches 'Accepted publickey for svcbatch' 'authentication events captured from general syslog'
 
-    # Section 10 on a clean host: no world-writable findings, but the scan limits
+    # Section 9 on a clean host: no world-writable findings, but the scan limits
     # and the sticky-bit verification must still be reported rather than omitted,
     # so a reviewer can tell a clean result from a scan that did not run.
     assert_report_matches 'Filesystem boundary: not crossed' 'scan limits disclosed even with no findings'
     assert_report_matches 'Sticky bit: present \(expected\)' 'sticky bit verified on shared temp directories'
     sim_check
-    if awk '/^10\. World-Writable/{f=1} f&&/World-Writable Files:/{g=1;next} g{print;exit}' "$REPORT" 2>/dev/null | grep -q 'no entries found'; then
+    if awk '/^9\. World-Writable/{f=1} f&&/World-Writable Files:/{g=1;next} g{print;exit}' "$REPORT" 2>/dev/null | grep -q 'no entries found'; then
         sim_pass "clean host reports no world-writable files"
     else
         sim_fail "expected 'no entries found' for world-writable files on this host"

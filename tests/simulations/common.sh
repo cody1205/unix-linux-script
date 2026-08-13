@@ -133,7 +133,7 @@ sim_new_root() {
              "$R"/etc/syslog-ng/conf.d "$R"/etc/alternatives
     chmod 700 "$R/root/.ssh"
     # Shared temporary directories carry the sticky bit on a real host, which is
-    # the control Section 10 verifies. A fixture can override these to exercise
+    # the control Section 9 verifies. A fixture can override these to exercise
     # the missing-sticky-bit finding.
     mkdir -p "$R/var/tmp" "$R/dev/shm"
     chmod 1777 "$R/tmp" "$R/var/tmp" "$R/dev/shm"
@@ -496,20 +496,20 @@ sim_verify_common() {
     assert_report_matches 'Scan Timing \(filesystem-walking sections only\):' \
         "scan timing summarized in the execution summary"
     sim_check
-    if grep -q '^TIMING|section=10' "$MANIFEST" 2>/dev/null &&
-       grep -q '^TIMING|section=11' "$MANIFEST" 2>/dev/null; then
+    if grep -q '^TIMING|section=9' "$MANIFEST" 2>/dev/null &&
+       grep -q '^TIMING|section=10' "$MANIFEST" 2>/dev/null; then
         sim_pass "scan timings recorded in the manifest"
     else
-        sim_fail "expected TIMING entries for sections 10 and 11 in the manifest"
+        sim_fail "expected TIMING entries for sections 9 and 10 in the manifest"
     fi
 
-    # All 25 sections should render, so a section that dies is not missed.
+    # All 24 sections should render, so a section that dies is not missed.
     sim_check
     _sections=`grep -cE '^[0-9]+\. ' "$REPORT" 2>/dev/null || echo 0`
-    if [ "$_sections" -ge 25 ]; then
+    if [ "$_sections" -ge 24 ]; then
         sim_pass "$_sections numbered sections rendered"
     else
-        sim_fail "only $_sections numbered sections rendered (expected >= 25)"
+        sim_fail "only $_sections numbered sections rendered (expected >= 24)"
     fi
 }
 

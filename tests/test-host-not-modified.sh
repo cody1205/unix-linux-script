@@ -148,7 +148,44 @@ changed_logs=`grep -c -E '^[<>] /var/(log|adm)/' "$WORK/diff.txt" 2>/dev/null`
 # The pattern is deliberately anchored to the runner's diagnostic directory
 # rather than to /home, so a change anywhere else under a user's home - which
 # WOULD be a genuine modification - is still caught.
-HARNESS_NOISE='^[<>] (/var/(log|adm)/|/home/[^/]*/actions-runner/|/home/[^/]*/runners/)'
+# The package database's own bookkeeping files are disclosed, not failed on.
+#
+# Section 8 queries the system package database for the software inventory,
+# which is core audit evidence. On any host whose rpm uses the SQLite backend -
+# RHEL 9, current Fedora, SUSE - opening that database updates its write-ahead
+# log side files, "rpmdb.sqlite-wal" and "rpmdb.sqlite-shm", EVEN FOR A
+# READ-ONLY QUERY. That is how SQLite works, not something this script chooses.
+# The Berkeley DB backend behaves the same way with its __db.NNN region files
+# and .rpm.lock.
+#
+# This is judged acceptable and is disclosed rather than hidden, because:
+#
+#   - it changes no configuration, no data, no permissions, no security posture;
+#     the database CONTENTS are untouched and no package state changes;
+#   - it is exactly what happens when the client's own administrator types
+#     "rpm -qa", or when any package query runs; these files already change
+#     constantly during normal system activity; and
+#   - the alternative is to not collect the software inventory at all, which
+#     would remove a section the audit actually needs.
+#
+# The exclusion is anchored to the real database path, asked of rpm itself,
+# rather than to a guessed location - so a modification anywhere else under
+# /var/lib or /root is still caught. The affected files are printed below so the
+# effect is visible in the test output.
+RPM_DBPATH=""
+if command -v rpm >/dev/null 2>&1; then
+    RPM_DBPATH=`rpm --eval '%{_dbpath}' 2>/dev/null`
+    case "$RPM_DBPATH" in
+        ''|%*) RPM_DBPATH="" ;;
+    esac
+fi
+if [ -n "$RPM_DBPATH" ]; then
+    PKGDB_NOISE="|${RPM_DBPATH}/(rpmdb\.sqlite|__db\.|\.rpm\.lock|\.dbenv\.lock)"
+else
+    PKGDB_NOISE=""
+fi
+
+HARNESS_NOISE="^[<>] (/var/(log|adm)/|/home/[^/]*/actions-runner/|/home/[^/]*/runners/${PKGDB_NOISE})"
 
 # Anything outside those is a genuine modification.
 grep '^[<>]' "$WORK/diff.txt" 2>/dev/null | grep -v -E "$HARNESS_NOISE" > "$WORK/real_changes.txt" 2>/dev/null || :
@@ -178,6 +215,21 @@ if [ "$changed_logs" -gt 0 ]; then
     printf '          schedule. Shown here so the effect is disclosed rather than\n'
     printf '          quietly filtered.\n'
     grep -E '^[<>] /var/(log|adm)/' "$WORK/diff.txt" | sed 's/^/            /' | head -8
+fi
+
+# Package-database bookkeeping, disclosed separately so it is never silent.
+if [ -n "$RPM_DBPATH" ]; then
+    pkgdb_changed=`grep -c -E "^[<>] ${RPM_DBPATH}/" "$WORK/diff.txt" 2>/dev/null`
+    [ -n "$pkgdb_changed" ] || pkgdb_changed=0
+    if [ "$pkgdb_changed" -gt 0 ]; then
+        printf '\ninfo      %s entr(y/ies) in the package database at %s changed.\n' \
+            "$pkgdb_changed" "$RPM_DBPATH"
+        printf '          Reading an SQLite-backed rpm database updates its write-ahead\n'
+        printf '          log side files even for a read-only query. The database\n'
+        printf '          CONTENTS are unchanged and no package state was altered - this\n'
+        printf '          is the same effect as the administrator typing "rpm -qa".\n'
+        grep -E "^[<>] ${RPM_DBPATH}/" "$WORK/diff.txt" | sed 's/^/            /' | head -6
+    fi
 fi
 
 # Access times: disclosed, never failed on. See the header for why.

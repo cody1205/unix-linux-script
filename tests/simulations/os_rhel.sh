@@ -574,7 +574,7 @@ EOF
 EOF
     # The finding that matters most: nightly-close.sh is executed by the
     # svc_deploy cron job in /etc/cron.d/finapp-batch AND is world-writable, so
-    # any account on the host can alter what that scheduled job runs. Section 10
+    # any account on the host can alter what that scheduled job runs. Section 9
     # must surface it so it can be cross-referenced against the cron evidence.
     chmod 0777 "$R/opt/finapp/bin/nightly-close.sh" 2>/dev/null || \
         { printf '#!/bin/bash\nexit 0\n' > "$R/opt/finapp/bin/nightly-close.sh"; chmod 0777 "$R/opt/finapp/bin/nightly-close.sh"; }
@@ -633,10 +633,10 @@ verify_os() {
         sim_fail "the drop-in was not copied into the evidence package"
     fi
 
-    # Enumeration boundary: this fixture is SSSD-joined, so Section 24's
+    # Enumeration boundary: this fixture is SSSD-joined, so Section 23's
     # population is local-only and must say so.
     assert_report_matches 'THIS HOST IS CONFIGURED TO USE A DIRECTORY' \
-        'Section 24 discloses that SSSD accounts are missing from the population'
+        'Section 23 discloses that SSSD accounts are missing from the population'
 
     assert_report_matches 'passwd: +sss files' 'SSSD detected as the identity source'
     assert_report_matches 'SSSD configuration present: yes' 'sssd.conf detected'
@@ -644,19 +644,29 @@ verify_os() {
     assert_report_matches 'krb5' 'Kerberos configuration captured'
     assert_report_matches '%domainadmins ALL=\(ALL\) NOPASSWD: ALL' 'break-glass sudo rule captured'
     assert_report_matches '^- wheel: jdoe,asmith' 'wheel group membership resolved'
-    assert_report_matches 'Command: rpm -qa' 'package inventory labelled with its command'
-    assert_report_matches 'sssd-ldap' 'RPM inventory content captured'
+    # The full package inventory was removed: a raw list of every installed
+    # package evidences no ITGC control objective, and carrying an exact
+    # version map of a production server into workpapers is a liability.
+    # Patch HISTORY remains, because timeliness of patching is testable.
+    assert_report_matches 'Command: rpm -qa --last' 'patch history labelled with its command'
+    assert_report_matches 'sssd-2\.9\.4' 'patch history content captured'
+    sim_check
+    if grep -q '^Command: rpm -qa$' "$REPORT" 2>/dev/null; then
+        sim_fail 'the removed full package inventory is still being collected'
+    else
+        sim_pass 'no full package inventory is collected'
+    fi
     assert_report_matches 'Command: ss -lntup' 'listener enumeration labelled'
     assert_report_matches 'PASS_MAX_DAYS   90' 'password aging policy captured'
     assert_report_matches 'Authorized key entries: 2' 'authorized_keys summarized not printed'
 
-    # Section 10: a world-writable script that a cron job executes is the finding
-    # this section exists for, and it must be cross-referenceable with Section 12.
+    # Section 9: a world-writable script that a cron job executes is the finding
+    # this section exists for, and it must be cross-referenceable with Section 11.
     assert_report_matches '/opt/finapp/bin/nightly-close\.sh' 'world-writable cron-executed script surfaced'
     assert_report_matches '/opt/finapp/logs' 'world-writable directory without sticky bit surfaced'
     assert_report_matches 'Sticky bit: present \(expected\)' 'sticky bit verified on shared temp directories'
     assert_report_matches 'Filesystem boundary: not crossed' 'scan limits disclosed in the report'
-    # Both filesystem-walking scans must disclose the boundary, not just Section 10.
+    # Both filesystem-walking scans must disclose the boundary, not just Section 9.
     sim_check
     _boundary_disclosures=`grep -c 'Filesystem boundary: not crossed' "$REPORT" 2>/dev/null`
     if [ "${_boundary_disclosures:-0}" -ge 2 ]; then

@@ -26,7 +26,7 @@ Each claim below is asserted by a test that fails the build.
 | **It changes nothing on the host** | Records mode, owner, size, mtime and ctime for ~100,000 paths before and after a real collection; requires zero difference | `test-host-not-modified.sh` |
 | **Nothing is transmitted** | Static audit for network-capable commands, `strace` syscall trace showing zero `AF_INET` sockets, and a full run inside a network namespace with no interfaces at all | `test-no-network-egress.sh` |
 | **No credentials leave the host** | Sentinel credentials planted and a real collection run against them; plus a content-based guard for hosts that store hashes in `/etc/passwd` | `test-no-credential-leak.sh`, `test-inline-passwd-hashes.sh` |
-| **Every source is accounted for** | Every path the report cites must be recorded in the manifest, and every delivered file must be explained — in both directions | `test-evidence-chain.sh` |
+| **Every source is accounted for** | Every path the report cites must be recorded in the manifest **and its contents delivered in `raw_files/`**, and every delivered file must be explained — in both directions | `test-evidence-chain.sh` |
 
 Three further properties matter for evidence quality rather than safety:
 
@@ -77,6 +77,44 @@ SOX-ITGC-AUDIT-LINUX-UNIX/
 The report says what the host is **configured to do**. The collection log
 answers a different question — *did this collection work, and is the evidence
 complete?*
+
+### If the report names a file, the file is in the package
+
+Every source path the report cites has its contents delivered under
+`raw_files/`, mirroring its path on the client system — `/etc/sudoers` arrives
+as `raw_files/etc/sudoers`. A reader should never encounter a file cited in the
+report and be unable to open it.
+
+There are exactly two exceptions, and both are recorded rather than silent:
+
+1. **Credential-bearing files are withheld**, and every one is listed in
+   `metadata/SENSITIVE_FILES_SKIPPED.txt`. Section 21 naming `/etc/shadow` and
+   delivering only its permissions and checksum is the intended behaviour.
+2. **Authentication logs are sampled, not copied.** Section 24 quotes the last
+   50 lines of the host's auth log in the report and records the source in the
+   manifest as `LOG_SAMPLED`. The file itself is deliberately not collected, in
+   full or in part: on a production server these routinely run to hundreds of
+   megabytes and record authentication activity for *every* user of the system,
+   the majority of it outside the audit's scope and none of it the auditors' to
+   be carrying off the client's server. What the section evidences is that
+   authentication logging was *operating* at the time of collection, and the
+   quoted lines show exactly that. The full log stays on the client's system and
+   can be requested if a sample raises a question.
+
+Each section heading also names its sources with the permissions, ownership, and
+last-modified date they had on the client system at the moment of collection:
+
+```
+File name and directory path on client server where the file that is
+referenced in the section below is from:
+Directory: /etc/sudoers
+File Ownership, Access Rights, Last Modified Date: -r--r----- 1 root root 1.7K Jun 27 2023 /etc/sudoers
+```
+
+The mode and ownership are themselves control evidence — who could have changed
+this file — and the modification date often matters more than the contents,
+because it establishes when the configuration last changed relative to the audit
+period.
 
 ### Receiving and opening the package
 
@@ -191,13 +229,13 @@ the report and manifest.
 | 11 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev` |
 | 23 — application directory listing | **unbounded**; only runs when `--app-dir` is given | not capped and not `-xdev`; the operator chooses the roots |
 
-Sections 10 and 11 are pruned to system binary, system configuration, and
+Sections 9 and 10 are pruned to system binary, system configuration, and
 application installation paths rather than scanning whole filesystems, and both
 use `find -xdev` so they cannot descend into NFS or SAN mounts and place load on
 a remote filer. Both state their scope and limits in the report, so a reviewer
 sees the bound on the evidence rather than assuming the population is complete.
 
-Section 23 is the one to watch on a large estate. It is opt-in, but when a root
+Section 22 is the one to watch on a large estate. It is opt-in, but when a root
 is supplied it recursively lists **every** file beneath it with no cap and without
 stopping at filesystem boundaries. That is intentional — the operator named the
 directory and the listing is the evidence — but it should be a considered choice.
@@ -209,7 +247,7 @@ Stated here rather than discovered during an engagement:
 - **`find -xdev` under-reports by design.** A separately mounted subdirectory
   beneath a scanned path is not traversed. The trade is deliberate — it prevents
   load on client network storage — and the boundary is disclosed in the report.
-- **Section 24 depends on name-service enumeration.** SSSD and winbind disable
+- **Section 23 depends on name-service enumeration.** SSSD and winbind disable
   enumeration by default while still resolving accounts by name, so on a
   directory-joined host the interactive-user list may be local accounts only. The
   script detects this case, says so in the report, and raises a `WARN`.
@@ -218,7 +256,7 @@ Stated here rather than discovered during an engagement:
   enough to have caught a real credential leak and a real account-modification
   bug, but **a dry run on client hardware before the engagement remains
   advisable.**
-- **Section 23 is unbounded** when used. See the table above.
+- **Section 22 is unbounded** when used. See the table above.
 
 ## Tests
 

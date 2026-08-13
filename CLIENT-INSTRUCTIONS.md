@@ -32,7 +32,7 @@ form that changes state.
 
 | | |
 |---|---|
-| **Writes** | Only inside the `--output-dir` you choose, plus the archive in that same directory. Nothing in `/tmp`, nothing in any system path. |
+| **Writes** | Only inside the `--output-dir` you choose, plus the archive in that same directory. Nothing in `/tmp`, nothing in any system path. One disclosed exception below. |
 | **Sends** | Nothing. No network connections, no sockets, no outbound anything. |
 | **Reads** | OS configuration relevant to access control. No user data, no application data, no databases. |
 | **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets. |
@@ -46,6 +46,16 @@ Two details worth knowing before you run it:
   contents. Every file treated this way is listed in
   `metadata/SENSITIVE_FILES_SKIPPED.txt` in the output, so you can confirm
   exactly what was withheld.
+- **One side effect, disclosed rather than left to be discovered.** Asking your
+  package manager for patch and update history (Section 17) opens its
+  database. An SQLite-backed `rpm` database — RHEL 9, current Fedora, SUSE —
+  updates its own write-ahead log files, `rpmdb.sqlite-wal` and
+  `rpmdb.sqlite-shm`, whenever it is opened, **even for a read-only query**.
+  That is how SQLite works, not something this script chooses. The database
+  contents are untouched and no package state changes; it is identical to what
+  happens when you run `rpm -qa` yourself. **If your file integrity monitoring
+  watches `/var/lib/rpm`, it will see those two files' timestamps move.**
+  Nothing else on the system is written to.
 - **Two sections walk the filesystem** and account for nearly all the runtime: a
   scan for world-writable files and one for SetUID/SetGID binaries. Both are
   limited to system and application directories rather than whole filesystems,
