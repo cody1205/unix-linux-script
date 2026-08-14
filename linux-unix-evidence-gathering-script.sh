@@ -1169,6 +1169,17 @@ copy_file_to_collection() {
     fi
 
     if is_sensitive_path "$file_path"; then
+        # Recorded in the MANIFEST as well as in the skip list.
+        #
+        # The manifest is the chain-of-custody document, and a file the
+        # collection deliberately withheld belongs in it. Without this line a
+        # file stopped here appeared ONLY in SENSITIVE_FILES_SKIPPED.txt - which
+        # meant /etc/shadow, the single most sensitive file this tool handles,
+        # was cited in the report with its permissions and checksum and had no
+        # manifest entry at all. Files withheld through the other path
+        # (print_sensitive_file_review) were recorded properly, so the two
+        # routes disagreed and the more sensitive one was the one missing.
+        record_reference_outcome "SENSITIVE_METADATA_ONLY" "$file_path" ""
         record_sensitive_skip "$file_path"
         return
     fi
@@ -1385,7 +1396,22 @@ print_sensitive_file_review() {
             ;;
     esac
 
-    record_manifest_line "SENSITIVE_METADATA_ONLY|$file_path"
+    # A path that does not exist was not "withheld" - there was nothing to
+    # withhold. Recording it as withheld overstates what the collection touched,
+    # and it lands in the one file the client is specifically told to check in
+    # order to confirm what was held back. On a host with no SSSD, listing
+    # /etc/sssd/sssd.conf as a withheld credential file invites the reasonable
+    # question of why we are reporting on a file they do not have - and the
+    # manifest simultaneously recorded it as EXAMINED_ABSENT, so the package
+    # contradicted itself.
+    #
+    # Absent paths are already accounted for as EXAMINED_ABSENT by
+    # record_file_reference; nothing is lost from the chain by staying quiet here.
+    if ! path_exists "$file_path"; then
+        return
+    fi
+
+    record_reference_outcome "SENSITIVE_METADATA_ONLY" "$file_path" ""
     # Also record it in the skip file. A file reviewed through this path is
     # withheld just as deliberately as one stopped in copy_file_to_collection,
     # and the client is directed to SENSITIVE_FILES_SKIPPED.txt to confirm what

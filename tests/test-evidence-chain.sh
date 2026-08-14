@@ -232,10 +232,60 @@ else
     printf '            A reader of the report cannot see what these contained.\n'
 fi
 
+printf '\n== 3c. withheld files reach the MANIFEST, and absent ones are not claimed ==\n'
+# Two directions, both found by review rather than by an earlier test.
+#
+# A file the collection deliberately withheld belongs in the manifest, because
+# the manifest is the chain-of-custody document. /etc/shadow - the single most
+# sensitive file this tool handles - was previously recorded ONLY in
+# SENSITIVE_FILES_SKIPPED.txt: cited in the report with its permissions and
+# checksum, and absent from the manifest entirely.
+#
+# The opposite error is just as bad for the client conversation: a path that does
+# not exist was never withheld, and listing it in the file the client is told to
+# check in order to confirm what was held back invites a reasonable question
+# about why we are reporting on a file they do not have.
+checks=`expr $checks + 1`
+: > "$WORK/skip_not_in_manifest.txt"
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    # The redacted-passwd entry carries explanatory text after the path.
+    _p=`printf '%s' "$p" | sed 's/ (field 2 only.*//'`
+    grep -Fq "$_p" "$MANIFEST" 2>/dev/null || printf '%s\n' "$_p" >> "$WORK/skip_not_in_manifest.txt"
+done < "$SKIPPED"
+_n=`grep -c . "$WORK/skip_not_in_manifest.txt" 2>/dev/null`; [ -n "$_n" ] || _n=0
+if [ "$_n" -eq 0 ]; then
+    pass "every withheld file is recorded in the manifest, not only in the skip list"
+else
+    fail "$_n withheld file(s) are missing from the manifest entirely:"
+    sed 's/^/            /' "$WORK/skip_not_in_manifest.txt" | head -10
+fi
+
+checks=`expr $checks + 1`
+: > "$WORK/phantom_skips.txt"
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    _p=`printf '%s' "$p" | sed 's/ (field 2 only.*//'`
+    case "$_p" in
+        /*) [ -e "$_p" ] || printf '%s\n' "$_p" >> "$WORK/phantom_skips.txt" ;;
+    esac
+done < "$SKIPPED"
+_n=`grep -c . "$WORK/phantom_skips.txt" 2>/dev/null`; [ -n "$_n" ] || _n=0
+if [ "$_n" -eq 0 ]; then
+    pass "nothing is reported as withheld that does not exist on this host"
+else
+    fail "$_n path(s) are reported as withheld but do not exist here:"
+    sed 's/^/            /' "$WORK/phantom_skips.txt" | head -10
+    printf '            Reporting these overstates what the collection touched.\n'
+fi
+
 printf '\n== 4. withheld files appear in BOTH records of that decision ==\n'
 checks=`expr $checks + 1`
 : > "$WORK/onesided.txt"
-sed -n 's/^SENSITIVE_METADATA_ONLY|//p' "$MANIFEST" | sort -u > "$WORK/sens_manifest.txt"
+# Both writers now go through record_reference_outcome, which terminates the
+# line with the field separator, so the path is field 1 rather than the whole
+# remainder. Cutting the field keeps this correct whichever verb wrote it.
+sed -n 's/^SENSITIVE_METADATA_ONLY|//p' "$MANIFEST" | cut -d'|' -f1 | sort -u > "$WORK/sens_manifest.txt"
 while IFS= read -r p; do
     [ -n "$p" ] || continue
     grep -Fq "$p" "$SKIPPED" || printf 'in manifest but not in SENSITIVE_FILES_SKIPPED.txt: %s\n' "$p" >> "$WORK/onesided.txt"
