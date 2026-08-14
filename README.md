@@ -13,10 +13,32 @@ makes no configuration changes to the host.
 is the page to send to their system administrator — self-contained, and written
 to answer their questions rather than ours.
 
-## Building a release for a client
+## Delivering the tool to a client
+
+Two supported methods. Both deliver the identical artifact — the difference is
+only in how it reaches the client's server.
+
+| | Method 1 — Send the bundle | Method 2 — Publish a tagged release |
+| --- | --- | --- |
+| Client server needs internet | No | **Yes** |
+| How it arrives | You send a file; their admin moves it onto the host | Their admin downloads it on the host |
+| Version pinned | Yes | Yes |
+| Works on an air-gapped host | Yes | No |
+
+**Method 1 is the default.** Method 2 is a convenience for clients whose servers
+have outbound internet, and is worth setting up alongside — it costs one command
+once the bundle exists, and gives a fixed URL you can point several engagement
+teams at. Neither replaces the other: publish a release *and* keep the file to
+hand, because you will meet hosts with no egress.
+
+Both start by building the bundle.
+
+---
+
+## Building the bundle
 
 **Run this on your own machine, in a terminal — never on the client's server.**
-You build the bundle here, then send the file.
+You build the bundle here, then deliver it by whichever method suits the client.
 
 First time:
 
@@ -48,7 +70,11 @@ Which terminal:
 | Linux | Any terminal. Works as-is. |
 | Windows | **Git Bash** (ships with Git for Windows) or **WSL**. PowerShell and CMD will not work — they have no `sh`, `tar`, or `sha256sum`. |
 
-Confirm the bundle is right before sending it:
+The build prints two checksums and produces
+`dist/sox-itgc-collector-v1.0.tar.gz`, containing the collector at mode `0755`
+and `CLIENT-INSTRUCTIONS.md` at `0644`.
+
+Confirm the bundle is right before it goes anywhere:
 
 ```sh
 tar tzvf dist/sox-itgc-collector-v1.0.tar.gz
@@ -56,40 +82,119 @@ tar tzvf dist/sox-itgc-collector-v1.0.tar.gz
 
 The script must show `-rwxr-xr-x`. That executable bit is what lets the client
 run `./linux-unix-evidence-gathering-script.sh` without a `chmod`, and is the
-entire reason for shipping a bundle rather than a bare file.
-
-### What the builder does
-
-```sh
-sh tools/make-release.sh v1.0
-```
-
-Produces `dist/sox-itgc-collector-v1.0.tar.gz` containing the collector at mode
-`0755` and `CLIENT-INSTRUCTIONS.md` at `0644`, and prints two checksums: one for
-the bundle, and one for the collector inside it.
-
-A tarball is used rather than sending the `.sh` directly because **the execute
-bit only survives transports that store POSIX file modes.** Email, SharePoint,
-and HTTP downloads all deliver a script as `0644`. `tar` records the mode, so
-the client extracts a file that is already executable and runs
-`sudo ./linux-unix-evidence-gathering-script.sh` with no `chmod` step. It also
-gives the engagement a single checksum covering the script *and* the
-instructions, and a version number citable in workpapers — which is what stops a
-stale copy circulating unnoticed.
-
-Send the bundle by your usual secure file transfer and **the checksum
-separately** — a different email, or by phone. Sending both together proves
-nothing, since anyone able to alter one in transit could alter the other. The
-client's server needs no internet access at any point: their administrator moves
-the file onto it by whatever path they already use.
-
-The collector checksum printed by the build is the same value the report records
-as `Collector Script Checksum`, so a returned evidence package can be tied back
-to the exact release that produced it.
+entire reason for shipping a bundle rather than a bare file: **the execute bit
+only survives transports that store POSIX file modes.** Email, SharePoint, and
+HTTP downloads all deliver a bare script as `0644`.
 
 The builder refuses to package a script that contains carriage returns or does
 not parse — the last point at which either can be caught before it becomes a
 client's problem.
+
+---
+
+## Method 1 — Send the bundle directly
+
+The default. Works everywhere, including hosts with no internet access at all.
+
+**Step 1 — build it** (see above), then note the two checksums it prints.
+
+**Step 2 — send the bundle** by your firm's usual secure file transfer, or as an
+email attachment if permitted.
+
+**Step 3 — send the checksum separately.** A different email, or by phone.
+Sending the file and its checksum together proves nothing: anyone able to alter
+one in transit could alter the other.
+
+**Step 4 — their administrator moves it onto the server**, by whatever path they
+already use for that host: `scp` from their workstation, an internal file share
+already mounted, a jump host, or removable media on an air-gapped estate. This is
+routine for them — they already log into that server as root to run the script.
+
+**Step 5 — they verify, unpack, and run:**
+
+```sh
+sha256sum sox-itgc-collector-v1.0.tar.gz     # must match what you sent separately
+tar xzf sox-itgc-collector-v1.0.tar.gz
+sudo ./linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
+```
+
+**Advantages**
+
+- Works on every host, including air-gapped and no-egress production systems.
+- The client's server makes no outbound connection at any point, which is
+  consistent with the tool's own guarantee that it contacts nothing.
+- One checksum covers the script *and* the instructions.
+- Nothing to configure, publish, or maintain.
+
+**Limitations**
+
+- A person has to move the file, so delivery is a manual step per engagement.
+- Some mail gateways strip or quarantine `.tar.gz` attachments; if that happens,
+  your firm's secure file transfer is the fallback.
+- Each engagement team needs its own copy of the bundle, so a superseded version
+  can stay in circulation unless you re-issue it.
+
+---
+
+## Method 2 — Publish a tagged release
+
+The same bundle, published once at a fixed URL. Suits clients whose servers have
+outbound internet, and gives several engagement teams one place to fetch from.
+
+**Step 1 — build the bundle** (see above).
+
+**Step 2 — publish it as a release:**
+
+```sh
+gh release create v1.0 dist/sox-itgc-collector-v1.0.tar.gz \
+    --title "SOX ITGC collector v1.0" \
+    --notes "Collector SHA-256: <paste the collector checksum from the build>"
+```
+
+Putting the collector checksum in the release notes matters: it is the value the
+report records as `Collector Script Checksum`, so anyone holding a returned
+evidence package can tie it back to this release without asking you.
+
+**Step 3 — send the client the URL and the bundle checksum**, the checksum
+separately as in Method 1.
+
+**Step 4 — they download, verify, unpack, and run:**
+
+```sh
+curl -LO https://github.com/cody1205/unix-linux-script/releases/download/v1.0/sox-itgc-collector-v1.0.tar.gz
+sha256sum sox-itgc-collector-v1.0.tar.gz     # must match what you sent separately
+tar xzf sox-itgc-collector-v1.0.tar.gz
+sudo ./linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
+```
+
+**Advantages**
+
+- One fixed, versioned URL that several engagement teams can be pointed at, so a
+  superseded copy is less likely to stay in circulation.
+- The version is citable in workpapers, and the release notes carry the collector
+  checksum alongside it.
+- Unlike cloning the repository, it hands over only the artifact — not the commit
+  history, the test suite, or the development record.
+- No manual file handling once published.
+
+**Limitations**
+
+- **The client's server must reach `github.com` over HTTPS.** Many hardened
+  production hosts have no outbound internet, and this is the common case in the
+  estates these audits cover.
+- It requires the repository to remain reachable to the client. If it is ever
+  made private, published links stop working for them.
+- Publishing is an outward-facing action: once a release is public, the artifact
+  and its version number are public too.
+
+---
+
+## After delivery, either way
+
+The collector checksum printed at build time is the same value the report records
+as `Collector Script Checksum`, so a returned evidence package can be tied back
+to the exact release that produced it. See *Which version of the collector
+produced this package?* below.
 
 ---
 
