@@ -112,6 +112,53 @@ assert_collectable /etc/nsswitch.conf
 assert_collectable /etc/syslog.conf
 assert_collectable /etc/inittab
 
+printf '\n== classify_source_file: one outcome per file, and the right one ==\n'
+# Three routes used to decide independently what happened to a source file, and
+# they disagreed three times - most subtly by recording a file as BOTH
+# "could not be read" and "deliberately withheld". They now share
+# classify_source_file, so a contradiction is impossible by construction; what
+# still needs asserting is that the single answer it gives is the CORRECT one.
+#
+# The ordering property is the one that matters: for a credential file the
+# contents were never going to be delivered, so being unable to read them
+# changes nothing about the package. It must classify as withheld, not as an
+# evidence gap.
+sed -n '/^path_exists()/,/^}/p'          "$COLLECTOR" >  "$WORK/cls.sh"
+sed -n '/^classify_source_file()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
+# shellcheck source=/dev/null
+. "$WORK/cls.sh"
+
+assert_class() {
+    checked=`expr $checked + 1`
+    _got=`classify_source_file "$2"`
+    if [ "$_got" = "$3" ]; then
+        printf 'ok        %s -> %s\n' "$1" "$_got"
+    else
+        printf 'NOT OK    %s: expected %s, got %s\n' "$1" "$3" "$_got"
+        failures=`expr $failures + 1`
+    fi
+}
+
+printf 'plain\n' > "$WORK/normal.conf"
+printf 'key\n'   > "$WORK/server.key"      # matches the *.key sensitive rule
+
+assert_class "absent path"                    "$WORK/nothing-here"  absent
+assert_class "ordinary readable file"         "$WORK/normal.conf"   collectable
+assert_class "credential file, readable"      "$WORK/server.key"    withheld
+
+# Root can read anything, so the unreadable cases only mean something when the
+# test is not running as root. Skipped loudly rather than silently passing.
+if [ "`id -u`" = "0" ]; then
+    printf 'SKIP      unreadable cases need a non-root run (root bypasses mode bits)\n'
+else
+    chmod 000 "$WORK/normal.conf" "$WORK/server.key"
+    assert_class "ordinary file, unreadable"      "$WORK/normal.conf"   unreadable
+    assert_class "credential file, UNREADABLE"    "$WORK/server.key"    withheld
+    printf '          ^ the ordering property: withheld outranks unreadable, so a\n'
+    printf '            credential file is never reported as an evidence gap\n'
+    chmod 644 "$WORK/normal.conf" "$WORK/server.key"
+fi
+
 printf '\n-----------------------------------------------\n'
 printf 'assertions: %s   failures: %s\n' "$checked" "$failures"
 if [ "$failures" -ne 0 ]; then

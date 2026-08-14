@@ -279,6 +279,37 @@ else
     printf '            Reporting these overstates what the collection touched.\n'
 fi
 
+printf '\n== 3d. no path carries two contradictory outcomes ==\n'
+# Generalised from three specific defects, each a different pair of records
+# disagreeing about the same file: withheld-but-absent-from-the-manifest,
+# absent-but-reported-as-withheld, and unreadable-AND-withheld-simultaneously.
+#
+# Rather than pin the three known pairs, this asserts the underlying property:
+# a path gets exactly ONE outcome. Anything else means two code paths reached
+# different conclusions about the same file, which is the shape all three
+# defects had, and is what a reviewer of the package would trip over.
+checks=`expr $checks + 1`
+: > "$WORK/contradictions.txt"
+sed -n -e 's/^\(COPIED\)|\([^|]*\).*/\2 \1/p' \
+       -e 's/^\(COPIED_REDACTED\)|\([^|]*\).*/\2 \1/p' \
+       -e 's/^\(SENSITIVE_METADATA_ONLY\)|\([^|]*\).*/\2 \1/p' \
+       -e 's/^\(EXAMINED_ABSENT\)|\([^|]*\).*/\2 \1/p' \
+       -e 's/^\(EXAMINED_UNREADABLE\)|\([^|]*\).*/\2 \1/p' \
+       "$MANIFEST" | sort -u > "$WORK/outcomes.txt"
+# Any path appearing with more than one distinct verb.
+awk '{ count[$1]++; verbs[$1] = verbs[$1] " " $2 }
+     END { for (p in count) if (count[p] > 1) print p ":" verbs[p] }' \
+    "$WORK/outcomes.txt" > "$WORK/contradictions.txt"
+_n=`grep -c . "$WORK/contradictions.txt" 2>/dev/null`; [ -n "$_n" ] || _n=0
+if [ "$_n" -eq 0 ]; then
+    pass "every path has exactly one outcome (`grep -c . "$WORK/outcomes.txt"` recorded)"
+else
+    fail "$_n path(s) carry contradictory outcomes:"
+    sed 's/^/            /' "$WORK/contradictions.txt" | head -10
+    printf '            Two code paths reached different conclusions about the\n'
+    printf '            same file, so the package disagrees with itself.\n'
+fi
+
 printf '\n== 4. withheld files appear in BOTH records of that decision ==\n'
 checks=`expr $checks + 1`
 : > "$WORK/onesided.txt"
