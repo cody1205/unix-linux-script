@@ -86,6 +86,22 @@ chmod 0644 "$STAGE/$INSTRUCTIONS"
 
 mkdir -p "$OUTDIR" || { printf 'FAIL: cannot create %s\n' "$OUTDIR" >&2; exit 1; }
 
+# Resolve the output directory to an absolute path.
+#
+# Both the build and the self-verification below run inside "cd" subshells, so a
+# RELATIVE output directory would be resolved against the staging directory
+# rather than against the directory the operator is standing in. The build then
+# fails with a partial write and a tar error, which is a confusing way to learn
+# that "sh tools/make-release.sh v1.0 mydir" is not supported.
+#
+# This is the same defect class as the relative-path bug found in
+# tools/verify-package.sh: a path taken from the caller, used after a directory
+# change, without being anchored first.
+OUTDIR=`CDPATH= cd -- "$OUTDIR" && pwd` || {
+    printf 'FAIL: cannot resolve output directory\n' >&2
+    exit 1
+}
+
 # -C so the archive holds bare filenames rather than a staging path. The client
 # extracts two files into the directory they are standing in, with no surprise
 # nesting.

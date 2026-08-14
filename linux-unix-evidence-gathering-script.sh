@@ -1077,6 +1077,54 @@ finalize_collection_log() {
 # overrides the main SSH configuration - and an empty /etc/sudoers.d likewise
 # establishes that no supplementary sudo rules exist. Recording the directory
 # and its file count preserves that finding.
+# ONE place that decides what happened to a source file.
+#
+# Three separate routes used to answer this question independently -
+# record_file_reference, copy_file_to_collection, and print_sensitive_file_review
+# - and they disagreed three times: a withheld file missing from the manifest, an
+# absent file reported as withheld, and finally a file recorded as BOTH
+# "could not be read" and "deliberately withheld" in the same package. Each fix
+# addressed one symptom of the same cause, which is the policy being expressed
+# in three places. It is now expressed here, once.
+#
+#   absent       nothing to collect and nothing to withhold
+#   withheld     a credential-bearing file: metadata only, contents never taken
+#   unreadable   exists, is not credential-bearing, and could not be read -
+#                the only one of the four that is a genuine evidence gap
+#   collectable  a normal file or directory
+#
+# WHY "withheld" OUTRANKS "unreadable", which is the case Codex identified:
+# for a credential file the outcome is identical either way. Its contents were
+# never going to be delivered, so failing to read them changes nothing about
+# what the package contains. Reporting it as an evidence gap would imply
+# something was lost that we would otherwise have had, and would contradict the
+# withheld record for the same path.
+classify_source_file() {
+    _cls_path=$1
+
+    if ! path_exists "$_cls_path"; then
+        printf 'absent'
+        return
+    fi
+    if is_sensitive_path "$_cls_path"; then
+        printf 'withheld'
+        return
+    fi
+    if [ -f "$_cls_path" ] && ! [ -r "$_cls_path" ]; then
+        printf 'unreadable'
+        return
+    fi
+    printf 'collectable'
+}
+
+# The single record of a deliberate withholding: manifest and skip list together,
+# never one without the other. Both are deduplicated, so a file reached through
+# several sections is recorded once.
+record_withheld_file() {
+    record_reference_outcome "SENSITIVE_METADATA_ONLY" "$1" ""
+    record_sensitive_skip "$1"
+}
+
 record_file_reference() {
     ref_path=${1%/}
     if [ -z "$ref_path" ]; then
@@ -1084,12 +1132,18 @@ record_file_reference() {
     fi
 
     if [ -f "$ref_path" ]; then
-        if [ -r "$ref_path" ]; then
-            copy_file_to_collection "$ref_path"
-        else
-            record_reference_outcome "EXAMINED_UNREADABLE" "$ref_path" ""
-            log_event WARN evidence "$ref_path exists but could not be read; it is referenced by the report and is missing from the evidence package"
-        fi
+        case `classify_source_file "$ref_path"` in
+            withheld)
+                record_withheld_file "$ref_path"
+                ;;
+            unreadable)
+                record_reference_outcome "EXAMINED_UNREADABLE" "$ref_path" ""
+                log_event WARN evidence "$ref_path exists but could not be read; it is referenced by the report and is missing from the evidence package"
+                ;;
+            *)
+                copy_file_to_collection "$ref_path"
+                ;;
+        esac
     elif [ -d "$ref_path" ]; then
         _ref_count=0
         for ref_entry in "$ref_path"/*; do
@@ -1164,12 +1218,27 @@ copy_file_to_collection() {
         return
     fi
 
-    if ! [ -f "$file_path" ] || ! [ -r "$file_path" ]; then
+    # The sensitive check comes BEFORE the readability check. With the order
+    # reversed, an unreadable credential file returned here silently and was
+    # never recorded as withheld at all - so /etc/shadow on a non-root run
+    # produced an empty skip list, in the very file the client is told to
+    # consult to confirm what was held back.
+    if [ -f "$file_path" ] && is_sensitive_path "$file_path"; then
+        # Recorded in the MANIFEST as well as in the skip list.
+        #
+        # The manifest is the chain-of-custody document, and a file the
+        # collection deliberately withheld belongs in it. Without this line a
+        # file stopped here appeared ONLY in SENSITIVE_FILES_SKIPPED.txt - which
+        # meant /etc/shadow, the single most sensitive file this tool handles,
+        # was cited in the report with its permissions and checksum and had no
+        # manifest entry at all. Files withheld through the other path
+        # (print_sensitive_file_review) were recorded properly, so the two
+        # routes disagreed and the more sensitive one was the one missing.
+        record_withheld_file "$file_path"
         return
     fi
 
-    if is_sensitive_path "$file_path"; then
-        record_sensitive_skip "$file_path"
+    if ! [ -f "$file_path" ] || ! [ -r "$file_path" ]; then
         return
     fi
 
@@ -1385,12 +1454,23 @@ print_sensitive_file_review() {
             ;;
     esac
 
-    record_manifest_line "SENSITIVE_METADATA_ONLY|$file_path"
-    # Also record it in the skip file. A file reviewed through this path is
-    # withheld just as deliberately as one stopped in copy_file_to_collection,
-    # and the client is directed to SENSITIVE_FILES_SKIPPED.txt to confirm what
-    # was withheld - so it has to be listed there too.
-    record_sensitive_skip "$file_path"
+    # A path that does not exist was not "withheld" - there was nothing to
+    # withhold. Recording it as withheld overstates what the collection touched,
+    # and it lands in the one file the client is specifically told to check in
+    # order to confirm what was held back. On a host with no SSSD, listing
+    # /etc/sssd/sssd.conf as a withheld credential file invites the reasonable
+    # question of why we are reporting on a file they do not have - and the
+    # manifest simultaneously recorded it as EXAMINED_ABSENT, so the package
+    # contradicted itself.
+    #
+    # Absent paths are already accounted for as EXAMINED_ABSENT by
+    # record_file_reference; nothing is lost from the chain by staying quiet here.
+    # Same classifier as every other route, so this cannot drift from them again.
+    # Only a path that genuinely exists is recorded as withheld: an absent file
+    # was never withheld, and saying otherwise overstates what was touched.
+    if [ "`classify_source_file "$file_path"`" = "withheld" ]; then
+        record_withheld_file "$file_path"
+    fi
 }
 
 # Full-file evidence handling:
