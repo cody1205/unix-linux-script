@@ -15,6 +15,51 @@ to answer their questions rather than ours.
 
 ## Building a release for a client
 
+**Run this on your own machine, in a terminal — never on the client's server.**
+You build the bundle here, then send the file.
+
+First time:
+
+```sh
+git clone https://github.com/cody1205/unix-linux-script.git
+cd unix-linux-script
+sh tools/make-release.sh v1.0
+ls dist/
+```
+
+Every time after that:
+
+```sh
+cd unix-linux-script
+git pull                          # build the current version, not a stale clone
+sh tools/make-release.sh v1.1     # bump the version each release
+```
+
+**The `git pull` is not optional.** Building from a stale clone is exactly how a
+three-month-old script ends up on a client host, and the symptoms of that are
+confusing enough to cost an afternoon — see *Which version of the collector
+produced this package?* below.
+
+Which terminal:
+
+| Your machine | What to use |
+| --- | --- |
+| macOS | Terminal (Applications → Utilities). Works as-is. |
+| Linux | Any terminal. Works as-is. |
+| Windows | **Git Bash** (ships with Git for Windows) or **WSL**. PowerShell and CMD will not work — they have no `sh`, `tar`, or `sha256sum`. |
+
+Confirm the bundle is right before sending it:
+
+```sh
+tar tzvf dist/sox-itgc-collector-v1.0.tar.gz
+```
+
+The script must show `-rwxr-xr-x`. That executable bit is what lets the client
+run `./linux-unix-evidence-gathering-script.sh` without a `chmod`, and is the
+entire reason for shipping a bundle rather than a bare file.
+
+### What the builder does
+
 ```sh
 sh tools/make-release.sh v1.0
 ```
