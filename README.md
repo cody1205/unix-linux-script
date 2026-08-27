@@ -18,6 +18,11 @@ to answer their questions rather than ours.
 auditor with no Unix background through the entire process, one step at a time
 — building the bundle, the two emails, the client's run, and verifying the
 evidence archive that comes back. Start there; everything below is reference.
+The same guide exists as a Word document,
+[`docs/ENGAGEMENT-TEAM-GUIDE.docx`](docs/ENGAGEMENT-TEAM-GUIDE.docx), for
+circulating inside the practice. The Markdown version is the source of truth:
+a change to the guide edits the `.md` and regenerates the `.docx` in the same
+pull request, so the two never disagree.
 
 ## Delivering the tool to a client
 
