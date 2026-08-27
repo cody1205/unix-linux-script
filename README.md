@@ -13,6 +13,12 @@ makes no configuration changes to the host.
 is the page to send to their system administrator — self-contained, and written
 to answer their questions rather than ours.
 
+**New to this tool, and on an engagement that needs it?**
+[`docs/ENGAGEMENT-TEAM-GUIDE.md`](docs/ENGAGEMENT-TEAM-GUIDE.md) walks an
+auditor with no Unix background through the entire process, one step at a time
+— building the bundle, the two emails, the client's run, and verifying the
+evidence archive that comes back. Start there; everything below is reference.
+
 ## Delivering the tool to a client
 
 Two supported methods. Both deliver the identical artifact — the difference is
