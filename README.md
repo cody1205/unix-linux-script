@@ -31,6 +31,14 @@ once the bundle exists, and gives a fixed URL you can point several engagement
 teams at. Neither replaces the other: publish a release *and* keep the file to
 hand, because you will meet hosts with no egress.
 
+> **Before migrating this project to a corporate GitHub repository**, read
+> [`docs/MIGRATION-SMOKE-TEST.md`](docs/MIGRATION-SMOKE-TEST.md). Method 2
+> depends on the client being able to reach the repository, which a private
+> corporate repo will not allow — and building releases in CI depends on
+> Actions, runners, and tag permissions that corporate policy may restrict. That
+> page covers what to verify, and how to test it rather than take an answer on
+> trust.
+
 Both start by building the bundle.
 
 ---
