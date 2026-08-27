@@ -39,6 +39,11 @@ hand, because you will meet hosts with no egress.
 > page covers what to verify, and how to test it rather than take an answer on
 > trust.
 
+The emails that accompany a delivery — the introduction sent ahead of fieldwork
+and the separate checksum message — are templated in
+[`docs/EMAIL-TEMPLATES.md`](docs/EMAIL-TEMPLATES.md), so every engagement sends
+the same, current wording rather than a forwarded copy of an old one.
+
 Both start by building the bundle.
 
 ---
