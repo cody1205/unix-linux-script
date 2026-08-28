@@ -58,8 +58,23 @@ done
 # than useless.
 if grep -qU "`printf '\r'`" "$REPO_ROOT/$COLLECTOR" 2>/dev/null; then
     printf 'FAIL: %s contains carriage returns (CRLF line endings).\n' "$COLLECTOR" >&2
-    printf '      It would fail on the client host with errors naming lines that\n' >&2
-    printf '      look perfectly ordinary. Repair it before releasing:\n' >&2
+    printf '      A bundle built from it would fail on the client host with errors\n' >&2
+    printf '      naming lines that look perfectly ordinary when opened.\n' >&2
+    printf '\n' >&2
+    printf '      IF YOU ARE ON WINDOWS, this is almost certainly the cause, and\n' >&2
+    printf '      the repository itself is fine: Git for Windows defaults to\n' >&2
+    printf '      core.autocrlf=true and rewrote the file when it checked it out.\n' >&2
+    printf '      The durable fix is already in the repository - a .gitattributes\n' >&2
+    printf '      that pins LF - so update and refresh this working copy:\n' >&2
+    printf '\n' >&2
+    printf '          git pull\n' >&2
+    printf '          git rm --cached -r .\n' >&2
+    printf '          git reset --hard\n' >&2
+    printf '\n' >&2
+    printf '      A fresh clone works too, and needs no Git settings changed.\n' >&2
+    printf '\n' >&2
+    printf '      IF YOU ARE NOT ON WINDOWS, the file was damaged in transfer.\n' >&2
+    printf '      Repair it, then confirm it still matches its published checksum:\n' >&2
     printf '          tr -d "\\r" < %s > f && mv f %s\n' "$COLLECTOR" "$COLLECTOR" >&2
     exit 1
 fi

@@ -93,9 +93,18 @@ Three things in it matter to you:
 can tell them apart. You will need the first one in Step 4 and the second in
 Step 8.
 
-If the build prints `FAIL` instead, stop and contact the tool owner — the
-build checks itself and refuses to package a broken script, and a failure here
-means something needs fixing before anything goes to a client.
+If the build prints `FAIL` instead, it has refused to package something that
+would not have worked on the client's server. Read which failure it is:
+
+- **`contains carriage returns`** — the common one on a Windows laptop, and it
+  is self-service. Windows and Unix mark the end of a line differently, and Git
+  may have converted the file when it copied it to your machine. The message
+  prints the three commands that fix it; run them and build again. Nothing is
+  wrong with the script or your copy of it.
+- **Anything else** — stop and contact the tool owner.
+
+Either way the guard did its job: the build refuses to produce a bundle it
+cannot stand behind, which is much better than a client discovering it.
 
 ---
 

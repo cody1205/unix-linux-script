@@ -1,0 +1,29 @@
+# Line endings: LF everywhere, including on Windows checkouts.
+#
+# WHY THIS FILE EXISTS
+# Git for Windows installs with core.autocrlf=true by default, which rewrites
+# every text file to CRLF as it is checked out. The repository content is fine -
+# it is stored with LF - but the working tree on a Windows laptop is not, and
+# the collector is a shell script destined for a Unix host. A bundle built from
+# such a checkout would reach a client as a CRLF script and fail there with
+# errors naming lines that look perfectly ordinary when opened.
+#
+# tools/make-release.sh refuses to package a script containing carriage returns,
+# so this was caught rather than shipped. But the guard fired on every build
+# attempt from a Windows machine, and the repair it suggests - stripping the
+# carriage returns by hand - does not survive the next checkout. This file is
+# the fix that does: "eol=lf" takes precedence over core.autocrlf, so a Windows
+# clone gets LF without anyone having to change a global Git setting.
+#
+# Note that make-release.sh and the test suite are themselves shell scripts, so
+# a CRLF checkout breaks the tooling as well as the payload.
+* text=auto eol=lf
+
+# Binary files, declared rather than left to content detection. A .docx is a ZIP
+# archive; any line-ending translation applied to it produces a file Word will
+# not open.
+*.docx binary
+*.tar.gz binary
+*.gz binary
+*.png binary
+*.jpg binary
