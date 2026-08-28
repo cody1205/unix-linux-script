@@ -94,6 +94,15 @@ Which terminal:
 | Linux | Any terminal. Works as-is. |
 | Windows | **Git Bash** (ships with Git for Windows) or **WSL**. PowerShell and CMD will not work — they have no `sh`, `tar`, or `sha256sum`. |
 
+> **Windows checkouts and line endings.** Git for Windows defaults to
+> `core.autocrlf=true`, which would rewrite the collector to CRLF as it checks
+> it out and make every build fail the carriage-return guard. `.gitattributes`
+> pins these files to LF, which overrides that default, so a fresh clone builds
+> correctly with no Git settings changed. A clone made *before* that file
+> existed keeps its CRLF working copy until it is refreshed —
+> `git pull && git rm --cached -r . && git reset --hard` — and the build's own
+> failure message says so.
+
 The build prints two checksums and produces
 `dist/sox-itgc-collector-v1.0.tar.gz`, containing the collector at mode `0755`
 and `CLIENT-INSTRUCTIONS.md` at `0644`.
