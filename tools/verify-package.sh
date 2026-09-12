@@ -180,10 +180,18 @@ fi
 printf '\n'
 printf 'Completeness\n'
 
-if grep -q 'Execution Summary' "$REPORT" 2>/dev/null; then
-    report_ok "report reaches its execution summary (not truncated)"
+# Both markers are looked for at the END of the report, not anywhere in it. A
+# source file printed into the report can contain any words at all - one
+# planted with the text "Execution Summary" satisfied a grep of the whole
+# report on a run that had been killed moments after printing it. The report
+# ends with a fixed closing line pointing at the collection log; a report that
+# does not end that way was cut off, whatever its body says.
+if tail -n 5 "$REPORT" 2>/dev/null | grep -q 'Review that file before relying on any section'; then
+    report_ok "report ends with its closing section (not truncated)"
+elif grep -q 'Execution Summary' "$REPORT" 2>/dev/null && ! tail -n 5 "$REPORT" 2>/dev/null | grep -q 'Review that file before relying on any section'; then
+    report_problem "report contains an execution summary but does not end with its closing section - it was cut off after that point, or the text is from a printed file"
 else
-    report_problem "report has no execution summary - it was truncated before the collection finished"
+    report_problem "report has no closing section - it was truncated before the collection finished"
 fi
 
 # The log's summary block is likewise the last thing written to it.

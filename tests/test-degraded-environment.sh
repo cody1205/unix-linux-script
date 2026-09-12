@@ -158,11 +158,19 @@ if command -v mount >/dev/null 2>&1 && mount -t tmpfs -o size=768k tmpfs "$WORK/
     _fleft=`ls "$WORK/tiny"/*.tar* 2>/dev/null | wc -l | tr -d ' '`
     # "Not CLEAN" used to be the whole bar, and COMPLETED_WITH_WARNINGS cleared
     # it - which the client instructions describe as "normal, send it". A
-    # report cut off mid-section and a 0-byte archive are not a warning. The
-    # verdict in the log file may itself be lost to the full disk, so the one
-    # on the terminal is what is asserted.
-    if [ "$rc" = "1" ] && [ "$_fterm" = "FAILED" ] && [ "$_fleft" = "0" ]; then
-        pass "full filesystem: terminal verdict FAILED, exit 1, no archive left behind"
+    # report cut off mid-section and a 0-byte archive are not a warning. What
+    # is required: a verdict the instructions say NOT to rely on
+    # (COMPLETED_WITH_ERRORS or FAILED - which one depends on whether the disk
+    # filled during the collection or only during the archive step), exit 1,
+    # and no half-written archive left with the archive's name. The verdict
+    # in the log file may itself be lost to the full disk, so the one on the
+    # terminal is what is asserted.
+    case "$_fterm" in
+        FAILED|COMPLETED_WITH_ERRORS) _fok=yes ;;
+        *) _fok=no ;;
+    esac
+    if [ "$rc" = "1" ] && [ "$_fok" = "yes" ] && [ "$_fleft" = "0" ]; then
+        pass "full filesystem: terminal verdict $_fterm, exit 1, no archive left behind"
     else
         fail "full filesystem: exit=$rc terminal=${_fterm:-none} log=${_fv:-none} leftover archives=$_fleft"
         printf '            A truncated package that calls itself usable is the worst\n'

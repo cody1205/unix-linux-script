@@ -336,6 +336,54 @@ else
 fi
 
 #############################################################################
+printf '\n== 7. relative and linked paths are recorded absolute and physical ==\n'
+# "OUTPUT_DIRECTORY: rel/SOX-ITGC-AUDIT-LINUX-UNIX" in a log read on another
+# machine answers nothing. The output directory and every --app-dir are
+# anchored at the invocation directory and recorded with links resolved.
+checks=`expr $checks + 1`
+mkdir -p "$WORK/rel/base/app" "$WORK/rel/real-out"
+: > "$WORK/rel/base/app/x.conf"
+ln -s "$WORK/rel/real-out" "$WORK/rel/base/out-link"
+( cd "$WORK/rel/base" && sh "$COLLECTOR" --output-dir out-link --app-dir app </dev/null >/dev/null 2>&1 )
+_rl="$WORK/rel/real-out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
+_rm="$WORK/rel/real-out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/MANIFEST.txt"
+_rw=`cd "$WORK/rel/real-out" && pwd -P`
+if grep -q "^OUTPUT_DIRECTORY: $_rw/SOX-ITGC-AUDIT-LINUX-UNIX\$" "$_rl" 2>/dev/null && grep -q "^APP_DIR_LISTED|`cd "$WORK/rel/base/app" && pwd -P`|" "$_rm" 2>/dev/null; then
+    pass "output directory and application directory recorded absolute, links resolved"
+else
+    fail "paths were not recorded absolute and physical:"
+    grep -h '^OUTPUT_DIRECTORY:' "$_rl" 2>/dev/null | sed 's/^/            /'
+    grep -h '^APP_DIR' "$_rm" 2>/dev/null | sed 's/^/            /'
+fi
+
+#############################################################################
+printf '\n== 8. the package is not scanned as if it were part of the host ==\n'
+# Copies in raw_files/ keep the source mode until the end of the run, so an
+# output directory under a scanned root turned a world-writable source into
+# a second finding at the copy's path - a path that does not exist on the host.
+checks=`expr $checks + 1`
+if [ -d /etc/cron.d ] && [ -d /opt ]; then
+    printf '# planted\n' > /etc/cron.d/zz-safeguard-ww
+    chmod 666 /etc/cron.d/zz-safeguard-ww
+    plant /etc/cron.d/zz-safeguard-ww
+    mkdir -p /opt/zz-safeguard-audit
+    sh "$COLLECTOR" --output-dir /opt/zz-safeguard-audit </dev/null >/dev/null 2>&1
+    _sr=/opt/zz-safeguard-audit/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt
+    _real=`grep -c '^-rw-rw-rw-.* /etc/cron.d/zz-safeguard-ww$' "$_sr" 2>/dev/null`
+    _copy=`grep -c '/opt/zz-safeguard-audit/.*zz-safeguard-ww' "$_sr" 2>/dev/null`
+    if [ "${_real:-0}" -ge 1 ] && [ "${_copy:-0}" -eq 0 ]; then
+        pass "the world-writable source is found at its real path only, not at the copy's"
+    else
+        fail "real-path finding=${_real:-0} copy-path finding=${_copy:-0} (want >=1 / 0)"
+    fi
+    rm -rf /opt/zz-safeguard-audit
+    for p in $PLANTED; do rm -f "$p"; done
+    PLANTED=""
+else
+    skip "/etc/cron.d or /opt absent; self-scan case not exercised"
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

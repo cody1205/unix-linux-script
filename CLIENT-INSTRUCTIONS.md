@@ -180,8 +180,8 @@ nothing about what the script does.
 
 ### If it stops immediately with `FAIL:`
 
-Two conditions are checked before anything is collected, and either stops the
-run with exit status 1 and nothing written:
+Three conditions are checked before anything is collected, and any of them
+stops the run with exit status 1 and nothing written:
 
 - **`FAIL: --output-dir ... cannot be used`** — the directory you named is a
   file, or cannot be created or written to. The script does not write anywhere
@@ -193,6 +193,11 @@ run with exit status 1 and nothing written:
   permissions, a damaged binary, a stub). The message names it. Without these
   the report would be silently incomplete, so the script refuses rather than
   produce something that looks whole and is not.
+- **`FAIL: another collection (process N) is already running in ...`** — the
+  script was started twice into the same directory. The second start is
+  refused so it cannot delete the first run's evidence mid-collection. Wait
+  for the first to finish, or use a different `--output-dir`. A lock left by
+  a run that was killed or lost to a reboot is ignored automatically.
 
 Neither changes anything on the host.
 

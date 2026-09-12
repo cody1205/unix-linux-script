@@ -487,7 +487,7 @@ the report and manifest.
 
 | Section | Cost | Bounded how |
 | --- | --- | --- |
-| 10 — world-writable | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per category |
+| 10 — world-writable | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per scanned root per category (so an `--app-dir` root cannot be crowded out by system paths) |
 | 11 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev` |
 | 23 — application directory listing | **unbounded**; only runs when `--app-dir` is given | not capped and not `-xdev`; the operator chooses the roots |
 

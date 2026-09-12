@@ -125,6 +125,7 @@ printf '\n== classify_source_file: one outcome per file, and the right one ==\n'
 # evidence gap.
 sed -n '/^path_exists()/,/^}/p'          "$COLLECTOR" >  "$WORK/cls.sh"
 sed -n '/^canonical_path()/,/^}/p'       "$COLLECTOR" >> "$WORK/cls.sh"
+sed -n '/^directory_is_physical()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
 sed -n '/^symlink_target_off_limits()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
 sed -n '/^classify_source_file()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
 # shellcheck source=/dev/null
