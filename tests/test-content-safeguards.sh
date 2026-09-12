@@ -907,7 +907,7 @@ printf '\n== 21. a root or a home directory that never answers costs one bound =
 # and a review stopped mid-way keeps what it had.
 checks=`expr $checks + 1`
 mkdir -p "$WORK/probe"
-sed -n '/^process_tree_pids()/,/^}/p; /^kill_process_tree()/,/^}/p; /^bounded_run_to_file()/,/^}/p; /^bounded_run()/,/^}/p; /^scan_output_file()/,/^}/p; /^scan_skip_file()/,/^}/p; /^scan_root_skipped()/,/^}/p; /^scan_root_timed_out()/,/^}/p; /^probe_scan_root()/,/^}/p; /^physical_unique_roots()/,/^}/p; /^print_scan_skip_notes()/,/^}/p; /^absolute_directory()/,/^}/p; /^print_home_review_bounded()/,/^}/p' "$COLLECTOR" > "$WORK/probe/functions.sh"
+sed -n '/^process_table()/,/^}/p; /^process_tree_pids()/,/^}/p; /^kill_process_tree()/,/^}/p; /^bounded_run_to_file()/,/^}/p; /^bounded_run()/,/^}/p; /^scan_output_file()/,/^}/p; /^scan_skip_file()/,/^}/p; /^scan_root_skipped()/,/^}/p; /^scan_root_timed_out()/,/^}/p; /^probe_scan_root()/,/^}/p; /^physical_unique_roots()/,/^}/p; /^print_scan_skip_notes()/,/^}/p; /^absolute_directory()/,/^}/p; /^print_home_review_bounded()/,/^}/p' "$COLLECTOR" > "$WORK/probe/functions.sh"
 cat > "$WORK/probe/check.sh" <<'PROBE'
 . "$1"
 WORKING_DIRECTORY=$2; INVOCATION_DIRECTORY=/; SCAN_TIMEOUT_SECONDS=240; ROOT_PROBE_TIMEOUT_SECONDS=3; HOME_REVIEW_TIMEOUT_SECONDS=3
