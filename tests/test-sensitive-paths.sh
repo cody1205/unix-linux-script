@@ -124,6 +124,8 @@ printf '\n== classify_source_file: one outcome per file, and the right one ==\n'
 # changes nothing about the package. It must classify as withheld, not as an
 # evidence gap.
 sed -n '/^path_exists()/,/^}/p'          "$COLLECTOR" >  "$WORK/cls.sh"
+sed -n '/^canonical_path()/,/^}/p'       "$COLLECTOR" >> "$WORK/cls.sh"
+sed -n '/^symlink_target_off_limits()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
 sed -n '/^classify_source_file()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
 # shellcheck source=/dev/null
 . "$WORK/cls.sh"
@@ -145,6 +147,30 @@ printf 'key\n'   > "$WORK/server.key"      # matches the *.key sensitive rule
 assert_class "absent path"                    "$WORK/nothing-here"  absent
 assert_class "ordinary readable file"         "$WORK/normal.conf"   collectable
 assert_class "credential file, readable"      "$WORK/server.key"    withheld
+
+# What a path DENOTES is classified, not how it is spelled. A link at an
+# innocent name that leads to a credential file was followed and copied before
+# this was true - /etc/shadow arrived in raw_files/ as /etc/cron.d/x.
+ln -s "$WORK/server.key"  "$WORK/innocent-name.conf"
+ln -s "$WORK/normal.conf" "$WORK/benign-link.conf"
+mkdir -p "$WORK/linked-dir-target" "$WORK/home/.ssh"
+printf 'k\n' > "$WORK/home/.ssh/id_rsa"              # sensitive by the */.ssh/id_* rule
+ln -s "$WORK/home/.ssh/id_rsa" "$WORK/plain-name"    # an innocent name leading to key material
+assert_class "link to a credential file, innocent name"   "$WORK/innocent-name.conf" withheld
+assert_class "link to an ordinary file"                   "$WORK/benign-link.conf"   collectable
+assert_class "innocent name leading to key material"      "$WORK/plain-name"         withheld
+assert_class "dangling link"                              "$WORK/dangling"           absent
+ln -s "$WORK/dangling-target-missing" "$WORK/dangling"
+assert_class "dangling link (present, target absent)"     "$WORK/dangling"           absent
+ln -s "$WORK/loop-b" "$WORK/loop-a"; ln -s "$WORK/loop-a" "$WORK/loop-b"
+assert_class "symbolic link loop"                         "$WORK/loop-a"             absent
+
+# Something that exists but is not a file. Its contents are never read: a
+# pipe with no writer blocks forever, and the collection with it.
+if mkfifo "$WORK/pipe.conf" 2>/dev/null; then
+    assert_class "named pipe where a file is expected"    "$WORK/pipe.conf"          special
+fi
+assert_class "a directory"                                "$WORK/linked-dir-target"  special
 
 # Root can read anything, so the unreadable cases only mean something when the
 # test is not running as root. Skipped loudly rather than silently passing.

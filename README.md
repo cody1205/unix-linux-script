@@ -456,6 +456,27 @@ leave the host. The substitution is stated in the file itself, in the manifest a
 `COPIED_REDACTED`, in the skip list, and as a `WARN`, so a redacted value can
 never be mistaken for the host's real configuration.
 
+**What a path leads to is judged, not how it is spelled.** A symbolic link is
+resolved before it is classified, so a link in `/etc/cron.d` pointing at
+`/etc/shadow` is withheld exactly as `/etc/shadow` itself would be — recorded in
+the manifest and skip list with the target named. Links into home directories
+and the process, device, and `sys` filesystems are treated the same way. An
+ordinary link (`/etc/os-release`, `/etc/resolv.conf` on systemd hosts) is still
+collected, with `symlink_target=` recorded on its manifest line. Before this,
+the check screened only the link's own path, and `/etc/shadow` reached
+`raw_files/` under a harmless name with a CLEAN verdict.
+
+**Only regular files are read.** A named pipe, socket, or device node in a
+configuration directory is recorded as `EXAMINED_SPECIAL` with a `WARN` and its
+contents are never opened — a pipe with no writer would otherwise block the
+collection indefinitely.
+
+**Oversized content is capped and disclosed.** The report prints at most 4 MB of
+any one file, marking the cut and recording `PRINTED_TRUNCATED`; the copy in
+`raw_files/` is complete up to 64 MB, above which the file is recorded as
+`NOT_COPIED_TOO_LARGE` with its size and checksum. Binary content is never
+printed (`PRINTED_BINARY_OMITTED`) but is still copied for the reviewer.
+
 ## Impact on the target host
 
 The script is read-only: it does not create, modify, delete, enable, disable,

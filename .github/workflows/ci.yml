@@ -151,6 +151,8 @@ jobs:
             why: proves the verdict stays honest when conditions are bad
           - property: determinism
             why: proves two collections of one host agree
+          - property: content-safeguards
+            why: proves planted links, pipes and oversized files cannot leak, hang, or bloat the package
     steps:
       - uses: actions/checkout@v4
       - name: ${{ matrix.why }}

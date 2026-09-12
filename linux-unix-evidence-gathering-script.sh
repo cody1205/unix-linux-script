@@ -210,6 +210,26 @@ readonly PATH
 # files and directories created by this script under the working directory.
 umask 077
 
+# A closed standard stream is fatal to the shell at "exec 3>&1" further down,
+# and ends the run with "Bad file descriptor" and no package at all. Some job
+# wrappers close stdout deliberately (">&-"). A closed stream is reopened on
+# /dev/null: the report goes to its file regardless, and only the copy that
+# would have gone to the terminal is lost. The stderr test cannot redirect
+# stderr while testing it, so its own failure message - which has nowhere to
+# go - is simply not produced.
+# The probe is the same operation that would fail later: duplicating the
+# descriptor. Redirecting a no-op command to it is not enough, since some
+# shells do not touch the descriptor for a command that writes nothing.
+if ! ( exec 3>&1 ) 2>/dev/null; then
+    exec 1>/dev/null
+fi
+if ! ( exec 3>&2 ); then
+    exec 2>/dev/null
+fi
+
+# The run lock: set when the evidence directory is prepared, removed at exit.
+LOCK_FILE=""
+
 # Resolve the invoked script name for report text and usage instructions.
 # This is informational and does not affect host configuration.
 SCRIPT_NAME=`basename "$0" 2>/dev/null || echo linux-unix-evidence-gathering-script.sh`
@@ -292,6 +312,13 @@ $app_dir_value"
             ;;
     esac
 done
+
+# Whether the output directory came from the command line. An explicit choice
+# that cannot be honoured is an error; only the interactive prompt falls back.
+OUTPUT_DIRECTORY_FROM_FLAG=no
+if [ -n "$OUTPUT_DIRECTORY" ]; then
+    OUTPUT_DIRECTORY_FROM_FLAG=yes
+fi
 
 if [ "$expect_app_dir_value" = "yes" ]; then
     printf 'Missing value for --app-dir option.\n' >&2
@@ -614,8 +641,74 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# A path whose CONTENTS may be read. This requires a regular file, not merely a
+# readable one, and the distinction is what stops the collection from hanging:
+# [ -r ] is true for a named pipe, and the cat or awk that follows blocks
+# forever waiting for a writer that never comes. A FIFO planted where a
+# configuration file is expected - /etc/cron.d, /etc/profile.d - stalled the
+# entire collection in testing, and on a client host there is no timeout to end
+# it. Sockets and device nodes are excluded for the same reason. Callers that
+# need only existence use path_exists.
 file_readable() {
-    [ -r "$1" ]
+    [ -f "$1" ] && [ -r "$1" ]
+}
+
+# Resolve a path to the file it actually denotes, following symbolic links in
+# every component - without readlink -f (GNU only) or realpath (absent on AIX
+# and HP-UX). The directory part is canonicalised with cd and pwd -P, both
+# POSIX; the final component is followed link by link, reading each target from
+# ls -ld, which every Unix prints in the same "name -> target" form. Bounded, so
+# a link loop terminates. Prints nothing and fails on a loop, a dangling link,
+# or a directory that cannot be entered.
+canonical_path() {
+    _cp_path=$1
+    _cp_hops=0
+    while [ "$_cp_hops" -lt 32 ]; do
+        _cp_hops=`expr "$_cp_hops" + 1`
+        _cp_dir=`dirname "$_cp_path" 2>/dev/null`
+        _cp_base=`basename "$_cp_path" 2>/dev/null`
+        _cp_dir=`cd "$_cp_dir" 2>/dev/null && pwd -P` || return 1
+        case "$_cp_dir" in
+            /) _cp_path="/$_cp_base" ;;
+            *) _cp_path="$_cp_dir/$_cp_base" ;;
+        esac
+        if [ -L "$_cp_path" ]; then
+            _cp_target=`ls -ld "$_cp_path" 2>/dev/null | sed 's/.* -> //'`
+            [ -n "$_cp_target" ] || return 1
+            case "$_cp_target" in
+                /*) _cp_path=$_cp_target ;;
+                *)  _cp_path="$_cp_dir/$_cp_target" ;;
+            esac
+            continue
+        fi
+        printf '%s' "$_cp_path"
+        return 0
+    done
+    return 1
+}
+
+# Whether a symbolic link may be followed for its CONTENTS. It may only when the
+# resolved target is something this script would be willing to collect at that
+# path in its own right. A credential store, anything under a home directory,
+# the process and device filesystems: all are recorded as a link and left
+# unread.
+#
+# The case that made this necessary: a link at /etc/cron.d/x pointing at
+# /etc/shadow. The sensitive-path table screens the path it is handed, and
+# /etc/cron.d/x is not in it, so the collector copied /etc/shadow into
+# raw_files/ under a harmless name, printed it in the report, and reported a
+# CLEAN collection. The path a link is reached BY says nothing about what it
+# denotes, so the target is what gets judged.
+symlink_target_off_limits() {
+    if is_sensitive_path "$1"; then
+        return 0
+    fi
+    case "$1" in
+        /root|/root/*|/home|/home/*|/export/home/*|/Users/*|/proc/*|/sys/*|/dev/*)
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 directory_exists() {
@@ -961,19 +1054,54 @@ close_log_addendum() {
 # The grep patterns match the padded column layout log_event writes
 # (" | WARN  | ", " | ERROR | ") and cannot match the prose in the header or
 # summary, which never carries the surrounding pipe columns.
+#
+# The file can undercount too, in exactly one circumstance: when the output
+# filesystem has filled up, the append that would have recorded an ERROR fails,
+# and a verdict read back from the file then says nothing went wrong. So the
+# larger of the two tallies is taken. Neither source alone is complete; the
+# maximum cannot be lower than the truth.
 recount_log_levels() {
     if [ "$LOG_READY" = "yes" ] && [ -f "$LOG_FILE" ]; then
-        LOG_WARN_COUNT=`grep -c ' | WARN  | ' "$LOG_FILE" 2>/dev/null`
-        [ -n "$LOG_WARN_COUNT" ] || LOG_WARN_COUNT=0
-        LOG_ERROR_COUNT=`grep -c ' | ERROR | ' "$LOG_FILE" 2>/dev/null`
-        [ -n "$LOG_ERROR_COUNT" ] || LOG_ERROR_COUNT=0
+        _rll_warn=`grep -c ' | WARN  | ' "$LOG_FILE" 2>/dev/null`
+        _rll_error=`grep -c ' | ERROR | ' "$LOG_FILE" 2>/dev/null`
+        case "$_rll_warn" in ''|*[!0-9]*) _rll_warn=0 ;; esac
+        case "$_rll_error" in ''|*[!0-9]*) _rll_error=0 ;; esac
+        if [ "$_rll_warn" -gt "$LOG_WARN_COUNT" ]; then
+            LOG_WARN_COUNT=$_rll_warn
+        fi
+        if [ "$_rll_error" -gt "$LOG_ERROR_COUNT" ]; then
+            LOG_ERROR_COUNT=$_rll_error
+        fi
+    fi
+}
+
+# Prove the package can still be written before the verdict is. Under a full
+# filesystem every printf into the report fails silently, the log lines that
+# would have said so are lost the same way, and a verdict derived from the log
+# reads as though nothing happened: a 1 MB filesystem yielded a report cut off
+# mid-section, a 0-byte archive, and COMPLETED_WITH_WARNINGS - which the client
+# instructions describe as "normal, send it". A write that cannot be read back,
+# or a report missing its own closing lines, makes the run FAILED.
+PACKAGE_WRITE_FAILED=no
+verify_package_writable() {
+    _vpw_probe="$METADATA_DIRECTORY/.write-probe"
+    if printf 'write-probe\n' > "$_vpw_probe" 2>/dev/null && [ "`cat "$_vpw_probe" 2>/dev/null`" = "write-probe" ]; then
+        rm -f "$_vpw_probe" 2>/dev/null
+    else
+        rm -f "$_vpw_probe" 2>/dev/null
+        PACKAGE_WRITE_FAILED=yes
+        log_event ERROR evidence "the output filesystem is full or no longer writable; the report and file copies in this package are incomplete and it must not be relied upon"
+    fi
+    if [ -f "$REPORT_FILE" ] && ! grep -q 'Review that file before relying on any section' "$REPORT_FILE" 2>/dev/null; then
+        PACKAGE_WRITE_FAILED=yes
+        log_event ERROR evidence "the report is truncated: its closing section was not written, so sections at the end are missing"
     fi
 }
 
 # Overall verdict for the run, as a single stable token.
 collection_log_result() {
     recount_log_levels
-    if [ "$COLLECTION_STATUS" != "ready" ]; then
+    if [ "$COLLECTION_STATUS" != "ready" ] || [ "$PACKAGE_WRITE_FAILED" = "yes" ]; then
         printf 'FAILED'
     elif [ "$LOG_ERROR_COUNT" -gt 0 ]; then
         printf 'COMPLETED_WITH_ERRORS'
@@ -1110,7 +1238,25 @@ classify_source_file() {
         printf 'withheld'
         return
     fi
-    if [ -f "$_cls_path" ] && ! [ -r "$_cls_path" ]; then
+    # What the path DENOTES is judged, not only how it is spelled. A symbolic
+    # link, or a path beneath a linked directory, can lead anywhere, and the
+    # copy that results carries the target's contents under the link's name.
+    _cls_real=`canonical_path "$_cls_path"`
+    if [ -z "$_cls_real" ]; then
+        printf 'unreadable'
+        return
+    fi
+    if [ "$_cls_real" != "$_cls_path" ] && symlink_target_off_limits "$_cls_real"; then
+        printf 'withheld'
+        return
+    fi
+    # A named pipe, socket, or device node where a file was expected. Its
+    # contents are never read: a pipe with no writer blocks forever.
+    if ! [ -f "$_cls_path" ]; then
+        printf 'special'
+        return
+    fi
+    if ! [ -r "$_cls_path" ]; then
         printf 'unreadable'
         return
     fi
@@ -1121,8 +1267,54 @@ classify_source_file() {
 # never one without the other. Both are deduplicated, so a file reached through
 # several sections is recorded once.
 record_withheld_file() {
-    record_reference_outcome "SENSITIVE_METADATA_ONLY" "$1" ""
-    record_sensitive_skip "$1"
+    if [ -n "${2:-}" ]; then
+        record_reference_outcome "SENSITIVE_METADATA_ONLY" "$1" "note=$2"
+        record_sensitive_skip "$1 ($2)"
+    else
+        record_reference_outcome "SENSITIVE_METADATA_ONLY" "$1" ""
+        record_sensitive_skip "$1"
+    fi
+}
+
+# The reason a withheld path was withheld, when it was withheld for where it
+# LEADS rather than for its own name. Empty for an ordinary sensitive path.
+withheld_via_symlink_note() {
+    if is_sensitive_path "$1"; then
+        return
+    fi
+    _wvs_real=`canonical_path "$1"`
+    if [ -n "$_wvs_real" ] && [ "$_wvs_real" != "$1" ]; then
+        printf 'symbolic link to %s; target withheld' "$_wvs_real"
+    fi
+}
+
+# grep across candidate files, reading only the ones this script would collect.
+#
+# Several sections grep a directory glob directly - /etc/pam.d/*,
+# /etc/profile.d/*.sh - and grep opens whatever the glob expands to. A named
+# pipe in that directory blocked the collection for good (grep waits for a
+# writer), and a symbolic link to a credential file would have been searched.
+# The positional list is rebuilt to hold only regular, readable, non-withheld
+# files, which keeps names containing spaces intact without arrays.
+#
+# Usage: grep_collectable GREP-OPTIONS PATTERN FILE...
+# Returns grep's status; returns 1 without running grep if nothing qualifies.
+grep_collectable() {
+    _gc_opts=$1
+    _gc_pattern=$2
+    shift 2
+    _gc_count=$#
+    while [ "$_gc_count" -gt 0 ]; do
+        _gc_f=$1
+        shift
+        if [ "`classify_source_file "$_gc_f"`" = "collectable" ]; then
+            set -- "$@" "$_gc_f"
+        fi
+        _gc_count=`expr "$_gc_count" - 1`
+    done
+    [ $# -gt 0 ] || return 1
+    # shellcheck disable=SC2086
+    grep $_gc_opts "$_gc_pattern" "$@" 2>/dev/null
 }
 
 record_file_reference() {
@@ -1146,13 +1338,26 @@ record_file_reference() {
         esac
     elif [ -d "$ref_path" ]; then
         _ref_count=0
+        _ref_special=0
         for ref_entry in "$ref_path"/*; do
             if [ -f "$ref_entry" ]; then
                 _ref_count=`expr "$_ref_count" + 1`
                 copy_file_to_collection "$ref_entry"
+            elif [ -e "$ref_entry" ] && ! [ -d "$ref_entry" ]; then
+                # A named pipe, socket, or device where configuration files
+                # live. Its contents are never read - a pipe with no writer
+                # blocks forever - but its presence is anomalous and belongs
+                # in the chain of custody, not silently skipped past.
+                _ref_special=`expr "$_ref_special" + 1`
+                record_reference_outcome "EXAMINED_SPECIAL" "$ref_entry" "reason=not_a_regular_file|contents_not_read=yes"
+                log_event WARN evidence "$ref_entry is a named pipe, socket, or device in a configuration directory; its contents were not read and it was not copied"
             fi
         done
-        record_reference_outcome "DIRECTORY_EXAMINED" "$ref_path" "files=$_ref_count"
+        if [ "$_ref_special" -gt 0 ]; then
+            record_reference_outcome "DIRECTORY_EXAMINED" "$ref_path" "files=$_ref_count|special=$_ref_special"
+        else
+            record_reference_outcome "DIRECTORY_EXAMINED" "$ref_path" "files=$_ref_count"
+        fi
         if [ "$_ref_count" -eq 0 ]; then
             log_event INFO evidence "$ref_path exists but contains no files; recorded as examined and empty, which is itself evidence that nothing in it overrides the corresponding configuration"
         fi
@@ -1191,6 +1396,28 @@ record_reference_outcome() {
 # named by COLLECTION_DIRECTORY under the current working directory. It does
 # not remove or modify host configuration files outside that evidence folder.
 prepare_collection_directory() {
+    # Refuse to start over a collection that is still running in the same
+    # directory. The reset below deletes the previous package, so a second
+    # operator launching into the same directory a moment after the first
+    # destroyed the first run's evidence mid-collection, and both runs then
+    # failed with several hundred errors between them. The lock names the
+    # running process, and a lock left behind by a process that no longer
+    # exists - a crash, a reboot - is ignored, so it cannot wedge a directory.
+    LOCK_FILE="$WORKING_DIRECTORY/.sox-itgc-collector.lock"
+    if [ -f "$LOCK_FILE" ]; then
+        _lock_pid=`cat "$LOCK_FILE" 2>/dev/null`
+        case "$_lock_pid" in
+            ''|*[!0-9]*) _lock_pid="" ;;
+        esac
+        if [ -n "$_lock_pid" ] && [ "$_lock_pid" != "$$" ] && kill -0 "$_lock_pid" 2>/dev/null; then
+            printf 'FAIL: another collection (process %s) is already running in %s.\n' "$_lock_pid" "$WORKING_DIRECTORY" >&2
+            printf '      Wait for it to finish, or choose a different --output-dir. Nothing\n' >&2
+            printf '      was collected by this run and nothing on the host was changed.\n' >&2
+            exit 1
+        fi
+    fi
+    printf '%s\n' "$$" > "$LOCK_FILE" 2>/dev/null
+
     if rm -rf "$COLLECTION_DIRECTORY" 2>/dev/null && \
        mkdir -p "$REPORTS_DIRECTORY" "$RAW_FILES_DIRECTORY" "$METADATA_DIRECTORY" 2>/dev/null; then
         : > "$MANIFEST_FILE"
@@ -1223,22 +1450,43 @@ copy_file_to_collection() {
     # never recorded as withheld at all - so /etc/shadow on a non-root run
     # produced an empty skip list, in the very file the client is told to
     # consult to confirm what was held back.
-    if [ -f "$file_path" ] && is_sensitive_path "$file_path"; then
-        # Recorded in the MANIFEST as well as in the skip list.
-        #
-        # The manifest is the chain-of-custody document, and a file the
-        # collection deliberately withheld belongs in it. Without this line a
-        # file stopped here appeared ONLY in SENSITIVE_FILES_SKIPPED.txt - which
-        # meant /etc/shadow, the single most sensitive file this tool handles,
-        # was cited in the report with its permissions and checksum and had no
-        # manifest entry at all. Files withheld through the other path
-        # (print_sensitive_file_review) were recorded properly, so the two
-        # routes disagreed and the more sensitive one was the one missing.
-        record_withheld_file "$file_path"
-        return
-    fi
+    # One classifier for every route, so this cannot disagree with the report.
+    # It judges the resolved target of a symbolic link, not the link's name:
+    # the previous path-only check here copied /etc/shadow into raw_files/
+    # through a link in /etc/cron.d.
+    case `classify_source_file "$file_path"` in
+        withheld)
+            # Recorded in the MANIFEST as well as in the skip list.
+            #
+            # The manifest is the chain-of-custody document, and a file the
+            # collection deliberately withheld belongs in it. Without this line
+            # a file stopped here appeared ONLY in SENSITIVE_FILES_SKIPPED.txt -
+            # which meant /etc/shadow, the single most sensitive file this tool
+            # handles, was cited in the report with its permissions and checksum
+            # and had no manifest entry at all.
+            record_withheld_file "$file_path" "`withheld_via_symlink_note "$file_path"`"
+            return
+            ;;
+        collectable)
+            ;;
+        *)
+            return
+            ;;
+    esac
 
-    if ! [ -f "$file_path" ] || ! [ -r "$file_path" ]; then
+    # A file too large to be configuration is recorded, not copied. A 200 MB
+    # file dropped into /etc/cron.d produced a package too large to transfer,
+    # and the collector called it CLEAN. The checksum is kept so the file can
+    # still be tied to what the report cites.
+    _copy_size=`file_size_bytes "$file_path"`
+    if [ "${_copy_size:-0}" -gt "$RAW_COPY_LIMIT_BYTES" ] 2>/dev/null; then
+        if ! grep -Fq "NOT_COPIED_TOO_LARGE|$file_path|" "$MANIFEST_FILE" 2>/dev/null; then
+            _big_sum=`print_file_checksum "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
+            record_manifest_line "NOT_COPIED_TOO_LARGE|$file_path|size=$_copy_size|limit=$RAW_COPY_LIMIT_BYTES|checksum=${_big_sum:-unavailable}|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+            log_event WARN evidence "$file_path is $_copy_size bytes, above the $RAW_COPY_LIMIT_BYTES-byte copy limit; it was recorded with its checksum and NOT copied into raw_files/"
+        fi
         return
     fi
 
@@ -1279,7 +1527,15 @@ copy_file_to_collection() {
             # and are normalised at handover so the audit team can read them.
             _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
             _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
-            record_manifest_line "COPIED|$file_path|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+            # When the copy came through a symbolic link, say where from. The
+            # bytes in raw_files/ are the target's, and a reviewer comparing
+            # them to the link's own metadata needs to know that.
+            _src_real=`canonical_path "$file_path"`
+            if [ -n "$_src_real" ] && [ "$_src_real" != "$file_path" ]; then
+                record_manifest_line "COPIED|$file_path|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}|symlink_target=$_src_real"
+            else
+                record_manifest_line "COPIED|$file_path|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+            fi
         else
             log_event WARN evidence "$file_path was readable but could not be copied into the package; the report may reference a file that was not delivered"
         fi
@@ -1382,6 +1638,24 @@ print_path_metadata() {
 print_noncomment_or_not_available() {
     file_path=$1
 
+    # Same classifier as the full-file route. This helper previously checked
+    # readability alone, and a symbolic link in /etc/sudoers.d pointing at a
+    # root-only file had its "active entries" printed here after the full-file
+    # route had correctly withheld it.
+    case `classify_source_file "$file_path"` in
+        withheld)
+            _pnc_note=`withheld_via_symlink_note "$file_path"`
+            printf 'Withheld: contents deliberately not read (%s)\n' "${_pnc_note:-credential file}"
+            record_withheld_file "$file_path" "$_pnc_note"
+            return
+            ;;
+        special)
+            printf 'Not a regular file (named pipe, socket, or device); contents not read.\n'
+            record_reference_outcome "EXAMINED_SPECIAL" "$file_path" ""
+            return
+            ;;
+    esac
+
     if file_readable "$file_path"; then
         if awk '/^[[:space:]]*#/ { next } /^[[:space:]]*$/ { next } { print; found = 1 } END { if (!found) exit 1 }' "$file_path" 2>/dev/null; then
             :
@@ -1473,6 +1747,59 @@ print_sensitive_file_review() {
     fi
 }
 
+# Limits on what a single source file may contribute to the package.
+#
+# The report is read by a person, and a file large enough to reach the print
+# limit (4 MB) is not configuration in any useful sense - the largest thing
+# legitimately printed in full is a package manager's log, and that is well
+# under it on any host that has not been left unpatched for a decade. The copy
+# in raw_files/ is complete regardless, up to the copy limit (64 MB); above
+# that the file is recorded with its size and checksum instead. Both limits exist because a 200 MB file
+# left in /etc/cron.d produced a 200 MB report and a package too large to
+# transfer, and the collector called the result CLEAN.
+REPORT_PRINT_LIMIT_BYTES=4194304
+readonly REPORT_PRINT_LIMIT_BYTES
+RAW_COPY_LIMIT_BYTES=67108864
+readonly RAW_COPY_LIMIT_BYTES
+
+file_size_bytes() {
+    _fsb=`wc -c < "$1" 2>/dev/null | tr -d ' '`
+    case "$_fsb" in
+        ''|*[!0-9]*) printf '0' ;;
+        *) printf '%s' "$_fsb" ;;
+    esac
+}
+
+# A NUL byte in the first 8 KB. dd and od are POSIX; head -c is not, and file(1)
+# is not universally present. Binary content is never printed into the report,
+# where it is unreadable and can corrupt a terminal; the copy in raw_files/ is
+# still made so the reviewer has the bytes.
+file_looks_binary() {
+    dd if="$1" bs=8192 count=1 2>/dev/null | od -An -c 2>/dev/null | grep -q '\\0'
+}
+
+# The body of a source file, as the report shows it: verbatim for an ordinary
+# file, a placeholder for a binary one, the first REPORT_PRINT_LIMIT_BYTES with
+# a disclosed cut for an oversized one. The manifest and log record each of
+# the latter two so a reviewer knows the report is not the whole file.
+print_file_body() {
+    _pfb_path=$1
+    _pfb_size=`file_size_bytes "$_pfb_path"`
+    if file_looks_binary "$_pfb_path"; then
+        printf '[binary content, %s bytes: not printed in this report; see raw_files/ for the copy]\n' "$_pfb_size"
+        record_reference_outcome "PRINTED_BINARY_OMITTED" "$_pfb_path" "size=$_pfb_size"
+        return 1
+    fi
+    if [ "$_pfb_size" -gt "$REPORT_PRINT_LIMIT_BYTES" ] 2>/dev/null; then
+        dd if="$_pfb_path" bs="$REPORT_PRINT_LIMIT_BYTES" count=1 2>/dev/null
+        printf '\n[truncated in this report after %s of %s bytes; the copy in raw_files/ is complete up to the copy limit]\n' "$REPORT_PRINT_LIMIT_BYTES" "$_pfb_size"
+        record_reference_outcome "PRINTED_TRUNCATED" "$_pfb_path" "shown=$REPORT_PRINT_LIMIT_BYTES|size=$_pfb_size"
+        log_event WARN evidence "$_pfb_path is $_pfb_size bytes; the report shows the first $REPORT_PRINT_LIMIT_BYTES bytes only"
+        return 1
+    fi
+    cat "$_pfb_path"
+}
+
 # Full-file evidence handling:
 # This helper is used whenever the report should show a source file. Readable
 # non-sensitive files are printed and copied into raw_files/. Sensitive files
@@ -1482,15 +1809,40 @@ print_file_with_header() {
     file_path=$1
 
     printf 'File: %s\n' "$file_path"
-    if is_sensitive_path "$file_path"; then
-        print_sensitive_file_review "$file_path"
-        return
-    fi
+    case `classify_source_file "$file_path"` in
+        withheld)
+            _pfh_note=`withheld_via_symlink_note "$file_path"`
+            if [ -n "$_pfh_note" ]; then
+                _pfh_real=`canonical_path "$file_path"`
+                printf 'This path is a symbolic link to %s\n' "$_pfh_real"
+                printf 'The target is a credential store, a home directory, or a system\n'
+                printf 'pseudo-file, so its contents were deliberately not read. Metadata only:\n'
+                ls -ld "$file_path" 2>/dev/null || not_available
+                record_withheld_file "$file_path" "$_pfh_note"
+            else
+                print_sensitive_file_review "$file_path"
+            fi
+            return
+            ;;
+        special)
+            printf 'Not a regular file (named pipe, socket, or device); contents not read.\n'
+            ls -ld "$file_path" 2>/dev/null || not_available
+            record_reference_outcome "EXAMINED_SPECIAL" "$file_path" ""
+            log_event WARN evidence "$file_path is a named pipe, socket, or device where a configuration file was expected; its contents were not read"
+            blank_line
+            return
+            ;;
+    esac
 
     if file_readable "$file_path"; then
         copy_file_to_collection "$file_path"
-        cat "$file_path"
-        record_manifest_line "PRINTED|$file_path"
+        _pfh_real=`canonical_path "$file_path"`
+        if [ -n "$_pfh_real" ] && [ "$_pfh_real" != "$file_path" ]; then
+            printf '(symbolic link; the content below is that of %s)\n' "$_pfh_real"
+        fi
+        if print_file_body "$file_path"; then
+            record_manifest_line "PRINTED|$file_path"
+        fi
     else
         not_available
         # A file that is simply absent is normal: this script targets several
@@ -1732,7 +2084,7 @@ print_auth_summary() {
             fi
             if directory_exists /etc/security/pwquality.conf.d; then
                 record_file_reference /etc/security/pwquality.conf.d
-                if grep -E '^[[:space:]]*(minlen|minclass|maxrepeat|maxsequence|dcredit|ucredit|lcredit|ocredit|difok|dictcheck|enforcing|enforce_for_root)' /etc/security/pwquality.conf.d/*.conf 2>/dev/null; then
+                if grep_collectable -E '^[[:space:]]*(minlen|minclass|maxrepeat|maxsequence|dcredit|ucredit|lcredit|ocredit|difok|dictcheck|enforcing|enforce_for_root)' /etc/security/pwquality.conf.d/*.conf; then
                     _pwq_found=yes
                 fi
             fi
@@ -1784,7 +2136,7 @@ print_auth_summary() {
             if directory_exists /etc/pam.d; then
                 record_file_reference /etc/pam.d
                 printf 'PAM lockout modules in use:\n'
-                if grep -E 'pam_tally2\.so|pam_faillock\.so' /etc/pam.d/* 2>/dev/null; then
+                if grep_collectable -E 'pam_tally2\.so|pam_faillock\.so' /etc/pam.d/*; then
                     _lockout_found=yes
                 else
                     printf '  none found\n'
@@ -1896,7 +2248,7 @@ print_authentication_summary() {
             subsection "PAM Authentication Module References:"
             if directory_exists /etc/pam.d; then
                 record_file_reference /etc/pam.d
-                grep -E 'pam_ldap\.so|pam_sss\.so|pam_winbind\.so' /etc/pam.d/* 2>/dev/null || not_available
+                grep_collectable -E 'pam_ldap\.so|pam_sss\.so|pam_winbind\.so' /etc/pam.d/* || not_available
             else
                 not_available
             fi
@@ -2436,10 +2788,19 @@ print_world_writable_review() {
             # have to rebut, so the two conditions are distinguished here. The
             # other-write bit is read from the ls mode string (character 9)
             # because POSIX test has no world-writable predicate.
-            _ww_mode=`ls -ld "$_ww_shared" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            # Both bits are read from the ls mode string rather than with
+            # test -k, which is not in POSIX test: on a shell without it the
+            # check failed and fell through to the "ABSENT" branch, reporting
+            # /tmp, /var/tmp and /dev/shm as missing their sticky bit - a
+            # false finding the client would have had to rebut.
+            # -L so that a shared directory that is itself a symbolic link
+            # (/var/lock -> /run/lock on systemd hosts) is judged by the
+            # directory it points to, not by the link's own lrwxrwxrwx mode.
+            _ww_mode=`ls -ldL "$_ww_shared" 2>/dev/null | awk 'NR == 1 { print $1 }'`
             _ww_other_write=`printf '%s' "$_ww_mode" | cut -c9 2>/dev/null`
+            _ww_sticky=`printf '%s' "$_ww_mode" | cut -c10 2>/dev/null`
 
-            if [ -k "$_ww_shared" ]; then
+            if [ "$_ww_sticky" = "t" ] || [ "$_ww_sticky" = "T" ]; then
                 printf 'Sticky bit: present (expected)\n'
             elif [ "$_ww_other_write" = "w" ]; then
                 printf 'Sticky bit: ABSENT - this directory is world-writable, so any user\n'
@@ -2823,7 +3184,7 @@ print_shell_timeout_and_banner_summary() {
     record_file_reference /etc/csh.cshrc
     record_file_reference /etc/profile.d
     record_file_reference /etc/security/login.cfg
-    if grep -E '(^[[:space:]]*TMOUT=|^[[:space:]]*readonly[[:space:]]+TMOUT|^[[:space:]]*export[[:space:]]+TMOUT|^[[:space:]]*autologout[[:space:]]*=)' /etc/profile /etc/bashrc /etc/ksh.kshrc /etc/csh.cshrc /etc/profile.d/*.sh /etc/security/login.cfg 2>/dev/null; then
+    if grep_collectable -E '(^[[:space:]]*TMOUT=|^[[:space:]]*readonly[[:space:]]+TMOUT|^[[:space:]]*export[[:space:]]+TMOUT|^[[:space:]]*autologout[[:space:]]*=)' /etc/profile /etc/bashrc /etc/ksh.kshrc /etc/csh.cshrc /etc/profile.d/*.sh /etc/security/login.cfg; then
         :
     else
         not_available
@@ -2871,13 +3232,13 @@ print_audit_logging_summary() {
     record_file_reference /etc/syslog-ng/syslog-ng.conf
     record_file_reference /etc/syslog-ng/conf.d
     record_file_reference /etc/systemd/journald.conf
-    grep -E '(^[^#].*@@?[A-Za-z0-9._-]+|action\(.*omfwd|destination.*(tcp|udp)|forward_to|loghost)' /etc/rsyslog.conf /etc/rsyslog.d/*.conf /etc/syslog.conf /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/conf.d/*.conf /etc/systemd/journald.conf 2>/dev/null || not_available
+    grep_collectable -E '(^[^#].*@@?[A-Za-z0-9._-]+|action\(.*omfwd|destination.*(tcp|udp)|forward_to|loghost)' /etc/rsyslog.conf /etc/rsyslog.d/*.conf /etc/syslog.conf /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/conf.d/*.conf /etc/systemd/journald.conf || not_available
     blank_line
 
     subsection "Sudo Logging Indicators:"
     record_file_reference /etc/sudoers
     record_file_reference /etc/sudoers.d
-    grep -E '(logfile=|log_input|log_output|iolog_dir)' /etc/sudoers /etc/sudoers.d/* 2>/dev/null || not_available
+    grep_collectable -E '(logfile=|log_input|log_output|iolog_dir)' /etc/sudoers /etc/sudoers.d/* || not_available
 }
 
 # Service and startup review:
@@ -2959,8 +3320,8 @@ print_network_exposure_summary() {
     # says whether the service is CONFIGURED TO RUN. Commented-out lines are
     # excluded for the same reason - a disabled entry is not an exposure.
     printf 'Legacy service entries enabled in inetd/xinetd configuration:\n'
-    if grep -E '^[[:space:]]*[^#[:space:]].*(telnet|rlogin|rexec|rsh|tftp|ftp)' \
-        /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/* 2>/dev/null; then
+    if grep_collectable -E '^[[:space:]]*[^#[:space:]].*(telnet|rlogin|rexec|rsh|tftp|ftp)' \
+        /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/*; then
         :
     else
         printf '  no enabled legacy service entries found\n'
@@ -3200,12 +3561,12 @@ host_uses_directory_service() {
         return 0
     fi
     if directory_exists /etc/pam.d; then
-        if grep -lq 'pam_ldap\.so\|pam_sss\.so\|pam_winbind\.so\|pam_krb5\.so' /etc/pam.d/* 2>/dev/null; then
+        if grep_collectable -lqE 'pam_ldap\.so|pam_sss\.so|pam_winbind\.so|pam_krb5\.so' /etc/pam.d/*; then
             return 0
         fi
     fi
     if file_readable /etc/pam.conf; then
-        if grep -q 'pam_ldap\|pam_krb5' /etc/pam.conf 2>/dev/null; then
+        if grep -Eq 'pam_ldap|pam_krb5' /etc/pam.conf 2>/dev/null; then
             return 0
         fi
     fi
@@ -3435,14 +3796,15 @@ create_collection_archive() {
 
     if command_exists tar; then
         if command_exists gzip; then
-            if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null; then
+            if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null && [ -s "$archive_base.tar.gz" ]; then
                 ARCHIVE_FILE=$archive_base.tar.gz
                 ARCHIVE_STATUS="created"
                 log_event INFO archive "compressed archive created at $ARCHIVE_FILE"
                 return
             fi
+            rm -f "$archive_base.tar" "$archive_base.tar.gz" 2>/dev/null
         fi
-        if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null; then
+        if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && [ -s "$archive_base.tar" ]; then
             ARCHIVE_FILE=$archive_base.tar
             ARCHIVE_STATUS="created"
             log_event WARN archive "gzip unavailable or failed; created an uncompressed archive at $ARCHIVE_FILE"
@@ -3450,6 +3812,11 @@ create_collection_archive() {
         fi
     fi
 
+    # A failed tar leaves a truncated or empty file behind with the archive's
+    # name, which is precisely what an operator would pick up and send. Remove
+    # it so the only thing to send is the evidence directory, with the log
+    # saying why.
+    rm -f "$archive_base.tar" "$archive_base.tar.gz" 2>/dev/null
     ARCHIVE_STATUS="failed"
     log_event ERROR archive "could not create an archive; the evidence directory at $COLLECTION_DIRECTORY must be transferred manually"
 }
@@ -3465,7 +3832,10 @@ create_collection_archive() {
 application_listing_ls_flags() {
     case "$OS_NAME" in
         Linux)
-            printf '%s\n' '-RlthBA'
+            # -b renders a newline or control character in a filename as an
+            # escape, so a file named "new<newline>line.conf" is one entry in
+            # the evidence rather than two that do not exist.
+            printf '%s\n' '-RlthbBA'
             ;;
         Darwin|FreeBSD|OpenBSD|NetBSD)
             printf '%s\n' '-RlthA'
@@ -3592,6 +3962,16 @@ apply_output_directory() {
         fi
         if [ -d "$OUTPUT_DIRECTORY" ] && [ -w "$OUTPUT_DIRECTORY" ]; then
             WORKING_DIRECTORY=$OUTPUT_DIRECTORY
+        elif [ "$OUTPUT_DIRECTORY_FROM_FLAG" = "yes" ]; then
+            # The operator named a directory and it cannot be used. Writing
+            # somewhere else instead would break the one promise the client
+            # instructions make about where this script writes - and with a
+            # working directory of /, "somewhere else" is the root of a
+            # production filesystem.
+            printf 'FAIL: --output-dir %s cannot be used; it is not a directory that can be\n' "$OUTPUT_DIRECTORY" >&2
+            printf '      created or written to. Nothing was collected and nothing on this host\n' >&2
+            printf '      was changed. Choose a directory on a filesystem with free space.\n' >&2
+            exit 1
         else
             printf 'Output directory %s is not accessible. Falling back to %s.\n' "$OUTPUT_DIRECTORY" "$WORKING_DIRECTORY" >&2
         fi
@@ -3988,6 +4368,39 @@ if [ "$SHOW_HELP" = "yes" ]; then
     exit 0
 fi
 
+# Prove the tools the report and the verdict depend on actually work, before
+# anything is collected. This is not about a tool being absent from PATH - a
+# Unix host without awk does not exist - but about one that is present and
+# broken: wrong permissions, a damaged binary, a stub. With awk unusable the
+# collection ran to the end, "Permission denied" scrolled past hundreds of
+# times, two hundred lines of evidence silently vanished from the report, and
+# the verdict was COMPLETED_CLEAN. With expr or grep unusable the error
+# counters themselves cannot count. So each tool is exercised, not merely
+# located, and a failure here stops the run with nothing written.
+preflight_required_tools() {
+    _pf_missing=""
+    [ "`printf 'a b\n' | awk '{ print $2 }' 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing awk"
+    [ "`printf 'a\n' | sed 's/a/b/' 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing sed"
+    [ "`printf 'a\nb\n' | grep -c b 2>/dev/null`" = "1" ] || _pf_missing="$_pf_missing grep"
+    [ "`printf 'b\na\n' | sort 2>/dev/null | awk 'NR == 1' 2>/dev/null`" = "a" ] || _pf_missing="$_pf_missing sort"
+    [ "`expr 2 + 3 2>/dev/null`" = "5" ] || _pf_missing="$_pf_missing expr"
+    [ "`printf 'abc\n' | cut -c2 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing cut"
+    [ "`printf 'a\n' | tr a b 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing tr"
+    [ "`printf 'a\nb\n' | wc -l 2>/dev/null | tr -d ' '`" = "2" ] || _pf_missing="$_pf_missing wc"
+    [ "`date '+%Y' 2>/dev/null | wc -c | tr -d ' '`" = "5" ] || _pf_missing="$_pf_missing date"
+    ls -d / >/dev/null 2>&1 || _pf_missing="$_pf_missing ls"
+    [ "`dirname /a/b 2>/dev/null`" = "/a" ] || _pf_missing="$_pf_missing dirname"
+    [ "`basename /a/b 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing basename"
+    if [ -n "$_pf_missing" ]; then
+        printf 'FAIL: this host is missing, or cannot run, tools this script depends on:%s\n' "$_pf_missing" >&2
+        printf '      Without them the report would be silently incomplete and the verdict\n' >&2
+        printf '      could not be trusted, so nothing was collected. Nothing on this host\n' >&2
+        printf '      was changed. Please check the tools above and run the script again.\n' >&2
+        exit 1
+    fi
+}
+preflight_required_tools
+
 if [ "$EFFECTIVE_UID_VALUE" != "0" ] && [ "$TEST_MODE" != "yes" ]; then
     printf '%s\n' 'This script must be run with sudo.'
     printf 'Use: sudo sh %s\n' "$SCRIPT_NAME"
@@ -4033,6 +4446,9 @@ prepare_collection_directory
 handle_interruption() {
     _interrupt_signal=$1
     COLLECTION_STATUS="interrupted by $_interrupt_signal before completion"
+    if [ -n "$LOCK_FILE" ]; then
+        rm -f "$LOCK_FILE" 2>/dev/null
+    fi
 
     log_event ERROR completion "collection was interrupted by $_interrupt_signal before it finished; this package is incomplete and must not be relied upon"
 
@@ -4411,6 +4827,7 @@ apply_ownership_to_evidence
 
 # The summary block closes the log, so everything that has something to report
 # must have run by now. Only the archive follows, and it appends an addendum.
+verify_package_writable
 finalize_collection_log
 
 open_log_addendum
@@ -4454,6 +4871,10 @@ _final_result=`collection_log_result`
 #
 # Deliberately only two values. A finer scale would invite callers to branch on
 # distinctions that belong in the log, and the log is the authoritative record.
+if [ -n "$LOCK_FILE" ]; then
+    rm -f "$LOCK_FILE" 2>/dev/null
+fi
+
 case "$_final_result" in
     COMPLETED_CLEAN|COMPLETED_WITH_WARNINGS)
         exit 0

@@ -34,8 +34,8 @@ form that changes state.
 |---|---|
 | **Writes** | Only inside the `--output-dir` you choose, plus the archive in that same directory. Nothing in `/tmp`, nothing in any system path. One disclosed exception below. |
 | **Sends** | Nothing. No network connections, no sockets, no outbound anything. |
-| **Reads** | OS configuration relevant to access control. No user data, no application data, no databases. |
-| **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets. |
+| **Reads** | OS configuration relevant to access control, and only regular files: a named pipe, socket, or device node where a configuration file is expected is noted and never opened. No user data, no application data, no databases. |
+| **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets — whether reached by their own path or through a symbolic link at some other name. Links into home directories are not followed either. |
 | **Needs** | Root via `sudo`, a few hundred MB of free space, typically 1–10 minutes. |
 | **Requires** | No reboot, no restart, no maintenance window, no installation. |
 
@@ -177,6 +177,24 @@ gateway rejected `.sh`, run `sudo sh <filename>.txt` — behaviour is identical.
 
 If you would rather mark it executable yourself, `chmod +x` is safe and changes
 nothing about what the script does.
+
+### If it stops immediately with `FAIL:`
+
+Two conditions are checked before anything is collected, and either stops the
+run with exit status 1 and nothing written:
+
+- **`FAIL: --output-dir ... cannot be used`** — the directory you named is a
+  file, or cannot be created or written to. The script does not write anywhere
+  else instead; choose a directory on a filesystem with free space and run it
+  again.
+- **`FAIL: this host is missing, or cannot run, tools this script depends on`**
+  — one of `awk`, `sed`, `grep`, `sort`, `expr`, `cut`, `tr`, `wc`, `date`,
+  `ls`, `dirname`, or `basename` is present but does not work (wrong
+  permissions, a damaged binary, a stub). The message names it. Without these
+  the report would be silently incomplete, so the script refuses rather than
+  produce something that looks whole and is not.
+
+Neither changes anything on the host.
 
 **Exit status**, if you are running it from a script:
 
