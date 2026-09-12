@@ -3129,7 +3129,7 @@ print_world_writable_review() {
     _ww_files_total=0
     _ww_files_truncated=no
     for _ww_root in "$@"; do
-        _ww_list=`find "$_ww_root" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -0002 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
+        _ww_list=`find "$_ww_root" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -0002 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"`
         print_world_writable_findings "files" "$_ww_root" "$_ww_list" "world-writable files"
     done
     if [ "$_ww_files_total" -eq 0 ]; then
@@ -3145,7 +3145,7 @@ print_world_writable_review() {
     _ww_files_total=0
     _ww_files_truncated=no
     for _ww_root in "$@"; do
-        _ww_list=`find "$_ww_root" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
+        _ww_list=`find "$_ww_root" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"`
         print_world_writable_findings "directories_without_sticky" "$_ww_root" "$_ww_list" "world-writable directories without a sticky bit"
     done
     if [ "$_ww_files_total" -eq 0 ]; then
@@ -3266,7 +3266,7 @@ print_setuid_setgid_files() {
     # ways; the pair that used to be here read as two distinct tests but was one
     # test performed twice.
     subsection "SetUID Files:"
-    _suid_list=`find "$@" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -4000 -print 2>/dev/null | sort -u`
+    _suid_list=`find "$@" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -4000 -print 2>/dev/null | sort -u 2>/dev/null`
     if [ -n "$_suid_list" ]; then
         printf '%s\n' "$_suid_list"
     else
@@ -3275,7 +3275,7 @@ print_setuid_setgid_files() {
     blank_line
 
     subsection "SetGID Files:"
-    _sgid_list=`find "$@" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -2000 -print 2>/dev/null | sort -u`
+    _sgid_list=`find "$@" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -2000 -print 2>/dev/null | sort -u 2>/dev/null`
     if [ -n "$_sgid_list" ]; then
         printf '%s\n' "$_sgid_list"
     else
