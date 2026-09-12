@@ -203,12 +203,67 @@
 # Restrict command lookup to standard administrative paths. This reduces the
 # chance that a shell alias, user-local wrapper, or non-standard executable is
 # used during evidence collection.
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# /usr/xpg4/bin first: on Solaris, /usr/bin/awk is the 1977 awk (no -v, no
+# user functions, no gsub, no character classes), /usr/bin/grep has no -E
+# or -q, and the POSIX versions this script is written against live in
+# /usr/xpg4/bin. The directory does not exist elsewhere, and a directory
+# that does not exist costs a PATH search nothing. The preflight below
+# exercises exactly the awk and grep features in use, so a host that still
+# resolves to the old tools is refused rather than reported on with
+# silently empty sections.
+PATH=/usr/xpg4/bin:/usr/sbin:/usr/bin:/sbin:/bin
 readonly PATH
 
 # Restrict permissions on generated evidence artifacts. This applies only to
 # files and directories created by this script under the working directory.
 umask 077
+
+# A closed standard stream is fatal to the shell at "exec 3>&1" further down,
+# and ends the run with "Bad file descriptor" and no package at all. Some job
+# wrappers close stdout deliberately (">&-"). A closed stream is reopened on
+# /dev/null: the report goes to its file regardless, and only the copy that
+# would have gone to the terminal is lost. The stderr test cannot redirect
+# stderr while testing it, so its own failure message - which has nowhere to
+# go - is simply not produced.
+# The probe is the same operation that would fail later: duplicating the
+# descriptor. Redirecting a no-op command to it is not enough, since some
+# shells do not touch the descriptor for a command that writes nothing.
+if ! ( exec 3>&1 ) 2>/dev/null; then
+    exec 1>/dev/null
+fi
+if ! ( exec 3>&2 ); then
+    exec 2>/dev/null
+fi
+
+# Locale. Everything that shapes evidence text - collation order, number and
+# date formats, tool messages - is fixed to the C locale, so two hosts produce
+# comparably formatted reports and a reviewer is not reading German month
+# names in an ls listing. The character-type category is left as the host has
+# it, so filenames in the host's encoding still render in listings rather
+# than as "?". LC_ALL would override every category at once, which is why it
+# is unset and its value carried into LC_CTYPE.
+_host_ctype=${LC_ALL:-${LC_CTYPE:-${LANG:-C}}}
+unset LC_ALL
+LC_CTYPE=$_host_ctype
+LC_COLLATE=C
+LC_NUMERIC=C
+LC_TIME=C
+LC_MESSAGES=C
+LANG=C
+export LC_CTYPE LC_COLLATE LC_NUMERIC LC_TIME LC_MESSAGES LANG
+
+# SIGPIPE is ignored. The operator's terminal may be a pipe whose reader has
+# gone away - "sudo ./script | head", "| less" quit early, "| tee" killed -
+# and the collector writes a progress line to it during the run. With the
+# default disposition the first such write after the reader exits delivers
+# SIGPIPE to this shell, which dies mid-collection: no verdict, no archive,
+# exit status 141, and the lock left behind. Ignored, the write simply fails,
+# every terminal write here already tolerates that, and the collection - whose
+# report goes to a file, not the terminal - runs to its proper end.
+trap '' PIPE
+
+# The run lock: set when the evidence directory is prepared, removed at exit.
+LOCK_FILE=""
 
 # Resolve the invoked script name for report text and usage instructions.
 # This is informational and does not affect host configuration.
@@ -246,14 +301,20 @@ TEST_MODE=no
 SHOW_HELP=no
 ARGUMENT_ERROR=no
 APP_DIRECTORIES=""
+APP_DIRECTORY_FLAGS=0
 OUTPUT_DIRECTORY=""
 expect_app_dir_value=no
 expect_output_dir_value=no
 
 for argument in "$@"; do
     if [ "$expect_app_dir_value" = "yes" ]; then
+        if [ -z "$argument" ]; then
+            printf 'FAIL: --app-dir was given an empty value; it needs a directory path.\n' >&2
+            exit 1
+        fi
         APP_DIRECTORIES="$APP_DIRECTORIES
 $argument"
+        APP_DIRECTORY_FLAGS=`expr "$APP_DIRECTORY_FLAGS" + 1`
         expect_app_dir_value=no
         continue
     fi
@@ -274,10 +335,13 @@ $argument"
             ;;
         --app-dir=*)
             app_dir_value=${argument#--app-dir=}
-            if [ -n "$app_dir_value" ]; then
-                APP_DIRECTORIES="$APP_DIRECTORIES
-$app_dir_value"
+            if [ -z "$app_dir_value" ]; then
+                printf 'FAIL: --app-dir= was given an empty value; it needs a directory path.\n' >&2
+                exit 1
             fi
+            APP_DIRECTORIES="$APP_DIRECTORIES
+$app_dir_value"
+            APP_DIRECTORY_FLAGS=`expr "$APP_DIRECTORY_FLAGS" + 1`
             ;;
         --output-dir)
             expect_output_dir_value=yes
@@ -292,6 +356,40 @@ $app_dir_value"
             ;;
     esac
 done
+
+# Whether the output directory came from the command line. An explicit choice
+# that cannot be honoured is an error; only the interactive prompt falls back.
+OUTPUT_DIRECTORY_FROM_FLAG=no
+if [ -n "$OUTPUT_DIRECTORY" ]; then
+    OUTPUT_DIRECTORY_FROM_FLAG=yes
+fi
+
+# A path containing a newline cannot be carried through the newline-separated
+# application-directory list or written into the manifest as a single record.
+# One given as --app-dir was split into two paths that did not exist, and the
+# directory the operator asked about was never listed - with only a "does not
+# exist" warning to say so. Refuse it up front instead.
+_arg_nl='
+'
+case "$OUTPUT_DIRECTORY" in
+    *"$_arg_nl"*)
+        printf 'FAIL: the --output-dir value contains a newline character, which is not supported.\n' >&2
+        exit 1
+        ;;
+esac
+if [ -n "$APP_DIRECTORIES" ]; then
+    _arg_dirs_seen=0
+    _arg_dirs_ifs=$IFS
+    IFS="$_arg_nl"
+    for _arg_dir in $APP_DIRECTORIES; do
+        [ -n "$_arg_dir" ] && _arg_dirs_seen=`expr "$_arg_dirs_seen" + 1`
+    done
+    IFS=$_arg_dirs_ifs
+    if [ "$_arg_dirs_seen" -ne "$APP_DIRECTORY_FLAGS" ]; then
+        printf 'FAIL: an --app-dir value contains a newline character, which is not supported.\n' >&2
+        exit 1
+    fi
+fi
 
 if [ "$expect_app_dir_value" = "yes" ]; then
     printf 'Missing value for --app-dir option.\n' >&2
@@ -328,6 +426,12 @@ ARCHIVE_TIMESTAMP=`date '+%Y%m%d-%H%M%S' 2>/dev/null || echo unknown_time`
 readonly ARCHIVE_TIMESTAMP
 
 SAFE_HOSTNAME=`printf '%s' "$HOSTNAME_VALUE" | tr -c 'A-Za-z0-9._-' '_'`
+# The archive's file name carries the hostname. Linux caps a hostname at 64
+# characters, but Solaris and AIX allow 255, and with the prefix and the
+# timestamp a name that long exceeds NAME_MAX on every common filesystem,
+# so the archive could not be created at all. The file name takes the first
+# 64 characters; the report and log carry the hostname in full.
+SAFE_HOSTNAME=`printf '%s' "$SAFE_HOSTNAME" | cut -c1-64`
 readonly SAFE_HOSTNAME
 
 # Default evidence output location: the operator's current working directory.
@@ -335,6 +439,29 @@ readonly SAFE_HOSTNAME
 # the interactive output-directory prompt at startup. The path variables
 # below are recomputed by apply_output_directory after the prompt resolves.
 WORKING_DIRECTORY=`pwd 2>/dev/null || echo .`
+# Where the operator was standing when the script started. Relative paths given
+# on the command line are anchored here and recorded absolute, because a log
+# line reading "OUTPUT_DIRECTORY: rel/SOX-ITGC-AUDIT-LINUX-UNIX" is ambiguous
+# the moment the package leaves the host.
+INVOCATION_DIRECTORY=$WORKING_DIRECTORY
+readonly INVOCATION_DIRECTORY
+
+# Make a path absolute and physical: anchored at the invocation directory if
+# relative, with symbolic links in the directory part resolved. Prints the input
+# unchanged if the directory cannot be entered, so a nonexistent path is still
+# reported under the name the operator gave.
+absolute_directory() {
+    case "$1" in
+        /*) _ad_path=$1 ;;
+        *)  _ad_path="$INVOCATION_DIRECTORY/$1" ;;
+    esac
+    _ad_resolved=`cd "$_ad_path" 2>/dev/null && pwd -P`
+    if [ -n "$_ad_resolved" ]; then
+        printf '%s' "$_ad_resolved"
+    else
+        printf '%s' "$_ad_path"
+    fi
+}
 
 # Evidence directory structure created under the output directory:
 # - report/: human-readable audit report generated by this script
@@ -614,8 +741,109 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# A path whose CONTENTS may be read. This requires a regular file, not merely a
+# readable one, and the distinction is what stops the collection from hanging:
+# [ -r ] is true for a named pipe, and the cat or awk that follows blocks
+# forever waiting for a writer that never comes. A FIFO planted where a
+# configuration file is expected - /etc/cron.d, /etc/profile.d - stalled the
+# entire collection in testing, and on a client host there is no timeout to end
+# it. Sockets and device nodes are excluded for the same reason. Callers that
+# need only existence use path_exists.
 file_readable() {
-    [ -r "$1" ]
+    [ -f "$1" ] && [ -r "$1" ]
+}
+
+# Resolve a path to the file it actually denotes, following symbolic links in
+# every component - without readlink -f (GNU only) or realpath (absent on AIX
+# and HP-UX). The directory part is canonicalised with cd and pwd -P, both
+# POSIX; the final component is followed link by link, reading each target from
+# ls -ld, which every Unix prints in the same "name -> target" form. Bounded, so
+# a link loop terminates. Prints nothing and fails on a loop, a dangling link,
+# or a directory that cannot be entered.
+canonical_path() {
+    _cp_path=$1
+    _cp_hops=""
+    while [ "${#_cp_hops}" -lt 32 ]; do
+        _cp_hops="${_cp_hops}x"
+        # dirname and basename by parameter expansion: no process is forked for
+        # the several thousand calls a large configuration tree produces.
+        case "$_cp_path" in
+            */*) _cp_dir=${_cp_path%/*}; _cp_base=${_cp_path##*/} ;;
+            *)   _cp_dir=.;              _cp_base=$_cp_path ;;
+        esac
+        [ -n "$_cp_dir" ] || _cp_dir=/
+        # The directory part is resolved with cd and pwd -P only when some
+        # component of it is a link or a dot entry; a path whose directory is
+        # already physical - the overwhelmingly common case - costs no fork.
+        if ! directory_is_physical "$_cp_dir"; then
+            _cp_dir=`cd "$_cp_dir" 2>/dev/null && pwd -P` || return 1
+        fi
+        case "$_cp_dir" in
+            /) _cp_path="/$_cp_base" ;;
+            *) _cp_path="$_cp_dir/$_cp_base" ;;
+        esac
+        if [ -L "$_cp_path" ]; then
+            _cp_target=`ls -ld "$_cp_path" 2>/dev/null | sed 's/.* -> //'`
+            [ -n "$_cp_target" ] || return 1
+            case "$_cp_target" in
+                /*) _cp_path=$_cp_target ;;
+                *)  _cp_path="$_cp_dir/$_cp_target" ;;
+            esac
+            continue
+        fi
+        printf '%s' "$_cp_path"
+        return 0
+    done
+    return 1
+}
+
+# True when an absolute directory path is already physical: no component is a
+# symbolic link and none is "." or "..". Only builtins are used.
+directory_is_physical() {
+    case "$1" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    _dip_acc=""
+    _dip_ifs=$IFS
+    IFS=/
+    for _dip_comp in $1; do
+        [ -n "$_dip_comp" ] || continue
+        case "$_dip_comp" in
+            .|..) IFS=$_dip_ifs; return 1 ;;
+        esac
+        _dip_acc="$_dip_acc/$_dip_comp"
+        if [ -L "$_dip_acc" ]; then
+            IFS=$_dip_ifs
+            return 1
+        fi
+    done
+    IFS=$_dip_ifs
+    return 0
+}
+
+# Whether a symbolic link may be followed for its CONTENTS. It may only when the
+# resolved target is something this script would be willing to collect at that
+# path in its own right. A credential store, anything under a home directory,
+# the process and device filesystems: all are recorded as a link and left
+# unread.
+#
+# The case that made this necessary: a link at /etc/cron.d/x pointing at
+# /etc/shadow. The sensitive-path table screens the path it is handed, and
+# /etc/cron.d/x is not in it, so the collector copied /etc/shadow into
+# raw_files/ under a harmless name, printed it in the report, and reported a
+# CLEAN collection. The path a link is reached BY says nothing about what it
+# denotes, so the target is what gets judged.
+symlink_target_off_limits() {
+    if is_sensitive_path "$1"; then
+        return 0
+    fi
+    case "$1" in
+        /root|/root/*|/home|/home/*|/export/home/*|/Users/*|/proc/*|/sys/*|/dev/*)
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 directory_exists() {
@@ -635,6 +863,12 @@ path_exists() {
 is_sensitive_path() {
     case "$1" in
         /etc/shadow|/etc/gshadow|/etc/sssd/sssd.conf|/etc/krb5.keytab|/etc/krb5/krb5.keytab|/etc/ldap.secret)
+            return 0
+            ;;
+        /etc/shadow-|/etc/gshadow-|/etc/shadow.*|/etc/gshadow.*|*/shadow.bak|*/shadow.old|/etc/security/passwd.*)
+            # The backup copies passwd, useradd and pwconv leave beside the
+            # live file - /etc/shadow- exists on every Linux host - hold the
+            # same hashes as the original.
             return 0
             ;;
         /etc/security/passwd|/etc/security/opasswd|/etc/opasswd|/etc/security/ldap/ldap.cfg|/etc/security/passwd.conf)
@@ -753,6 +987,46 @@ write_redacted_passwd_copy() {
     return 1
 }
 
+# A path as it is written into the manifest and the skip list.
+#
+# Both files are one record per line with fields separated by "|", and a
+# filename can contain either character - or "%", used here as the escape. A
+# file named "zz<newline>probe" in /etc/cron.d split its own COPIED record
+# across two lines, and the receipt verifier then reported two files missing
+# from a package that was complete. The four characters are encoded as %25,
+# %7C, %0A and %0D; the verifier decodes them. Nothing is forked unless the
+# path actually contains one of them, which is nearly never.
+MANIFEST_NL='
+'
+# Every C0 control character except newline (handled by the line split) plus
+# DEL, in code order, so a character's position in this string is its code.
+MANIFEST_CTL=`printf '\001\002\003\004\005\006\007\010\011\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177'`
+manifest_path() {
+    case "$1" in
+        *[%\|]*|*"$MANIFEST_NL"*|*[$MANIFEST_CTL]*)
+            printf '%s' "$1" | awk -v ctl="$MANIFEST_CTL" '
+                BEGIN { ORS = "" }
+                NR > 1 { print "%0A" }
+                {
+                    n = length($0)
+                    for (i = 1; i <= n; i++) {
+                        c = substr($0, i, 1)
+                        if (c == "%") { print "%25"; continue }
+                        if (c == "|") { print "%7C"; continue }
+                        k = index(ctl, c)
+                        if (k == 0) { print c; continue }
+                        if (k >= 10) k++        # position 10 onward skips the newline (code 10)
+                        if (k == 31) k = 127    # the last entry is DEL
+                        printf "%%%02X", k
+                    }
+                }'
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
 record_manifest_line() {
     if [ -f "$MANIFEST_FILE" ]; then
         printf '%s\n' "$1" >> "$MANIFEST_FILE"
@@ -774,8 +1048,9 @@ record_manifest_line() {
 # duplicate check keeps the list readable as an inventory.
 record_sensitive_skip() {
     if [ -f "$SENSITIVE_SKIPPED_FILE" ]; then
-        if ! grep -Fxq "$1" "$SENSITIVE_SKIPPED_FILE" 2>/dev/null; then
-            printf '%s\n' "$1" >> "$SENSITIVE_SKIPPED_FILE"
+        _rss_entry=`manifest_path "$1"`
+        if ! grep -Fxq "$_rss_entry" "$SENSITIVE_SKIPPED_FILE" 2>/dev/null; then
+            printf '%s\n' "$_rss_entry" >> "$SENSITIVE_SKIPPED_FILE"
             log_event INFO sensitive "$1 held back from the package by the credential safeguards; metadata recorded instead of contents"
         fi
         return
@@ -959,21 +1234,86 @@ close_log_addendum() {
 # as a fallback for the case where no log file could be created at all.
 #
 # The grep patterns match the padded column layout log_event writes
-# (" | WARN  | ", " | ERROR | ") and cannot match the prose in the header or
-# summary, which never carries the surrounding pipe columns.
+# (" | WARN  | ", " | ERROR | ") anchored to the start of the line with no
+# "|" before the level column - the timestamp field never contains one. An
+# unanchored match counted a WARN line whose MESSAGE named a file called
+# "zz | ERROR | x" as an error, and the verdict for a run with no errors was
+# COMPLETED_WITH_ERRORS. The header and summary prose never carries the
+# column layout at all.
+#
+# The file can undercount too, in exactly one circumstance: when the output
+# filesystem has filled up, the append that would have recorded an ERROR fails,
+# and a verdict read back from the file then says nothing went wrong. So the
+# larger of the two tallies is taken. Neither source alone is complete; the
+# maximum cannot be lower than the truth.
 recount_log_levels() {
     if [ "$LOG_READY" = "yes" ] && [ -f "$LOG_FILE" ]; then
-        LOG_WARN_COUNT=`grep -c ' | WARN  | ' "$LOG_FILE" 2>/dev/null`
-        [ -n "$LOG_WARN_COUNT" ] || LOG_WARN_COUNT=0
-        LOG_ERROR_COUNT=`grep -c ' | ERROR | ' "$LOG_FILE" 2>/dev/null`
-        [ -n "$LOG_ERROR_COUNT" ] || LOG_ERROR_COUNT=0
+        _rll_warn=`grep -c '^[^|]* | WARN  | ' "$LOG_FILE" 2>/dev/null`
+        _rll_error=`grep -c '^[^|]* | ERROR | ' "$LOG_FILE" 2>/dev/null`
+        case "$_rll_warn" in ''|*[!0-9]*) _rll_warn=0 ;; esac
+        case "$_rll_error" in ''|*[!0-9]*) _rll_error=0 ;; esac
+        if [ "$_rll_warn" -gt "$LOG_WARN_COUNT" ]; then
+            LOG_WARN_COUNT=$_rll_warn
+        fi
+        if [ "$_rll_error" -gt "$LOG_ERROR_COUNT" ]; then
+            LOG_ERROR_COUNT=$_rll_error
+        fi
+    fi
+}
+
+# Replace control characters in a text file that people will read, byte for
+# byte, so the file keeps its size and any open descriptor's offset stays
+# valid. TAB, LF and CR are kept. Everything else in the C0 range and DEL
+# becomes "?".
+#
+# A cron file containing ESC[2J ESC[H and a forged "COLLECTION RESULT" line
+# reached the report verbatim and was replayed to the operator's terminal,
+# which cleared the screen and printed the forgery; an auditor running cat on
+# the report gets the same. Anything that ends up in the report or log can
+# carry such bytes - file contents, filenames, process titles, login records
+# - so the whole file is sanitised once, at the end, rather than each route
+# separately. The copies in raw_files/ are untouched.
+sanitize_text_file() {
+    _stf=$1
+    [ -f "$_stf" ] || return 0
+    if tr '\000-\010\013\014\016-\037\177' '[?*]' < "$_stf" > "$_stf.sanitizing" 2>/dev/null \
+       && cat "$_stf.sanitizing" > "$_stf" 2>/dev/null; then
+        :
+    fi
+    rm -f "$_stf.sanitizing" 2>/dev/null
+}
+
+# Prove the package can still be written before the verdict is. Under a full
+# filesystem every printf into the report fails silently, the log lines that
+# would have said so are lost the same way, and a verdict derived from the log
+# reads as though nothing happened: a 1 MB filesystem yielded a report cut off
+# mid-section, a 0-byte archive, and COMPLETED_WITH_WARNINGS - which the client
+# instructions describe as "normal, send it". A write that cannot be read back,
+# or a report missing its own closing lines, makes the run FAILED.
+PACKAGE_WRITE_FAILED=no
+verify_package_writable() {
+    _vpw_probe="$METADATA_DIRECTORY/.write-probe"
+    if printf 'write-probe\n' > "$_vpw_probe" 2>/dev/null && [ "`cat "$_vpw_probe" 2>/dev/null`" = "write-probe" ]; then
+        rm -f "$_vpw_probe" 2>/dev/null
+    else
+        rm -f "$_vpw_probe" 2>/dev/null
+        PACKAGE_WRITE_FAILED=yes
+        log_event ERROR evidence "the output filesystem is full or no longer writable; the report and file copies in this package are incomplete and it must not be relied upon"
+    fi
+    # The closing line is looked for at the END of the report, not anywhere in
+    # it: a source file that happens to contain the same words is printed into
+    # the report verbatim, and would otherwise vouch for a report cut off
+    # right after it.
+    if [ -f "$REPORT_FILE" ] && ! tail -n 5 "$REPORT_FILE" 2>/dev/null | grep -q 'Review that file before relying on any section'; then
+        PACKAGE_WRITE_FAILED=yes
+        log_event ERROR evidence "the report is truncated: its closing section was not written, so sections at the end are missing"
     fi
 }
 
 # Overall verdict for the run, as a single stable token.
 collection_log_result() {
     recount_log_levels
-    if [ "$COLLECTION_STATUS" != "ready" ]; then
+    if [ "$COLLECTION_STATUS" != "ready" ] || [ "$PACKAGE_WRITE_FAILED" = "yes" ]; then
         printf 'FAILED'
     elif [ "$LOG_ERROR_COUNT" -gt 0 ]; then
         printf 'COMPLETED_WITH_ERRORS'
@@ -1110,19 +1450,125 @@ classify_source_file() {
         printf 'withheld'
         return
     fi
-    if [ -f "$_cls_path" ] && ! [ -r "$_cls_path" ]; then
+    # What the path DENOTES is judged, not only how it is spelled. A symbolic
+    # link, or a path beneath a linked directory, can lead anywhere, and the
+    # copy that results carries the target's contents under the link's name.
+    _cls_real=`canonical_path "$_cls_path"`
+    if [ -z "$_cls_real" ]; then
         printf 'unreadable'
         return
     fi
+    if [ "$_cls_real" != "$_cls_path" ] && symlink_target_off_limits "$_cls_real"; then
+        printf 'withheld'
+        return
+    fi
+    # A named pipe, socket, or device node where a file was expected. Its
+    # contents are never read: a pipe with no writer blocks forever.
+    if ! [ -f "$_cls_path" ]; then
+        printf 'special'
+        return
+    fi
+    if ! [ -r "$_cls_path" ]; then
+        printf 'unreadable'
+        return
+    fi
+    if file_contains_credential_material "$_cls_path"; then
+        printf 'withheld'
+        return
+    fi
     printf 'collectable'
+}
+
+# Credential material recognised by CONTENT, wherever the file is.
+#
+# Path rules cannot see a hard link. /etc/cron.d/x linked to /etc/shadow is the
+# same inode under another name; it resolves to itself, its path is not in any
+# table, and it was copied byte-for-byte into raw_files/ and printed in the
+# report. Path rules also miss a copy of the shadow file left in an odd place.
+# What both have in common is what the bytes look like, so that is what is
+# tested: any colon-separated line whose second field is a crypt hash
+# ($6$..., $y$..., $1$..., $apr1$...) is credential material outright; a file
+# with three or more lines in shadow's nine-field shape, or gshadow's
+# four-field shape with a locked-account placeholder, is an account table
+# whether or not the hashes happen to be present.
+#
+# /etc/passwd is exempt: on a host that keeps hashes inline it is delivered as
+# a REDACTED copy by its own route, because the account inventory is required
+# evidence. Only the first 500 lines are examined; a credential file is not a
+# large file.
+file_contains_credential_material() {
+    _fcc_path=$1
+    if [ "$_fcc_path" = "/etc/passwd" ]; then
+        return 1
+    fi
+    [ -f "$_fcc_path" ] && [ -r "$_fcc_path" ] || return 1
+    awk -F: '
+        NR > 500          { exit }
+        /^[[:space:]]*#/  { next }
+        NF >= 2 && $2 ~ /^\$[0-9A-Za-z]+\$/ { found = 1; exit }
+        NF == 9 && ($2 == "*" || $2 == "!" || $2 == "!!" || $2 == "") && $3 ~ /^[0-9]*$/ && $4 ~ /^[0-9]*$/ && $5 ~ /^[0-9]*$/ { shadow++ }
+        NF == 4 && ($2 == "*" || $2 == "!" || $2 == "!!") && $1 ~ /^[A-Za-z_][A-Za-z0-9_.-]*$/ { gshadow++ }
+        END { if (found || shadow >= 3 || gshadow >= 3) exit 0; exit 1 }
+    ' "$_fcc_path" 2>/dev/null
 }
 
 # The single record of a deliberate withholding: manifest and skip list together,
 # never one without the other. Both are deduplicated, so a file reached through
 # several sections is recorded once.
 record_withheld_file() {
-    record_reference_outcome "SENSITIVE_METADATA_ONLY" "$1" ""
-    record_sensitive_skip "$1"
+    if [ -n "${2:-}" ]; then
+        record_reference_outcome "SENSITIVE_METADATA_ONLY" "$1" "note=$2"
+        record_sensitive_skip "$1 ($2)"
+    else
+        record_reference_outcome "SENSITIVE_METADATA_ONLY" "$1" ""
+        record_sensitive_skip "$1"
+    fi
+}
+
+# The reason a withheld path was withheld, when it was withheld for something
+# other than its own name: for where it leads, or for what it contains. Empty
+# for an ordinary sensitive path, whose name is reason enough.
+withheld_reason_note() {
+    if is_sensitive_path "$1"; then
+        return
+    fi
+    _wvs_real=`canonical_path "$1"`
+    if [ -n "$_wvs_real" ] && [ "$_wvs_real" != "$1" ] && symlink_target_off_limits "$_wvs_real"; then
+        printf 'symbolic link to %s; target withheld' "$_wvs_real"
+        return
+    fi
+    if file_contains_credential_material "$1"; then
+        printf 'contents are credential material: password hashes or a shadow-format account table; withheld regardless of the file name'
+    fi
+}
+
+# grep across candidate files, reading only the ones this script would collect.
+#
+# Several sections grep a directory glob directly - /etc/pam.d/*,
+# /etc/profile.d/*.sh - and grep opens whatever the glob expands to. A named
+# pipe in that directory blocked the collection for good (grep waits for a
+# writer), and a symbolic link to a credential file would have been searched.
+# The positional list is rebuilt to hold only regular, readable, non-withheld
+# files, which keeps names containing spaces intact without arrays.
+#
+# Usage: grep_collectable GREP-OPTIONS PATTERN FILE...
+# Returns grep's status; returns 1 without running grep if nothing qualifies.
+grep_collectable() {
+    _gc_opts=$1
+    _gc_pattern=$2
+    shift 2
+    _gc_count=$#
+    while [ "$_gc_count" -gt 0 ]; do
+        _gc_f=$1
+        shift
+        if [ "`classify_source_file "$_gc_f"`" = "collectable" ]; then
+            set -- "$@" "$_gc_f"
+        fi
+        _gc_count=`expr "$_gc_count" - 1`
+    done
+    [ $# -gt 0 ] || return 1
+    # shellcheck disable=SC2086
+    grep $_gc_opts "$_gc_pattern" "$@" 2>/dev/null
 }
 
 record_file_reference() {
@@ -1146,13 +1592,26 @@ record_file_reference() {
         esac
     elif [ -d "$ref_path" ]; then
         _ref_count=0
+        _ref_special=0
         for ref_entry in "$ref_path"/*; do
             if [ -f "$ref_entry" ]; then
                 _ref_count=`expr "$_ref_count" + 1`
                 copy_file_to_collection "$ref_entry"
+            elif [ -e "$ref_entry" ] && ! [ -d "$ref_entry" ]; then
+                # A named pipe, socket, or device where configuration files
+                # live. Its contents are never read - a pipe with no writer
+                # blocks forever - but its presence is anomalous and belongs
+                # in the chain of custody, not silently skipped past.
+                _ref_special=`expr "$_ref_special" + 1`
+                record_reference_outcome "EXAMINED_SPECIAL" "$ref_entry" "reason=not_a_regular_file|contents_not_read=yes"
+                log_event WARN evidence "$ref_entry is a named pipe, socket, or device in a configuration directory; its contents were not read and it was not copied"
             fi
         done
-        record_reference_outcome "DIRECTORY_EXAMINED" "$ref_path" "files=$_ref_count"
+        if [ "$_ref_special" -gt 0 ]; then
+            record_reference_outcome "DIRECTORY_EXAMINED" "$ref_path" "files=$_ref_count|special=$_ref_special"
+        else
+            record_reference_outcome "DIRECTORY_EXAMINED" "$ref_path" "files=$_ref_count"
+        fi
         if [ "$_ref_count" -eq 0 ]; then
             log_event INFO evidence "$ref_path exists but contains no files; recorded as examined and empty, which is itself evidence that nothing in it overrides the corresponding configuration"
         fi
@@ -1169,7 +1628,7 @@ record_file_reference() {
 # later identical ones are suppressed.
 record_reference_outcome() {
     _outcome_verb=$1
-    _outcome_path=$2
+    _outcome_path=`manifest_path "$2"`
     _outcome_extra=$3
 
     if [ ! -f "$MANIFEST_FILE" ]; then
@@ -1191,6 +1650,44 @@ record_reference_outcome() {
 # named by COLLECTION_DIRECTORY under the current working directory. It does
 # not remove or modify host configuration files outside that evidence folder.
 prepare_collection_directory() {
+    # Refuse to start over a collection that is still running in the same
+    # directory. The reset below deletes the previous package, so a second
+    # operator launching into the same directory a moment after the first
+    # destroyed the first run's evidence mid-collection, and both runs then
+    # failed with several hundred errors between them. The lock names the
+    # running process, and a lock left behind by a process that no longer
+    # exists - a crash, a reboot - is ignored, so it cannot wedge a directory.
+    LOCK_FILE="$WORKING_DIRECTORY/.sox-itgc-collector.lock"
+    if [ -f "$LOCK_FILE" ]; then
+        _lock_pid=`cat "$LOCK_FILE" 2>/dev/null`
+        case "$_lock_pid" in
+            ''|*[!0-9]*) _lock_pid="" ;;
+        esac
+        # A live process with that PID is only a running collection if it
+        # is one: after a reboot or a crash, PIDs are reused, and a lock left
+        # behind could otherwise name an unrelated process for as long as it
+        # lives. Where ps can show the command line, it has to name this
+        # script; where it cannot, a live PID is taken at its word.
+        _lock_live=no
+        if [ -n "$_lock_pid" ] && [ "$_lock_pid" != "$$" ] && kill -0 "$_lock_pid" 2>/dev/null; then
+            _lock_live=yes
+            _lock_args=`ps -o args= -p "$_lock_pid" 2>/dev/null`
+            if [ -n "$_lock_args" ]; then
+                case "$_lock_args" in
+                    *evidence-gathering-script*) ;;
+                    *) _lock_live=no ;;
+                esac
+            fi
+        fi
+        if [ "$_lock_live" = "yes" ]; then
+            printf 'FAIL: another collection (process %s) is already running in %s.\n' "$_lock_pid" "$WORKING_DIRECTORY" >&2
+            printf '      Wait for it to finish, or choose a different --output-dir. Nothing\n' >&2
+            printf '      was collected by this run and nothing on the host was changed.\n' >&2
+            exit 1
+        fi
+    fi
+    printf '%s\n' "$$" > "$LOCK_FILE" 2>/dev/null
+
     if rm -rf "$COLLECTION_DIRECTORY" 2>/dev/null && \
        mkdir -p "$REPORTS_DIRECTORY" "$RAW_FILES_DIRECTORY" "$METADATA_DIRECTORY" 2>/dev/null; then
         : > "$MANIFEST_FILE"
@@ -1223,22 +1720,43 @@ copy_file_to_collection() {
     # never recorded as withheld at all - so /etc/shadow on a non-root run
     # produced an empty skip list, in the very file the client is told to
     # consult to confirm what was held back.
-    if [ -f "$file_path" ] && is_sensitive_path "$file_path"; then
-        # Recorded in the MANIFEST as well as in the skip list.
-        #
-        # The manifest is the chain-of-custody document, and a file the
-        # collection deliberately withheld belongs in it. Without this line a
-        # file stopped here appeared ONLY in SENSITIVE_FILES_SKIPPED.txt - which
-        # meant /etc/shadow, the single most sensitive file this tool handles,
-        # was cited in the report with its permissions and checksum and had no
-        # manifest entry at all. Files withheld through the other path
-        # (print_sensitive_file_review) were recorded properly, so the two
-        # routes disagreed and the more sensitive one was the one missing.
-        record_withheld_file "$file_path"
-        return
-    fi
+    # One classifier for every route, so this cannot disagree with the report.
+    # It judges the resolved target of a symbolic link, not the link's name:
+    # the previous path-only check here copied /etc/shadow into raw_files/
+    # through a link in /etc/cron.d.
+    case `classify_source_file "$file_path"` in
+        withheld)
+            # Recorded in the MANIFEST as well as in the skip list.
+            #
+            # The manifest is the chain-of-custody document, and a file the
+            # collection deliberately withheld belongs in it. Without this line
+            # a file stopped here appeared ONLY in SENSITIVE_FILES_SKIPPED.txt -
+            # which meant /etc/shadow, the single most sensitive file this tool
+            # handles, was cited in the report with its permissions and checksum
+            # and had no manifest entry at all.
+            record_withheld_file "$file_path" "`withheld_reason_note "$file_path"`"
+            return
+            ;;
+        collectable)
+            ;;
+        *)
+            return
+            ;;
+    esac
 
-    if ! [ -f "$file_path" ] || ! [ -r "$file_path" ]; then
+    # A file too large to be configuration is recorded, not copied. A 200 MB
+    # file dropped into /etc/cron.d produced a package too large to transfer,
+    # and the collector called it CLEAN. The checksum is kept so the file can
+    # still be tied to what the report cites.
+    _copy_size=`file_size_bytes "$file_path"`
+    if [ "${_copy_size:-0}" -gt "$RAW_COPY_LIMIT_BYTES" ] 2>/dev/null; then
+        if ! grep -Fq "NOT_COPIED_TOO_LARGE|`manifest_path "$file_path"`|" "$MANIFEST_FILE" 2>/dev/null; then
+            _big_sum=`print_file_checksum "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
+            record_manifest_line "NOT_COPIED_TOO_LARGE|`manifest_path "$file_path"`|size=$_copy_size|limit=$RAW_COPY_LIMIT_BYTES|checksum=${_big_sum:-unavailable}|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+            log_event WARN evidence "$file_path is $_copy_size bytes, above the $RAW_COPY_LIMIT_BYTES-byte copy limit; it was recorded with its checksum and NOT copied into raw_files/"
+        fi
         return
     fi
 
@@ -1264,7 +1782,7 @@ copy_file_to_collection() {
             if write_redacted_passwd_copy "$file_path" "$target_path"; then
                 _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
                 _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
-                record_manifest_line "COPIED_REDACTED|$file_path|field=2_password_hash|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+                record_manifest_line "COPIED_REDACTED|`manifest_path "$file_path"`|field=2_password_hash|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
                 record_sensitive_skip "$file_path (field 2 only; this host stores password hashes inline in /etc/passwd, so a redacted copy was delivered in place of the original)"
                 log_event WARN sensitive "/etc/passwd on this host carries password hashes inline in field 2 rather than in a shadow file; raw_files/etc/passwd is a REDACTED copy with field 2 removed and is not a byte-for-byte reproduction of the source"
             else
@@ -1279,7 +1797,15 @@ copy_file_to_collection() {
             # and are normalised at handover so the audit team can read them.
             _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
             _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
-            record_manifest_line "COPIED|$file_path|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+            # When the copy came through a symbolic link, say where from. The
+            # bytes in raw_files/ are the target's, and a reviewer comparing
+            # them to the link's own metadata needs to know that.
+            _src_real=`canonical_path "$file_path"`
+            if [ -n "$_src_real" ] && [ "$_src_real" != "$file_path" ]; then
+                record_manifest_line "COPIED|`manifest_path "$file_path"`|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}|symlink_target=$_src_real"
+            else
+                record_manifest_line "COPIED|`manifest_path "$file_path"`|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+            fi
         else
             log_event WARN evidence "$file_path was readable but could not be copied into the package; the report may reference a file that was not delivered"
         fi
@@ -1382,6 +1908,24 @@ print_path_metadata() {
 print_noncomment_or_not_available() {
     file_path=$1
 
+    # Same classifier as the full-file route. This helper previously checked
+    # readability alone, and a symbolic link in /etc/sudoers.d pointing at a
+    # root-only file had its "active entries" printed here after the full-file
+    # route had correctly withheld it.
+    case `classify_source_file "$file_path"` in
+        withheld)
+            _pnc_note=`withheld_reason_note "$file_path"`
+            printf 'Withheld: contents deliberately not read (%s)\n' "${_pnc_note:-credential file}"
+            record_withheld_file "$file_path" "$_pnc_note"
+            return
+            ;;
+        special)
+            printf 'Not a regular file (named pipe, socket, or device); contents not read.\n'
+            record_reference_outcome "EXAMINED_SPECIAL" "$file_path" ""
+            return
+            ;;
+    esac
+
     if file_readable "$file_path"; then
         if awk '/^[[:space:]]*#/ { next } /^[[:space:]]*$/ { next } { print; found = 1 } END { if (!found) exit 1 }' "$file_path" 2>/dev/null; then
             :
@@ -1473,6 +2017,59 @@ print_sensitive_file_review() {
     fi
 }
 
+# Limits on what a single source file may contribute to the package.
+#
+# The report is read by a person, and a file large enough to reach the print
+# limit (4 MB) is not configuration in any useful sense - the largest thing
+# legitimately printed in full is a package manager's log, and that is well
+# under it on any host that has not been left unpatched for a decade. The copy
+# in raw_files/ is complete regardless, up to the copy limit (64 MB); above
+# that the file is recorded with its size and checksum instead. Both limits exist because a 200 MB file
+# left in /etc/cron.d produced a 200 MB report and a package too large to
+# transfer, and the collector called the result CLEAN.
+REPORT_PRINT_LIMIT_BYTES=4194304
+readonly REPORT_PRINT_LIMIT_BYTES
+RAW_COPY_LIMIT_BYTES=67108864
+readonly RAW_COPY_LIMIT_BYTES
+
+file_size_bytes() {
+    _fsb=`wc -c < "$1" 2>/dev/null | tr -d ' '`
+    case "$_fsb" in
+        ''|*[!0-9]*) printf '0' ;;
+        *) printf '%s' "$_fsb" ;;
+    esac
+}
+
+# A NUL byte in the first 8 KB. dd and od are POSIX; head -c is not, and file(1)
+# is not universally present. Binary content is never printed into the report,
+# where it is unreadable and can corrupt a terminal; the copy in raw_files/ is
+# still made so the reviewer has the bytes.
+file_looks_binary() {
+    dd if="$1" bs=8192 count=1 2>/dev/null | od -An -c 2>/dev/null | grep -q '\\0'
+}
+
+# The body of a source file, as the report shows it: verbatim for an ordinary
+# file, a placeholder for a binary one, the first REPORT_PRINT_LIMIT_BYTES with
+# a disclosed cut for an oversized one. The manifest and log record each of
+# the latter two so a reviewer knows the report is not the whole file.
+print_file_body() {
+    _pfb_path=$1
+    _pfb_size=`file_size_bytes "$_pfb_path"`
+    if file_looks_binary "$_pfb_path"; then
+        printf '[binary content, %s bytes: not printed in this report; see raw_files/ for the copy]\n' "$_pfb_size"
+        record_reference_outcome "PRINTED_BINARY_OMITTED" "$_pfb_path" "size=$_pfb_size"
+        return 1
+    fi
+    if [ "$_pfb_size" -gt "$REPORT_PRINT_LIMIT_BYTES" ] 2>/dev/null; then
+        dd if="$_pfb_path" bs="$REPORT_PRINT_LIMIT_BYTES" count=1 2>/dev/null
+        printf '\n[truncated in this report after %s of %s bytes; the copy in raw_files/ is complete up to the copy limit]\n' "$REPORT_PRINT_LIMIT_BYTES" "$_pfb_size"
+        record_reference_outcome "PRINTED_TRUNCATED" "$_pfb_path" "shown=$REPORT_PRINT_LIMIT_BYTES|size=$_pfb_size"
+        log_event WARN evidence "$_pfb_path is $_pfb_size bytes; the report shows the first $REPORT_PRINT_LIMIT_BYTES bytes only"
+        return 1
+    fi
+    cat "$_pfb_path"
+}
+
 # Full-file evidence handling:
 # This helper is used whenever the report should show a source file. Readable
 # non-sensitive files are printed and copied into raw_files/. Sensitive files
@@ -1482,15 +2079,40 @@ print_file_with_header() {
     file_path=$1
 
     printf 'File: %s\n' "$file_path"
-    if is_sensitive_path "$file_path"; then
-        print_sensitive_file_review "$file_path"
-        return
-    fi
+    case `classify_source_file "$file_path"` in
+        withheld)
+            _pfh_note=`withheld_reason_note "$file_path"`
+            if [ -n "$_pfh_note" ]; then
+                _pfh_real=`canonical_path "$file_path"`
+                printf 'This path is a symbolic link to %s\n' "$_pfh_real"
+                printf 'The target is a credential store, a home directory, or a system\n'
+                printf 'pseudo-file, so its contents were deliberately not read. Metadata only:\n'
+                ls -ld "$file_path" 2>/dev/null || not_available
+                record_withheld_file "$file_path" "$_pfh_note"
+            else
+                print_sensitive_file_review "$file_path"
+            fi
+            return
+            ;;
+        special)
+            printf 'Not a regular file (named pipe, socket, or device); contents not read.\n'
+            ls -ld "$file_path" 2>/dev/null || not_available
+            record_reference_outcome "EXAMINED_SPECIAL" "$file_path" ""
+            log_event WARN evidence "$file_path is a named pipe, socket, or device where a configuration file was expected; its contents were not read"
+            blank_line
+            return
+            ;;
+    esac
 
     if file_readable "$file_path"; then
         copy_file_to_collection "$file_path"
-        cat "$file_path"
-        record_manifest_line "PRINTED|$file_path"
+        _pfh_real=`canonical_path "$file_path"`
+        if [ -n "$_pfh_real" ] && [ "$_pfh_real" != "$file_path" ]; then
+            printf '(symbolic link; the content below is that of %s)\n' "$_pfh_real"
+        fi
+        if print_file_body "$file_path"; then
+            record_manifest_line "PRINTED|`manifest_path "$file_path"`"
+        fi
     else
         not_available
         # A file that is simply absent is normal: this script targets several
@@ -1566,16 +2188,245 @@ privileged_group_names() {
     esac
 }
 
+# Name-service queries, bounded.
+#
+# getent answers through the host's name service, and on a directory-joined
+# host that means sssd, nscd, or an in-process LDAP client talking to a
+# directory server. When that server is down or unreachable, getent blocks for
+# the resolver's full retry cycle - which can be minutes, or forever - and a
+# getent that never answered hung the collection until it was killed. So each
+# query runs with a bound. The first that times out marks the name service
+# unusable for the rest of the run, logs why, and every account and group
+# section from then on reads the local files instead and says so.
+NAME_SERVICE_TIMEOUT_SECONDS=45
+NAME_SERVICE_BROKEN=no
+
+# The "broken" state is kept in a file, not only a variable: the query runs
+# inside command substitutions, and a variable set in that subshell dies with
+# it. Without the file, every one of the six queries waited its full bound in
+# turn - 270 seconds - before the run was killed. The file lives beside the
+# lock, outside the package, and is removed at exit.
+name_service_state_file() {
+    printf '%s/.sox-itgc-name-service-broken' "${WORKING_DIRECTORY:-.}"
+}
+name_service_is_broken() {
+    [ "$NAME_SERVICE_BROKEN" = "yes" ] || [ -f "`name_service_state_file`" ]
+}
+name_service_usable() {
+    command_exists getent && ! name_service_is_broken
+}
+
+# Run a command under a time bound. Prints what it printed; returns its
+# status, or 124 if it was stopped at the bound (the convention of the
+# timeout utility, which is not portable enough to rely on here).
+#
+# The watchdog's sleep is recorded by PID the moment it exists, because a
+# watchdog killed on its own re-parents its sleep to init where nothing can
+# find it, and a sleep was left behind on the client host per call until that
+# was fixed. The command is killed only if the sleep ran its full course: a
+# sleep ended by the parent returns non-zero, and by then the command's PID
+# may belong to another process.
+#
+# Stopping the command means stopping everything it started. A bounded scan
+# is a subshell running "find | sort | head", and stopping the subshell alone
+# left find, sort and head running on the client host for as long as the
+# dead mount kept find blocked. The tree is read from ps once, at the moment
+# of the kill, and signalled deepest first, the job itself last: the parent
+# shell wakes the instant the job dies, and the watchdog must be finished by
+# then rather than cut off in the middle of its list. A process the kernel
+# holds in uninterruptible sleep on a dead mount cannot be stopped by anyone;
+# that one lingers until the mount answers, and the report's note names the
+# root so the client knows which mount to look at.
+#
+# The timeout is detected from the watchdog's own record, not from the exit
+# status of the job. Shells disagree about the status of a job that died of
+# a signal (143 in most, 256+15 in ksh93, 384+15 in yash), and a job whose
+# children were stopped from under it can exit 0 - a pipeline whose find was
+# killed ends with head reading end-of-file - which turned a timed-out scan
+# into a clean, empty result.
+#
+# The parent never kills the watchdog, only its sleep: a watchdog killed
+# mid-list leaves the rest of the tree running. When the job finishes on its
+# own, ending the sleep makes the watchdog exit without touching anything.
+#
+# Both waits are silenced because dash and most other shells announce a
+# child that died of a signal - "Terminated" - on the terminal, and the
+# watchdog's sleep dies that way on every call that finishes in time. A
+# console full of "Terminated" reads as the collector having crashed.
+#
+# Usage: bounded_run SECONDS COMMAND [ARGS...]
+# The process table as "pid ppid" lines. The XPG form is first; HP-UX only
+# honours -o with UNIX95 set, and the last resort parses ps -ef, whose
+# second and third columns are PID and PPID on every System V descendant.
+process_table() {
+    _pt_out=`ps -e -o pid= -o ppid= 2>/dev/null`
+    if ! printf '%s\n' "$_pt_out" | grep -q '[0-9]' 2>/dev/null; then
+        _pt_out=`UNIX95=1 ps -e -o pid= -o ppid= 2>/dev/null`
+    fi
+    if ! printf '%s\n' "$_pt_out" | grep -q '[0-9]' 2>/dev/null; then
+        _pt_out=`ps -ef 2>/dev/null | awk 'NR > 1 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print $2, $3 }'`
+    fi
+    printf '%s\n' "$_pt_out"
+}
+process_tree_pids() {   # PID: the process and everything under it, deepest first
+    process_table | awk -v top="$1" '
+        $1 ~ /^[0-9]+$/ { parent[$1] = $2 }
+        END {
+            queue[1] = top; count = 1; i = 0
+            while (i < count) {
+                i++
+                for (child in parent) {
+                    if (parent[child] == queue[i]) { count++; queue[count] = child }
+                }
+            }
+            for (j = count; j >= 1; j--) print queue[j]
+        }' 2>/dev/null
+}
+kill_process_tree() {
+    _kpt_pids=`process_tree_pids "$1"`
+    [ -n "$_kpt_pids" ] || _kpt_pids=$1
+    for _kpt_pid in $_kpt_pids; do
+        kill "$_kpt_pid" 2>/dev/null
+    done
+}
+# Everything the collector has started, but not the collector: what the
+# interruption handler calls so that a stopped run leaves no scan, watchdog
+# or host command behind.
+kill_descendants() {
+    for _kd_pid in `process_tree_pids "$1"`; do
+        if [ "$_kd_pid" != "$1" ]; then
+            kill "$_kd_pid" 2>/dev/null
+        fi
+    done
+}
+# The bound itself. The job's output is left in FILE: complete if the job
+# finished, whatever had been written by the time the bound fired if not.
+# Returns the job's status, or 124 at the bound.
+#
+# Callers that need the output as a value read FILE afterwards rather than
+# wrapping this in a command substitution. That is not a style point: a
+# shell blocked reading a command substitution does not run its traps until
+# the substitution finishes (ksh93 excepted), so an operator's Ctrl-C, or a
+# kill from another terminal, was ignored for as long as the bound - up to
+# four minutes into a scan that was visibly stuck. A shell blocked in "wait"
+# runs the trap at once, in every shell tested.
+#
+# Usage: bounded_run_to_file FILE SECONDS COMMAND [ARGS...]
+bounded_run_to_file() {
+    _br_file=$1
+    _br_secs=$2
+    shift 2
+    _br_timer_pidfile="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$.timer"
+    _br_fired="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$.fired"
+    rm -f "$_br_fired" 2>/dev/null
+    : > "$_br_file" 2>/dev/null
+    "$@" > "$_br_file" 2>/dev/null </dev/null &
+    _br_pid=$!
+    (
+        sleep "$_br_secs" &
+        _br_sleep=$!
+        printf '%s\n' "$_br_sleep" > "$_br_timer_pidfile" 2>/dev/null
+        wait "$_br_sleep" 2>/dev/null
+        if [ "$?" -eq 0 ]; then
+            : > "$_br_fired"
+            kill_process_tree "$_br_pid"
+        fi
+    ) 2>/dev/null &
+    _br_timer=$!
+    wait "$_br_pid" 2>/dev/null
+    _br_rc=$?
+    _br_i=0
+    while [ ! -s "$_br_timer_pidfile" ] && [ "$_br_i" -lt 500 ] && kill -0 "$_br_timer" 2>/dev/null; do
+        _br_i=`expr "$_br_i" + 1`
+    done
+    _br_sleep_pid=`cat "$_br_timer_pidfile" 2>/dev/null`
+    if [ -n "$_br_sleep_pid" ]; then
+        kill "$_br_sleep_pid" 2>/dev/null
+    else
+        kill "$_br_timer" 2>/dev/null
+    fi
+    wait "$_br_timer" 2>/dev/null
+    rm -f "$_br_timer_pidfile" 2>/dev/null
+    if [ -f "$_br_fired" ]; then
+        rm -f "$_br_fired" 2>/dev/null
+        return 124
+    fi
+    return "$_br_rc"
+}
+# The same, printing the output - all of it if the job finished, none of it
+# if the bound fired, since a partial listing looks like a complete one.
+bounded_run() {
+    _bru_out="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$"
+    bounded_run_to_file "$_bru_out" "$@"
+    _bru_rc=$?
+    if [ "$_bru_rc" -ne 124 ]; then
+        cat "$_bru_out" 2>/dev/null
+    fi
+    rm -f "$_bru_out" 2>/dev/null
+    return "$_bru_rc"
+}
+
+# A host command that can block on something outside the host - df on a stale
+# NFS mount, rpm waiting for a package-manager lock, systemctl on a wedged
+# bus, ntpq resolving peer names - runs under a 60-second bound. A timeout is
+# reported in the section, logged, and recorded in the manifest; the
+# collection carries on. Usage: bounded_host_command COMMAND [ARGS...]
+HOST_COMMAND_TIMEOUT_SECONDS=60
+bounded_host_command() {
+    bounded_run "$HOST_COMMAND_TIMEOUT_SECONDS" "$@"
+    _bhc_rc=$?
+    if [ "$_bhc_rc" -eq 124 ]; then
+        printf '[%s did not finish within %s seconds and was stopped; see the collection log]\n' "$1" "$HOST_COMMAND_TIMEOUT_SECONDS"
+        log_event WARN evidence "'$*' did not finish within ${HOST_COMMAND_TIMEOUT_SECONDS}s and was stopped - typically a stale network mount, a package-manager lock, or a service that is not answering; the section it feeds is incomplete"
+        record_manifest_line "COMMAND_TIMEOUT|$*|seconds=$HOST_COMMAND_TIMEOUT_SECONDS"
+        return 1
+    fi
+    return "$_bhc_rc"
+}
+
+# Usage: name_service_query DATABASE [KEY]. Prints what getent printed;
+# returns getent's status, or 1 with nothing printed after a timeout.
+name_service_query() {
+    if name_service_is_broken; then
+        return 1
+    fi
+    bounded_run "$NAME_SERVICE_TIMEOUT_SECONDS" getent "$@"
+    _nsq_rc=$?
+    if [ "$_nsq_rc" -eq 124 ]; then
+        NAME_SERVICE_BROKEN=yes
+        : > "`name_service_state_file`" 2>/dev/null
+        log_event WARN evidence "the name service did not answer 'getent $*' within ${NAME_SERVICE_TIMEOUT_SECONDS}s - a directory server that is down or unreachable, most likely; account and group evidence from here on is taken from the local files only, so directory-sourced accounts are not represented"
+        record_manifest_line "NAME_SERVICE_TIMEOUT|getent $*|seconds=$NAME_SERVICE_TIMEOUT_SECONDS|fallback=local_files"
+        return 1
+    fi
+    return "$_nsq_rc"
+}
+
+# The privileged-group lines from the local file, used when the name service
+# is absent or has stopped answering.
+print_privileged_group_from_file() {
+    awk -F: '$1 == "'"$1"'" { print "- " $1 ": " $4; found = 1 } END { if (!found) exit 1 }' /etc/group 2>/dev/null
+}
+
 print_group_membership_summary() {
     found=no
 
-    if command_exists getent; then
+    if name_service_usable; then
         record_manifest_line "GETENT_QUERY|group privileged|source=name_service"
         record_file_reference /etc/group
         for _priv_group in `privileged_group_names`; do
-            if getent group "$_priv_group" >/dev/null 2>&1; then
-                getent group "$_priv_group" | awk -F: '{print "- " $1 ": " $4}'
+            _pg_line=`name_service_query group "$_priv_group"`
+            if [ -n "$_pg_line" ]; then
+                printf '%s\n' "$_pg_line" | awk -F: '{print "- " $1 ": " $4}'
                 found=yes
+            elif name_service_is_broken && file_readable /etc/group; then
+                # The name service stopped answering part-way through: the
+                # remaining groups come from the local file.
+                if print_privileged_group_from_file "$_priv_group"; then
+                    found=yes
+                else
+                    printf '%s\n' "- $_priv_group: not present on this host (local file; name service unavailable)"
+                fi
             else
                 printf '%s\n' "- $_priv_group: not present on this host"
             fi
@@ -1663,10 +2514,10 @@ print_duplicate_uid_gid_review() {
 # This function prints group membership information from the system's available
 # name service interface or local group file. It does not change group records.
 print_all_groups() {
-    if command_exists getent; then
+    if name_service_usable && _ag_out=`name_service_query group` && [ -n "$_ag_out" ]; then
         record_manifest_line "GETENT_QUERY|group ALL|source=name_service"
         record_file_reference /etc/group
-        getent group 2>/dev/null | awk -F: '{print $1 ": " $4}'
+        printf '%s\n' "$_ag_out" | awk -F: '{print $1 ": " $4}'
     elif file_readable /etc/group; then
         record_file_reference /etc/group
         awk -F: '{print $1 ": " $4}' /etc/group 2>/dev/null
@@ -1732,7 +2583,7 @@ print_auth_summary() {
             fi
             if directory_exists /etc/security/pwquality.conf.d; then
                 record_file_reference /etc/security/pwquality.conf.d
-                if grep -E '^[[:space:]]*(minlen|minclass|maxrepeat|maxsequence|dcredit|ucredit|lcredit|ocredit|difok|dictcheck|enforcing|enforce_for_root)' /etc/security/pwquality.conf.d/*.conf 2>/dev/null; then
+                if grep_collectable -E '^[[:space:]]*(minlen|minclass|maxrepeat|maxsequence|dcredit|ucredit|lcredit|ocredit|difok|dictcheck|enforcing|enforce_for_root)' /etc/security/pwquality.conf.d/*.conf; then
                     _pwq_found=yes
                 fi
             fi
@@ -1784,7 +2635,7 @@ print_auth_summary() {
             if directory_exists /etc/pam.d; then
                 record_file_reference /etc/pam.d
                 printf 'PAM lockout modules in use:\n'
-                if grep -E 'pam_tally2\.so|pam_faillock\.so' /etc/pam.d/* 2>/dev/null; then
+                if grep_collectable -E 'pam_tally2\.so|pam_faillock\.so' /etc/pam.d/*; then
                     _lockout_found=yes
                 else
                     printf '  none found\n'
@@ -1896,7 +2747,7 @@ print_authentication_summary() {
             subsection "PAM Authentication Module References:"
             if directory_exists /etc/pam.d; then
                 record_file_reference /etc/pam.d
-                grep -E 'pam_ldap\.so|pam_sss\.so|pam_winbind\.so' /etc/pam.d/* 2>/dev/null || not_available
+                grep_collectable -E 'pam_ldap\.so|pam_sss\.so|pam_winbind\.so' /etc/pam.d/* || not_available
             else
                 not_available
             fi
@@ -2190,7 +3041,7 @@ print_sulog_content() {
 print_recent_login_activity() {
     if command_exists last; then
         printf 'Command: last (limited to 50 most recent entries)\n'
-        last 2>/dev/null | awk 'NR <= 50 { print }' || not_available
+        bounded_host_command last | awk 'NR <= 50 { print }' || not_available
     else
         not_available
     fi
@@ -2272,7 +3123,7 @@ operator_app_scan_roots() {
         return
     fi
     printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r _app_scan_root; do
-        if [ -n "$_app_scan_root" ] && [ -d "$_app_scan_root" ]; then
+        if [ -n "$_app_scan_root" ]; then
             printf '%s\n' "$_app_scan_root"
         fi
     done
@@ -2280,24 +3131,184 @@ operator_app_scan_roots() {
 
 # Scope of the SetUID/SetGID scan: binary paths, plus any application roots the
 # operator supplied. Emitted one per line so callers can split on newlines only.
-setuid_search_paths() {
-    for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
-        if [ -d "$candidate" ]; then
-            printf '%s\n' "$candidate"
+# Scan roots are resolved to their physical directories and de-duplicated.
+# POSIX find does not follow a symbolic link given as a starting point, so a
+# root that is a link - /opt or /usr/local relocated to a data volume, or /bin
+# on a merged-/usr host - was listed under "Paths scanned" and examined
+# nothing. Resolving first means the report names the directory that was
+# actually walked; de-duplicating means /bin and /usr/bin are one root, not
+# two headings for the same tree.
+physical_unique_roots() {
+    while IFS= read -r _pur_root; do
+        [ -n "$_pur_root" ] || continue
+        if scan_root_skipped "$_pur_root"; then
+            continue
         fi
-    done
-    operator_app_scan_roots
+        bounded_run_to_file "`scan_output_file`.probe" "$ROOT_PROBE_TIMEOUT_SECONDS" probe_scan_root "$_pur_root"
+        _pur_rc=$?
+        if [ "$_pur_rc" -eq 124 ]; then
+            scan_root_timed_out "$_pur_root" "$ROOT_PROBE_TIMEOUT_SECONDS"
+        elif [ "$_pur_rc" -eq 0 ]; then
+            cat "`scan_output_file`.probe" 2>/dev/null
+            printf '\n'
+        fi
+        rm -f "`scan_output_file`.probe" 2>/dev/null
+    done | awk '!seen[$0]++'
+}
+
+setuid_search_paths() {
+    {
+        for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
+            printf '%s\n' "$candidate"
+        done
+        operator_app_scan_roots
+    } | physical_unique_roots
 }
 
 # Scope of the world-writable scan: system binary and configuration paths, plus
 # any application roots the operator supplied.
 world_writable_search_paths() {
-    for candidate in /etc /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt; do
-        if [ -d "$candidate" ]; then
+    {
+        for candidate in /etc /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt; do
             printf '%s\n' "$candidate"
+        done
+        operator_app_scan_roots
+    } | physical_unique_roots
+}
+
+# The filesystem walks, bounded per root.
+#
+# find -xdev keeps a scan from crossing INTO a network mount, but a scan root
+# that is itself on a dead mount - /opt on NFS, an --app-dir on a SAN whose
+# array has gone away - hangs find before it walks anything, and a find that
+# never returned hung the collection until it was killed. Each root's walk
+# runs under a bound. A root that times out once is skipped by every later
+# scan, recorded in a file beside the lock (the walks run inside command
+# substitutions, whose variables die with the subshell), so a dead mount costs
+# one bound rather than one per category.
+SCAN_TIMEOUT_SECONDS=240
+LISTING_TIMEOUT_SECONDS=600
+scan_skip_file() {
+    printf '%s/.sox-itgc-scan-skip' "${WORKING_DIRECTORY:-.}"
+}
+scan_root_skipped() {
+    [ -f "`scan_skip_file`" ] && grep -Fxq "$1" "`scan_skip_file`" 2>/dev/null
+}
+# Nothing here may go to stdout: this runs inside the command substitution
+# that captures the scan, so anything printed would be taken for a path. The
+# report note is printed by the caller, once the substitution has returned.
+scan_root_timed_out() {   # ROOT [SECONDS]
+    _srt_secs=${2:-$SCAN_TIMEOUT_SECONDS}
+    printf '%s\n' "$1" >> "`scan_skip_file`" 2>/dev/null
+    log_event WARN evidence "the filesystem scan of $1 did not finish within ${_srt_secs}s and was stopped - typically a root on an unresponsive network mount; that root is absent from the world-writable and SetUID/SetGID evidence"
+    record_manifest_line "SCAN_TIMEOUT|root=`manifest_path "$1"`|seconds=$_srt_secs"
+}
+# Even looking at a root can hang: a stat of a directory on a hard NFS mount
+# whose server has gone away blocks in the kernel, before any walk begins,
+# and so does the cd/pwd -P that resolves the root physically. The probe
+# runs under its own, shorter bound.
+ROOT_PROBE_TIMEOUT_SECONDS=30
+probe_scan_root() {
+    [ -d "$1" ] || return 1
+    absolute_directory "$1"
+}
+# The report-side disclosure, for every root the scans have given up on. Each
+# section that would have covered the root says so, rather than one note in
+# the first section and silence in the rest.
+print_scan_skip_notes() {
+    if [ -s "`scan_skip_file`" ]; then
+        while IFS= read -r _pss_root; do
+            [ -n "$_pss_root" ] || continue
+            printf 'NOTE: the scan of %s did not finish within its time bound and was\n' "$_pss_root"
+            printf '  stopped - typically a root on an unresponsive network mount. That root\n'
+            printf '  is not represented in this section; the collection log has the bound.\n'
+        done < "`scan_skip_file`"
+    fi
+}
+# The package's own files are dropped from every scan by filtering find's
+# output rather than with -path ... -prune: -path reached POSIX only in
+# 2008 and Solaris 10's find does not have it, and a find that rejects its
+# own arguments prints nothing, which reads as a clean host. The package
+# is walked, which costs a few milliseconds, and never reported.
+outside_collection_directory() {
+    awk -v prefix="$COLLECTION_DIRECTORY/" 'index($0, prefix) != 1 && $0 != substr(prefix, 1, length(prefix) - 1)'
+}
+find_world_writable_files_under() {
+    find "$1" -xdev -type f -perm -0002 -print 2>/dev/null | outside_collection_directory | sort -u 2>/dev/null | head -n "$ww_limit_probe"
+}
+find_world_writable_dirs_under() {
+    find "$1" -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | outside_collection_directory | sort -u 2>/dev/null | head -n "$ww_limit_probe"
+}
+find_setuid_under() {
+    find "$1" -xdev -type f -perm -4000 -print 2>/dev/null | outside_collection_directory
+}
+find_setgid_under() {
+    find "$1" -xdev -type f -perm -2000 -print 2>/dev/null | outside_collection_directory
+}
+# Run one root's walk under the bound. Prints the list; prints nothing and
+# records the timeout if the bound is hit; prints nothing for a root already
+# known to be dead.
+scan_output_file() {
+    printf '%s/.sox-itgc-scan.%s' "${WORKING_DIRECTORY:-.}" "$$"
+}
+bounded_scan() {
+    _bs_fn=$1
+    _bs_root=$2
+    : > "`scan_output_file`" 2>/dev/null
+    if scan_root_skipped "$_bs_root"; then
+        return 1
+    fi
+    bounded_run_to_file "`scan_output_file`" "$SCAN_TIMEOUT_SECONDS" "$_bs_fn" "$_bs_root"
+    _bs_rc=$?
+    if [ "$_bs_rc" -eq 124 ]; then
+        : > "`scan_output_file`" 2>/dev/null
+        scan_root_timed_out "$_bs_root"
+        return 1
+    fi
+    return 0
+}
+
+# List one root's findings for one category, applying the cap to that root
+# alone. Adds to the running totals _ww_files_total and _ww_files_truncated
+# that the caller resets per category. Prints nothing for a root with no
+# findings, so a clean root does not pad the report.
+#
+# Usage: print_world_writable_findings CATEGORY ROOT LIST DESCRIPTION
+print_world_writable_findings() {
+    _pwf_kind=$1
+    _pwf_root=$2
+    _pwf_list=$3
+    _pwf_desc=$4
+    # grep -c always prints a count but exits 1 when that count is zero, so it
+    # must not be guarded with "|| echo 0" - that would emit the count twice.
+    _pwf_count=`printf '%s' "$_pwf_list" | grep -c . 2>/dev/null`
+    [ -n "$_pwf_count" ] || _pwf_count=0
+    if [ "$_pwf_count" -eq 0 ]; then
+        record_manifest_line "WORLD_WRITABLE_SCAN|$_pwf_kind|root=`manifest_path "$_pwf_root"`|entries=0|truncated=no"
+        return
+    fi
+    printf 'Under %s:\n' "$_pwf_root"
+    _pwf_tally="entries=$_pwf_count|truncated=no"
+    if [ "$_pwf_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
+        printf 'NOTE: more than %s %s exist under this root. The list\n' "$WORLD_WRITABLE_MAX_ENTRIES" "$_pwf_desc"
+        printf 'below is truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+        _pwf_list=`printf '%s\n' "$_pwf_list" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+        _pwf_count=$WORLD_WRITABLE_MAX_ENTRIES
+        # The scan stops one past the cap, so the exact population is not
+        # known once the cap is exceeded. Record that honestly rather than
+        # reporting the probe count as if it were the true total.
+        _pwf_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+        _ww_files_truncated=yes
+        log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES $_pwf_desc exist under $_pwf_root; Section 9 lists the first $WORLD_WRITABLE_MAX_ENTRIES for that root only and the full population is not in this package"
+    fi
+    printf '%s\n' "$_pwf_list" | while IFS= read -r _pwf_entry; do
+        if [ -n "$_pwf_entry" ]; then
+            ls -ld "$_pwf_entry" 2>/dev/null || printf '%s (metadata not available)\n' "$_pwf_entry"
         fi
     done
-    operator_app_scan_roots
+    blank_line
+    _ww_files_total=`expr "$_ww_files_total" + "$_pwf_count"`
+    record_manifest_line "WORLD_WRITABLE_SCAN|$_pwf_kind|root=`manifest_path "$_pwf_root"`|$_pwf_tally"
 }
 
 print_world_writable_review() {
@@ -2344,71 +3355,64 @@ print_world_writable_review() {
     printf '  (world-writable by design; the sticky bit is verified below instead)\n'
     printf 'Recorded per finding: path, permissions, ownership. File contents are\n'
     printf '  never printed or copied into this evidence package.\n'
-    printf 'Maximum entries listed per category: %s\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+    printf 'Maximum entries listed per scanned root, per category: %s\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+    printf '  (each root is capped on its own, so findings under an application\n'
+    printf '   directory cannot be crowded out by system paths)\n'
     blank_line
 
     # Fetch one more than the cap so an exceeded cap can be detected and stated
     # rather than silently truncating the population.
     ww_limit_probe=`expr "$WORLD_WRITABLE_MAX_ENTRIES" + 1`
 
+    # The package is pruned from every scan (here and in the SetUID scan). The
+    # copies in raw_files/ keep the source file's mode until permissions are
+    # normalised at the end of the run, so an output directory placed under a
+    # scanned root - /opt/audit is a natural choice - turned every copied
+    # world-writable or SetUID source into a second finding at the copy's
+    # path, one that does not exist on the host.
+    # Each root is scanned and listed on its own, with its own cap. One pass
+    # over all roots, sorted together and cut at the cap, let system noise
+    # crowd out the roots that matter most: on a host with several hundred
+    # world-writable files under /opt, the operator's --app-dir tree - the one
+    # tree they specifically asked about - sorted past the cut and vanished
+    # from the listing with no sign it had been examined at all.
     subsection "World-Writable Files:"
-    ww_files=`find "$@" -xdev -type f -perm -0002 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
-    # grep -c always prints a count but exits 1 when that count is zero, so it
-    # must not be guarded with "|| echo 0" - that would emit the count twice and
-    # break the numeric comparison below, leaving a clean host with a blank
-    # section instead of an explicit "no entries found".
-    ww_file_count=`printf '%s' "$ww_files" | grep -c . 2>/dev/null`
-    [ -n "$ww_file_count" ] || ww_file_count=0
-    ww_file_tally="entries=$ww_file_count|truncated=no"
-    if [ "$ww_file_count" -eq 0 ]; then
-        no_entries_found
-    else
-        if [ "$ww_file_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
-            printf 'NOTE: more than %s world-writable files were found. The list below\n' "$WORLD_WRITABLE_MAX_ENTRIES"
-            printf 'is truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
-            blank_line
-            ww_files=`printf '%s\n' "$ww_files" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
-            # The scan stops one past the cap, so the exact population is not
-            # known once the cap is exceeded. Record that honestly rather than
-            # reporting the probe count as if it were the true total.
-            ww_file_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
-            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable files exist; Section 9 lists the first $WORLD_WRITABLE_MAX_ENTRIES only and the full population is not in this package"
+    _ww_files_total=0
+    _ww_files_truncated=no
+    for _ww_root in "$@"; do
+        bounded_scan find_world_writable_files_under "$_ww_root"
+        _ww_list=`cat "\`scan_output_file\`" 2>/dev/null`
+        if scan_root_skipped "$_ww_root"; then
+            print_scan_skip_notes "$_ww_root"
+        else
+            print_world_writable_findings "files" "$_ww_root" "$_ww_list" "world-writable files"
         fi
-        printf '%s\n' "$ww_files" | while IFS= read -r _ww_entry; do
-            if [ -n "$_ww_entry" ]; then
-                ls -ld "$_ww_entry" 2>/dev/null || printf '%s (metadata not available)\n' "$_ww_entry"
-            fi
-        done
+    done
+    if [ "$_ww_files_total" -eq 0 ]; then
+        no_entries_found
     fi
-    record_manifest_line "WORLD_WRITABLE_SCAN|files|roots=$#|xdev=yes|$ww_file_tally"
+    record_manifest_line "WORLD_WRITABLE_SCAN|files|roots=$#|xdev=yes|entries=$_ww_files_total|truncated=$_ww_files_truncated"
     blank_line
 
     # A world-writable directory without the sticky bit is often worse than a
     # world-writable file: any user can delete or replace files they do not own
     # inside it, including files owned by root.
     subsection "World-Writable Directories Without the Sticky Bit:"
-    ww_dirs=`find "$@" -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u | head -n "$ww_limit_probe"`
-    ww_dir_count=`printf '%s' "$ww_dirs" | grep -c . 2>/dev/null`
-    [ -n "$ww_dir_count" ] || ww_dir_count=0
-    ww_dir_tally="entries=$ww_dir_count|truncated=no"
-    if [ "$ww_dir_count" -eq 0 ]; then
-        no_entries_found
-    else
-        if [ "$ww_dir_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
-            printf 'NOTE: more than %s such directories were found. The list below is\n' "$WORLD_WRITABLE_MAX_ENTRIES"
-            printf 'truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
-            blank_line
-            ww_dirs=`printf '%s\n' "$ww_dirs" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
-            ww_dir_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
-            log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES world-writable directories without a sticky bit exist; Section 9 lists the first $WORLD_WRITABLE_MAX_ENTRIES only"
+    _ww_files_total=0
+    _ww_files_truncated=no
+    for _ww_root in "$@"; do
+        bounded_scan find_world_writable_dirs_under "$_ww_root"
+        _ww_list=`cat "\`scan_output_file\`" 2>/dev/null`
+        if scan_root_skipped "$_ww_root"; then
+            print_scan_skip_notes "$_ww_root"
+        else
+            print_world_writable_findings "directories_without_sticky" "$_ww_root" "$_ww_list" "world-writable directories without a sticky bit"
         fi
-        printf '%s\n' "$ww_dirs" | while IFS= read -r _ww_entry; do
-            if [ -n "$_ww_entry" ]; then
-                ls -ld "$_ww_entry" 2>/dev/null || printf '%s (metadata not available)\n' "$_ww_entry"
-            fi
-        done
+    done
+    if [ "$_ww_files_total" -eq 0 ]; then
+        no_entries_found
     fi
-    record_manifest_line "WORLD_WRITABLE_SCAN|directories_without_sticky|roots=$#|xdev=yes|$ww_dir_tally"
+    record_manifest_line "WORLD_WRITABLE_SCAN|directories_without_sticky|roots=$#|xdev=yes|entries=$_ww_files_total|truncated=$_ww_files_truncated"
     blank_line
 
     # The control test for the by-design shared directories.
@@ -2436,10 +3440,19 @@ print_world_writable_review() {
             # have to rebut, so the two conditions are distinguished here. The
             # other-write bit is read from the ls mode string (character 9)
             # because POSIX test has no world-writable predicate.
-            _ww_mode=`ls -ld "$_ww_shared" 2>/dev/null | awk 'NR == 1 { print $1 }'`
+            # Both bits are read from the ls mode string rather than with
+            # test -k, which is not in POSIX test: on a shell without it the
+            # check failed and fell through to the "ABSENT" branch, reporting
+            # /tmp, /var/tmp and /dev/shm as missing their sticky bit - a
+            # false finding the client would have had to rebut.
+            # -L so that a shared directory that is itself a symbolic link
+            # (/var/lock -> /run/lock on systemd hosts) is judged by the
+            # directory it points to, not by the link's own lrwxrwxrwx mode.
+            _ww_mode=`ls -ldL "$_ww_shared" 2>/dev/null | awk 'NR == 1 { print $1 }'`
             _ww_other_write=`printf '%s' "$_ww_mode" | cut -c9 2>/dev/null`
+            _ww_sticky=`printf '%s' "$_ww_mode" | cut -c10 2>/dev/null`
 
-            if [ -k "$_ww_shared" ]; then
+            if [ "$_ww_sticky" = "t" ] || [ "$_ww_sticky" = "T" ]; then
                 printf 'Sticky bit: present (expected)\n'
             elif [ "$_ww_other_write" = "w" ]; then
                 printf 'Sticky bit: ABSENT - this directory is world-writable, so any user\n'
@@ -2476,6 +3489,40 @@ print_world_writable_review() {
 #   right, which is what keeps -xdev from skipping an application tree that lives
 #   on its own mount. Results are passed through sort -u because a root that is
 #   not a separate mount would otherwise be traversed twice.
+# One root's SetUID or SetGID findings, listed under the root and capped
+# per root exactly as the world-writable findings are: 600 SetUID files
+# planted under an application directory were all listed, and a host with
+# tens of thousands - a badly packaged application, or one planted to bury
+# the real ones - would have produced a report nobody could read, with no
+# sign that the population was abnormal. The cap is disclosed in the section
+# and the log, and the manifest records that the list is truncated.
+print_privileged_bit_findings() {   # KIND ROOT DESCRIPTION
+    _pbf_kind=$1
+    _pbf_root=$2
+    _pbf_desc=$3
+    _pbf_probe=`expr "$WORLD_WRITABLE_MAX_ENTRIES" + 1`
+    _pbf_list=`sort -u "\`scan_output_file\`" 2>/dev/null | head -n "$_pbf_probe"`
+    _pbf_count=`printf '%s' "$_pbf_list" | grep -c . 2>/dev/null`
+    [ -n "$_pbf_count" ] || _pbf_count=0
+    if [ "$_pbf_count" -eq 0 ]; then
+        record_manifest_line "PRIVILEGED_BIT_SCAN|$_pbf_kind|root=`manifest_path "$_pbf_root"`|entries=0|truncated=no"
+        return
+    fi
+    printf 'Under %s:\n' "$_pbf_root"
+    _pbf_tally="entries=$_pbf_count|truncated=no"
+    if [ "$_pbf_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
+        printf 'NOTE: more than %s %s exist under this root. The list\n' "$WORLD_WRITABLE_MAX_ENTRIES" "$_pbf_desc"
+        printf 'below is truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+        _pbf_list=`printf '%s\n' "$_pbf_list" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+        _pbf_count=$WORLD_WRITABLE_MAX_ENTRIES
+        _pbf_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+        _sx_truncated=yes
+        log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES $_pbf_desc exist under $_pbf_root; Section 10 lists the first $WORLD_WRITABLE_MAX_ENTRIES for that root only and the full population is not in this package"
+    fi
+    printf '%s\n' "$_pbf_list"
+    _sx_total=`expr "$_sx_total" + "$_pbf_count"`
+    record_manifest_line "PRIVILEGED_BIT_SCAN|$_pbf_kind|root=`manifest_path "$_pbf_root"`|$_pbf_tally"
+}
 print_setuid_setgid_files() {
     if ! command_exists find; then
         not_available
@@ -2514,21 +3561,31 @@ print_setuid_setgid_files() {
     # ways; the pair that used to be here read as two distinct tests but was one
     # test performed twice.
     subsection "SetUID Files:"
-    _suid_list=`find "$@" -xdev -type f -perm -4000 -print 2>/dev/null | sort -u`
-    if [ -n "$_suid_list" ]; then
-        printf '%s\n' "$_suid_list"
-    else
+    print_scan_skip_notes "$@"
+    _sx_total=0
+    _sx_truncated=no
+    for _sx_root in "$@"; do
+        bounded_scan find_setuid_under "$_sx_root"
+        print_privileged_bit_findings setuid "$_sx_root" "SetUID files"
+    done
+    if [ "$_sx_total" -eq 0 ]; then
         no_entries_found
     fi
+    record_manifest_line "PRIVILEGED_BIT_SCAN|setuid|roots=$#|xdev=yes|entries=$_sx_total|truncated=$_sx_truncated"
     blank_line
 
     subsection "SetGID Files:"
-    _sgid_list=`find "$@" -xdev -type f -perm -2000 -print 2>/dev/null | sort -u`
-    if [ -n "$_sgid_list" ]; then
-        printf '%s\n' "$_sgid_list"
-    else
+    print_scan_skip_notes "$@"
+    _sx_total=0
+    _sx_truncated=no
+    for _sx_root in "$@"; do
+        bounded_scan find_setgid_under "$_sx_root"
+        print_privileged_bit_findings setgid "$_sx_root" "SetGID files"
+    done
+    if [ "$_sx_total" -eq 0 ]; then
         no_entries_found
     fi
+    record_manifest_line "PRIVILEGED_BIT_SCAN|setgid|roots=$#|xdev=yes|entries=$_sx_total|truncated=$_sx_truncated"
 }
 
 # Cron spool fallback:
@@ -2668,12 +3725,15 @@ print_account_status_summary() {
         record_file_reference /etc/passwd
         found=no
 
+        if shadow_file_usable; then
+            print_account_status_from_shadow && found=yes
+        else
         case "$OS_NAME" in
             AIX)
                 # AIX: never invoke passwd here. lsuser is the read-only query.
                 if command_exists lsuser; then
                     printf 'Command: lsuser -a account_locked expires login shell ALL\n'
-                    if lsuser -a account_locked expires login shell ALL </dev/null 2>/dev/null; then
+                    if bounded_host_command lsuser -a account_locked expires login shell ALL; then
                         found=yes
                     fi
                 fi
@@ -2681,9 +3741,12 @@ print_account_status_summary() {
             SunOS|HP-UX)
                 if command_exists passwd; then
                     printf 'Command: passwd -s (per account)\n'
+                    _pac_count=0
                     while IFS=: read -r user _rest; do
-                        if passwd -s "$user" </dev/null 2>/dev/null; then
-                            found=yes
+                        if per_account_command_allowed "passwd -s"; then
+                            if passwd -s "$user" </dev/null 2>/dev/null; then
+                                found=yes
+                            fi
                         fi
                     done < /etc/passwd
                 fi
@@ -2691,17 +3754,21 @@ print_account_status_summary() {
             *)
                 if command_exists passwd; then
                     printf 'Command: passwd -S (per account)\n'
+                    _pac_count=0
                     while IFS=: read -r user _rest; do
-                        if passwd -S "$user" </dev/null 2>/dev/null; then
-                            found=yes
+                        if per_account_command_allowed "passwd -S"; then
+                            if passwd -S "$user" </dev/null 2>/dev/null; then
+                                found=yes
+                            fi
                         fi
                     done < /etc/passwd
                 fi
                 ;;
         esac
+        fi
 
         if [ "$found" = no ] && command_exists lsuser && [ "$OS_NAME" != "AIX" ]; then
-            lsuser -a account_locked expires login shell ALL </dev/null 2>/dev/null && found=yes
+            bounded_host_command lsuser -a account_locked expires login shell ALL && found=yes
         fi
         if [ "$found" = no ]; then
             not_available
@@ -2709,6 +3776,113 @@ print_account_status_summary() {
     else
         not_available
     fi
+}
+
+# Account status and password ageing, read straight from the shadow file.
+#
+# passwd -S and chage -l report, per account, fields that are simply the
+# columns of /etc/shadow, and each invocation reads the whole shadow file to
+# find its one account. Run once per account, that is a walk of the file for
+# every line in it: 20,000 local accounts - a real number on a host that
+# carries an application's users locally - took nine minutes in these two
+# subsections, most of it forking, while the rest of the collection took
+# five seconds. Root can read the shadow file directly, so the same fields
+# are derived here in one pass over the two files, and no password hash is
+# ever printed: the hash column is reduced to a status word.
+#
+# The per-account commands remain the path for a host whose shadow file is
+# not readable or not in the nine-column form (trusted-mode HP-UX, for one),
+# under a cap on the number of accounts so that host cannot repeat the nine
+# minutes. AIX uses lsuser, which is already one command for all accounts.
+shadow_file_usable() {
+    file_readable /etc/shadow && awk -F: 'NF == 9 { found = 1; exit } END { exit !found }' /etc/shadow 2>/dev/null
+}
+PER_ACCOUNT_COMMAND_MAX=2000
+per_account_command_allowed() {   # COMMAND-LABEL
+    _pac_count=${_pac_count:-0}
+    _pac_count=`expr "$_pac_count" + 1`
+    if [ "$_pac_count" -le "$PER_ACCOUNT_COMMAND_MAX" ]; then
+        return 0
+    fi
+    if [ "$_pac_count" -eq `expr "$PER_ACCOUNT_COMMAND_MAX" + 1` ]; then
+        printf 'NOTE: %s was run for the first %s accounts only; the remaining accounts\n' "$1" "$PER_ACCOUNT_COMMAND_MAX"
+        printf '  are not covered here. The account list itself is complete in the\n'
+        printf '  copied passwd file.\n'
+        log_event WARN evidence "'$1' was run for the first $PER_ACCOUNT_COMMAND_MAX accounts only; the host has more local accounts than that and the per-account form of this evidence is incomplete"
+        record_manifest_line "PER_ACCOUNT_COMMAND_CAPPED|$1|limit=$PER_ACCOUNT_COMMAND_MAX"
+    fi
+    return 1
+}
+# Days since the epoch, as the shadow file stores dates, to a calendar date.
+# Integer arithmetic only, so it is the same under every awk.
+SHADOW_AWK_DATE='
+function civil_date(z,    era, doe, yoe, y, doy, mp, d, m) {
+    z = z + 719468
+    era = int((z >= 0 ? z : z - 146096) / 146097)
+    doe = z - era * 146097
+    yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + int(yoe / 4) - int(yoe / 100))
+    mp = int((5 * doy + 2) / 153)
+    d = doy - int((153 * mp + 2) / 5) + 1
+    m = mp < 10 ? mp + 3 : mp - 9
+    if (m <= 2) y = y + 1
+    return sprintf("%04d-%02d-%02d", y, m, d)
+}
+function day_or(v, none) { return (v == "" ? none : (v + 0 <= 0 ? none : civil_date(v + 0))) }
+'
+print_account_status_from_shadow() {
+    record_file_reference /etc/shadow
+    printf 'Derived in one pass from /etc/passwd and /etc/shadow: the fields passwd -S\n'
+    printf '  reports per account. The password hash itself is never printed.\n'
+    printf 'Status: P = usable password set; L = locked, or no usable password\n'
+    printf '  (hash begins with ! or *); NP = empty password field; NS = no shadow\n'
+    printf '  entry for this account.\n'
+    blank_line
+    printf '%-24s %-3s %-12s %6s %6s %6s %8s %s\n' ACCOUNT ST LAST_CHANGE MIN MAX WARN INACTIVE ACCOUNT_EXPIRES
+    awk -F: "$SHADOW_AWK_DATE"'
+        FNR == NR { if (NF >= 2) { seen[$1] = 1; hash[$1] = $2; last[$1] = $3; min[$1] = $4; max[$1] = $5; warn[$1] = $6; inact[$1] = $7; expd[$1] = $8 }; next }
+        NF >= 1 && $1 != "" {
+            u = $1
+            if (!(u in seen)) { st = "NS" }
+            else if (hash[u] == "") { st = "NP" }
+            else if (hash[u] ~ /^[!*]/) { st = "L" }
+            else { st = "P" }
+            lc = (u in seen) ? (last[u] == "0" ? "next-login" : day_or(last[u], "unknown")) : "-"
+            printf "%-24s %-3s %-12s %6s %6s %6s %8s %s\n", u, st, lc, (u in seen ? min[u] : "-"), (u in seen ? max[u] : "-"), (u in seen ? warn[u] : "-"), (u in seen ? inact[u] : "-"), (u in seen ? day_or(expd[u], "never") : "-")
+            n++
+        }
+        END { exit (n == 0) }
+    ' /etc/shadow /etc/passwd 2>/dev/null
+}
+print_password_expiry_from_shadow() {
+    record_file_reference /etc/shadow
+    printf 'Derived in one pass from /etc/passwd and /etc/shadow: the dates chage -l\n'
+    printf '  reports per account. Password expires = last change + maximum age;\n'
+    printf '  password inactive = that date + the inactivity period. "never" means the\n'
+    printf '  field is unset; "next-login" means a change is forced at next login.\n'
+    blank_line
+    printf '%-24s %-12s %-12s %-12s %-12s %5s %6s %5s\n' ACCOUNT LAST_CHANGE PW_EXPIRES PW_INACTIVE ACCT_EXPIRES MIN MAX WARN
+    awk -F: "$SHADOW_AWK_DATE"'
+        FNR == NR { if (NF >= 2) { seen[$1] = 1; last[$1] = $3; min[$1] = $4; max[$1] = $5; warn[$1] = $6; inact[$1] = $7; expd[$1] = $8 }; next }
+        NF >= 1 && $1 != "" {
+            u = $1
+            if (!(u in seen)) { printf "%-24s %s\n", u, "no shadow entry"; n++; next }
+            if (last[u] == "0") { lc = "next-login"; pe = "next-login"; pi = "-" }
+            else if (last[u] == "" || last[u] + 0 <= 0) { lc = "unknown"; pe = "unknown"; pi = "unknown" }
+            else {
+                lc = civil_date(last[u] + 0)
+                if (max[u] == "" || max[u] + 0 >= 99999 || max[u] + 0 < 0) { pe = "never"; pi = "never" }
+                else {
+                    pe = civil_date(last[u] + max[u] + 0)
+                    pi = (inact[u] == "" || inact[u] + 0 < 0) ? "never" : civil_date(last[u] + max[u] + inact[u] + 0)
+                }
+            }
+            printf "%-24s %-12s %-12s %-12s %-12s %5s %6s %5s\n", u, lc, pe, pi, day_or(expd[u], "never"), min[u], max[u], warn[u]
+            n++
+        }
+        END { exit (n == 0) }
+    ' /etc/shadow /etc/passwd 2>/dev/null
 }
 
 # Password expiry detail:
@@ -2722,18 +3896,23 @@ print_password_expiry_details() {
         # chage is Linux-only and read-only with -l. lsuser is the AIX
         # equivalent. Both take stdin from /dev/null so they cannot consume the
         # account list this loop is reading; see print_account_status_summary.
-        if command_exists chage; then
+        if shadow_file_usable; then
+            print_password_expiry_from_shadow && found=yes
+        elif command_exists chage; then
+            _pac_count=0
             while IFS=: read -r user _rest; do
-                printf 'User: %s\n' "$user"
-                if chage -l "$user" </dev/null 2>/dev/null; then
-                    found=yes
-                else
-                    not_available
+                if per_account_command_allowed "chage -l"; then
+                    printf 'User: %s\n' "$user"
+                    if chage -l "$user" </dev/null 2>/dev/null; then
+                        found=yes
+                    else
+                        not_available
+                    fi
+                    blank_line
                 fi
-                blank_line
             done < /etc/passwd
         elif command_exists lsuser; then
-            lsuser -a maxage minage pwdwarntime expires account_locked ALL </dev/null 2>/dev/null && found=yes
+            bounded_host_command lsuser -a maxage minage pwdwarntime expires account_locked ALL && found=yes
         fi
         if [ "$found" = no ] && ! command_exists chage && ! command_exists lsuser; then
             not_available
@@ -2747,30 +3926,53 @@ print_password_expiry_details() {
 # The script lists ownership and permission metadata for home directories,
 # .ssh directories, and authorized_keys files. Authorized keys are summarized
 # rather than printed in full.
+# Home directories are the one place this script touches that is routinely
+# on NFS, and a stat of a home on a mount that has stopped answering blocks
+# in the kernel. Each review runs under a bound; what it had written by
+# then is kept - it is complete for the accounts it covers - and the report
+# says where it stopped.
+HOME_REVIEW_TIMEOUT_SECONDS=300
+print_home_review_bounded() {   # LABEL FUNCTION
+    _hrb_file="`scan_output_file`.home"
+    bounded_run_to_file "$_hrb_file" "$HOME_REVIEW_TIMEOUT_SECONDS" "$2"
+    _hrb_rc=$?
+    cat "$_hrb_file" 2>/dev/null
+    if [ "$_hrb_rc" -eq 124 ]; then
+        printf 'NOTE: this review did not finish within %s seconds and was stopped -\n' "$HOME_REVIEW_TIMEOUT_SECONDS"
+        printf '  typically a home directory on an unresponsive network mount. Accounts\n'
+        printf '  after the last one shown were not reviewed.\n'
+        log_event WARN evidence "the $1 did not finish within ${HOME_REVIEW_TIMEOUT_SECONDS}s and was stopped - typically a home directory on an unresponsive network mount; accounts after the last one shown in Section 13 were not reviewed"
+        record_manifest_line "SECTION_TIMEOUT|$1|seconds=$HOME_REVIEW_TIMEOUT_SECONDS|partial=yes"
+    fi
+    rm -f "$_hrb_file" 2>/dev/null
+}
 print_ssh_home_permission_review() {
     subsection "Home Directory, .ssh, and authorized_keys Permission Review:"
-    found=no
-
     if file_readable /etc/passwd; then
         record_file_reference /etc/passwd
-        while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
-            if [ -n "$home_dir" ] && [ "$home_dir" != "/" ] && [ -d "$home_dir" ]; then
-                printf 'User: %s\n' "$user"
-                ls -ld "$home_dir" 2>/dev/null || not_available
-                if [ -d "$home_dir/.ssh" ]; then
-                    ls -ld "$home_dir/.ssh" 2>/dev/null || not_available
-                    found=yes
-                fi
-                if [ -f "$home_dir/.ssh/authorized_keys" ]; then
-                    ls -l "$home_dir/.ssh/authorized_keys" 2>/dev/null || not_available
-                    print_sensitive_file_review "$home_dir/.ssh/authorized_keys"
-                    found=yes
-                fi
-                blank_line
-            fi
-        done < /etc/passwd
+        print_home_review_bounded home_directory_review review_home_directories
+    else
+        not_available
     fi
-
+}
+review_home_directories() {
+    found=no
+    while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
+        if [ -n "$home_dir" ] && [ "$home_dir" != "/" ] && [ -d "$home_dir" ]; then
+            printf 'User: %s\n' "$user"
+            ls -ld "$home_dir" 2>/dev/null || not_available
+            if [ -d "$home_dir/.ssh" ]; then
+                ls -ld "$home_dir/.ssh" 2>/dev/null || not_available
+                found=yes
+            fi
+            if [ -f "$home_dir/.ssh/authorized_keys" ]; then
+                ls -l "$home_dir/.ssh/authorized_keys" 2>/dev/null || not_available
+                print_sensitive_file_review "$home_dir/.ssh/authorized_keys"
+                found=yes
+            fi
+            blank_line
+        fi
+    done < /etc/passwd
     if [ "$found" = no ]; then
         no_entries_found
     fi
@@ -2794,22 +3996,39 @@ print_legacy_trust_content() {
 
     if file_readable /etc/passwd; then
         record_file_reference /etc/passwd
-        while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
-            if [ -n "$home_dir" ] && [ "$home_dir" != "/" ]; then
-                for trust_file in "$home_dir/.rhosts" "$home_dir/.shosts"; do
-                    if [ -f "$trust_file" ]; then
-                        printf 'User: %s\n' "$user"
-                        print_file_with_header "$trust_file"
-                        found=yes
-                    fi
-                done
-            fi
-        done < /etc/passwd
+        _ltc_file="`scan_output_file`.home"
+        bounded_run_to_file "$_ltc_file" "$HOME_REVIEW_TIMEOUT_SECONDS" review_home_trust_files
+        _ltc_rc=$?
+        if [ -s "$_ltc_file" ]; then
+            cat "$_ltc_file" 2>/dev/null
+            found=yes
+        fi
+        if [ "$_ltc_rc" -eq 124 ]; then
+            printf 'NOTE: the per-account trust-file review did not finish within %s seconds\n' "$HOME_REVIEW_TIMEOUT_SECONDS"
+            printf '  and was stopped - typically a home directory on an unresponsive network\n'
+            printf '  mount. Accounts after the last one shown were not reviewed.\n'
+            log_event WARN evidence "the legacy trust-file review did not finish within ${HOME_REVIEW_TIMEOUT_SECONDS}s and was stopped - typically a home directory on an unresponsive network mount; accounts after the last one shown in Section 13 were not reviewed"
+            record_manifest_line "SECTION_TIMEOUT|legacy_trust_review|seconds=$HOME_REVIEW_TIMEOUT_SECONDS|partial=yes"
+            found=yes
+        fi
+        rm -f "$_ltc_file" 2>/dev/null
     fi
 
     if [ "$found" = no ]; then
         no_entries_found
     fi
+}
+review_home_trust_files() {
+    while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
+        if [ -n "$home_dir" ] && [ "$home_dir" != "/" ]; then
+            for trust_file in "$home_dir/.rhosts" "$home_dir/.shosts"; do
+                if [ -f "$trust_file" ]; then
+                    printf 'User: %s\n' "$user"
+                    print_file_with_header "$trust_file"
+                fi
+            done
+        fi
+    done < /etc/passwd
 }
 
 # Shell timeout and login banner review:
@@ -2823,7 +4042,7 @@ print_shell_timeout_and_banner_summary() {
     record_file_reference /etc/csh.cshrc
     record_file_reference /etc/profile.d
     record_file_reference /etc/security/login.cfg
-    if grep -E '(^[[:space:]]*TMOUT=|^[[:space:]]*readonly[[:space:]]+TMOUT|^[[:space:]]*export[[:space:]]+TMOUT|^[[:space:]]*autologout[[:space:]]*=)' /etc/profile /etc/bashrc /etc/ksh.kshrc /etc/csh.cshrc /etc/profile.d/*.sh /etc/security/login.cfg 2>/dev/null; then
+    if grep_collectable -E '(^[[:space:]]*TMOUT=|^[[:space:]]*readonly[[:space:]]+TMOUT|^[[:space:]]*export[[:space:]]+TMOUT|^[[:space:]]*autologout[[:space:]]*=)' /etc/profile /etc/bashrc /etc/ksh.kshrc /etc/csh.cshrc /etc/profile.d/*.sh /etc/security/login.cfg; then
         :
     else
         not_available
@@ -2871,13 +4090,13 @@ print_audit_logging_summary() {
     record_file_reference /etc/syslog-ng/syslog-ng.conf
     record_file_reference /etc/syslog-ng/conf.d
     record_file_reference /etc/systemd/journald.conf
-    grep -E '(^[^#].*@@?[A-Za-z0-9._-]+|action\(.*omfwd|destination.*(tcp|udp)|forward_to|loghost)' /etc/rsyslog.conf /etc/rsyslog.d/*.conf /etc/syslog.conf /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/conf.d/*.conf /etc/systemd/journald.conf 2>/dev/null || not_available
+    grep_collectable -E '(^[^#].*@@?[A-Za-z0-9._-]+|action\(.*omfwd|destination.*(tcp|udp)|forward_to|loghost)' /etc/rsyslog.conf /etc/rsyslog.d/*.conf /etc/syslog.conf /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/conf.d/*.conf /etc/systemd/journald.conf || not_available
     blank_line
 
     subsection "Sudo Logging Indicators:"
     record_file_reference /etc/sudoers
     record_file_reference /etc/sudoers.d
-    grep -E '(logfile=|log_input|log_output|iolog_dir)' /etc/sudoers /etc/sudoers.d/* 2>/dev/null || not_available
+    grep_collectable -E '(logfile=|log_input|log_output|iolog_dir)' /etc/sudoers /etc/sudoers.d/* || not_available
 }
 
 # Service and startup review:
@@ -2888,7 +4107,7 @@ print_service_startup_summary() {
         Linux)
             if command_exists systemctl; then
                 printf 'Command: systemctl list-unit-files --type=service\n'
-                systemctl list-unit-files --type=service 2>/dev/null || not_available
+                bounded_host_command systemctl list-unit-files --type=service || not_available
             else
                 print_file_with_header /etc/inittab
             fi
@@ -2959,8 +4178,8 @@ print_network_exposure_summary() {
     # says whether the service is CONFIGURED TO RUN. Commented-out lines are
     # excluded for the same reason - a disabled entry is not an exposure.
     printf 'Legacy service entries enabled in inetd/xinetd configuration:\n'
-    if grep -E '^[[:space:]]*[^#[:space:]].*(telnet|rlogin|rexec|rsh|tftp|ftp)' \
-        /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/* 2>/dev/null; then
+    if grep_collectable -E '^[[:space:]]*[^#[:space:]].*(telnet|rlogin|rexec|rsh|tftp|ftp)' \
+        /etc/inetd.conf /etc/inet/inetd.conf /etc/xinetd.d/*; then
         :
     else
         printf '  no enabled legacy service entries found\n'
@@ -3052,7 +4271,11 @@ print_patch_update_summary() {
         SunOS)
             if command_exists pkg; then
                 printf 'Command: pkg list -u (IPS updates available)\n'
-                pkg list -u </dev/null 2>/dev/null || not_available
+                # pkg list -u compares the installed set against the
+                # publisher catalogues, and older releases refresh those
+                # catalogues over the network first; on a host with no route
+                # to its publisher that is a hang, not an answer.
+                bounded_host_command pkg list -u || not_available
                 return
             elif command_exists showrev; then
                 printf 'Command: showrev -p (native Solaris patch list)\n'
@@ -3064,7 +4287,7 @@ print_patch_update_summary() {
 
     if rpm_usable; then
         printf 'Command: rpm -qa --last\n'
-        rpm -qa --last 2>/dev/null || not_available
+        bounded_host_command rpm -qa --last || not_available
     elif dpkg_usable; then
         print_file_with_header /var/log/dpkg.log
     elif command_exists lslpp; then
@@ -3084,7 +4307,7 @@ print_patch_update_summary() {
 # or change monitoring configuration.
 print_backup_operational_summary() {
     if command_exists df; then
-        df -k 2>/dev/null || not_available
+        bounded_host_command df -k || not_available
     else
         not_available
     fi
@@ -3126,13 +4349,13 @@ print_time_sync_summary() {
     subsection "Synchronisation Status:"
     if command_exists timedatectl; then
         printf 'Command: timedatectl\n'
-        timedatectl </dev/null 2>/dev/null || not_available
+        bounded_host_command timedatectl || not_available
     elif command_exists chronyc; then
         printf 'Command: chronyc tracking\n'
-        chronyc tracking </dev/null 2>/dev/null || not_available
+        bounded_host_command chronyc tracking || not_available
     elif command_exists ntpq; then
         printf 'Command: ntpq -p\n'
-        ntpq -p </dev/null 2>/dev/null || not_available
+        bounded_host_command ntpq -p || not_available
     elif command_exists lssrc; then
         printf 'Command: lssrc -s xntpd (AIX)\n'
         lssrc -s xntpd </dev/null 2>/dev/null || not_available
@@ -3200,12 +4423,12 @@ host_uses_directory_service() {
         return 0
     fi
     if directory_exists /etc/pam.d; then
-        if grep -lq 'pam_ldap\.so\|pam_sss\.so\|pam_winbind\.so\|pam_krb5\.so' /etc/pam.d/* 2>/dev/null; then
+        if grep_collectable -lqE 'pam_ldap\.so|pam_sss\.so|pam_winbind\.so|pam_krb5\.so' /etc/pam.d/*; then
             return 0
         fi
     fi
     if file_readable /etc/pam.conf; then
-        if grep -q 'pam_ldap\|pam_krb5' /etc/pam.conf 2>/dev/null; then
+        if grep -Eq 'pam_ldap|pam_krb5' /etc/pam.conf 2>/dev/null; then
             return 0
         fi
     fi
@@ -3239,7 +4462,7 @@ print_interactive_user_accounts() {
     # The cutoff is substituted into the awk program text rather than passed with
     # -v, because Solaris /usr/bin/awk does not support -v; see the equivalent
     # comment in print_service_accounts.
-    if command_exists getent; then
+    if name_service_usable; then
         record_manifest_line "GETENT_QUERY|passwd ALL|source=name_service"
         record_file_reference /etc/passwd
 
@@ -3261,7 +4484,7 @@ print_interactive_user_accounts() {
         # stated. Equal counts do not prove enumeration is disabled (a host with
         # no directory at all looks identical); they mean the question has to be
         # settled against the authentication evidence in Section 3.
-        _iua_getent_count=`getent passwd 2>/dev/null | grep -c . 2>/dev/null`
+        _iua_getent_count=`name_service_query passwd | grep -c . 2>/dev/null`
         [ -n "$_iua_getent_count" ] || _iua_getent_count=0
         _iua_local_count=0
         if file_readable /etc/passwd; then
@@ -3302,14 +4525,15 @@ print_interactive_user_accounts() {
         fi
         blank_line
 
-        if getent passwd 2>/dev/null | awk -F: '
-            $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= '"$uid_cutoff"') {
-                print $1 ":" $3 ":" $4 ":" $6 ":" $7
-                found = 1
-            }
-            END { if (!found) exit 1 }
-        '; then
-            :
+        if name_service_is_broken; then
+            printf 'Name service did not answer within %ss; the list below is from the\n' "$NAME_SERVICE_TIMEOUT_SECONDS"
+            printf '  local /etc/passwd only and does not represent directory-sourced accounts.\n'
+            _iua_list=`awk -F: '$7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= '"$uid_cutoff"') { print $1 ":" $3 ":" $4 ":" $6 ":" $7 }' /etc/passwd 2>/dev/null`
+        else
+            _iua_list=`name_service_query passwd | awk -F: '$7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= '"$uid_cutoff"') { print $1 ":" $3 ":" $4 ":" $6 ":" $7 }'`
+        fi
+        if [ -n "$_iua_list" ]; then
+            printf '%s\n' "$_iua_list"
         else
             no_entries_found
         fi
@@ -3384,7 +4608,7 @@ print_auth_log_samples() {
         # contains SSH, sudo, su, and PAM events rather than unrelated noise.
         # Header lines such as "-- No entries --" are stripped so that an empty
         # journal is not mistaken for evidence that logging is operating.
-        journal_sample=`journalctl -n "$AUTH_LOG_SAMPLE_LINES" --no-pager --facility=auth,authpriv 2>/dev/null | grep -v '^-- '`
+        journal_sample=`bounded_host_command journalctl -n "$AUTH_LOG_SAMPLE_LINES" --no-pager --facility=auth,authpriv | grep -v '^-- '`
         if [ -n "$journal_sample" ]; then
             printf '%s\n' "$journal_sample"
             record_manifest_line "LOG_SAMPLED|journalctl|facility=auth,authpriv|lines=$AUTH_LOG_SAMPLE_LINES"
@@ -3435,14 +4659,17 @@ create_collection_archive() {
 
     if command_exists tar; then
         if command_exists gzip; then
-            if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null; then
+            # A subshell cd rather than tar -C: HP-UX tar has no -C, and an
+            # archive that could not be created is a failed collection.
+            if ( cd "$WORKING_DIRECTORY" && tar -cf "$archive_base.tar" SOX-ITGC-AUDIT-LINUX-UNIX ) 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null && [ -s "$archive_base.tar.gz" ]; then
                 ARCHIVE_FILE=$archive_base.tar.gz
                 ARCHIVE_STATUS="created"
                 log_event INFO archive "compressed archive created at $ARCHIVE_FILE"
                 return
             fi
+            rm -f "$archive_base.tar" "$archive_base.tar.gz" 2>/dev/null
         fi
-        if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null; then
+        if ( cd "$WORKING_DIRECTORY" && tar -cf "$archive_base.tar" SOX-ITGC-AUDIT-LINUX-UNIX ) 2>/dev/null && [ -s "$archive_base.tar" ]; then
             ARCHIVE_FILE=$archive_base.tar
             ARCHIVE_STATUS="created"
             log_event WARN archive "gzip unavailable or failed; created an uncompressed archive at $ARCHIVE_FILE"
@@ -3450,6 +4677,11 @@ create_collection_archive() {
         fi
     fi
 
+    # A failed tar leaves a truncated or empty file behind with the archive's
+    # name, which is precisely what an operator would pick up and send. Remove
+    # it so the only thing to send is the evidence directory, with the log
+    # saying why.
+    rm -f "$archive_base.tar" "$archive_base.tar.gz" 2>/dev/null
     ARCHIVE_STATUS="failed"
     log_event ERROR archive "could not create an archive; the evidence directory at $COLLECTION_DIRECTORY must be transferred manually"
 }
@@ -3462,19 +4694,25 @@ create_collection_archive() {
 # (for example, BSD `-B` forces printing of non-printable characters rather
 # than ignoring backup files). This helper selects a comparable flag set per
 # detected operating system so the resulting evidence has consistent meaning.
+#
+# -q is on every set. It is POSIX, and it replaces a newline or control
+# character in a filename with "?", so a file named "new<newline>line.conf" is
+# one entry in the evidence rather than two that do not exist. GNU -b would
+# do the same but also backslash-escapes spaces, which made "Finance App"
+# read as "Finance\ App" throughout a listing an auditor has to read.
 application_listing_ls_flags() {
     case "$OS_NAME" in
         Linux)
-            printf '%s\n' '-RlthBA'
+            printf '%s\n' '-RlthqBA'
             ;;
         Darwin|FreeBSD|OpenBSD|NetBSD)
-            printf '%s\n' '-RlthA'
+            printf '%s\n' '-RlthqA'
             ;;
         AIX|SunOS|HP-UX)
-            printf '%s\n' '-RltA'
+            printf '%s\n' '-RltqA'
             ;;
         *)
-            printf '%s\n' '-RltA'
+            printf '%s\n' '-RltqA'
             ;;
     esac
 }
@@ -3486,6 +4724,17 @@ application_listing_ls_flags() {
 # or removed by this helper. Errors during traversal (for example, an
 # unreadable subdirectory under the supplied root) are suppressed so a single
 # unreadable element does not abort the listing of the rest of the tree.
+probe_application_directory() {
+    if ! [ -e "$1" ]; then
+        printf 'missing'
+    elif ! [ -d "$1" ]; then
+        printf 'not_directory'
+    elif ! [ -r "$1" ]; then
+        printf 'unreadable'
+    else
+        printf 'ok'
+    fi
+}
 print_application_directory_listing() {
     app_path=$1
 
@@ -3497,26 +4746,56 @@ print_application_directory_listing() {
         return
     fi
 
-    if ! path_exists "$app_path"; then
-        printf 'Result: path does not exist\n'
-        record_manifest_line "APP_DIR_MISSING|$app_path"
-        blank_line
-        return
+    # One bounded look at the path. Three unbounded stats sat here, and a
+    # root on a dead mount hung the first of them before the listing's own
+    # bound could apply.
+    bounded_run_to_file "`scan_output_file`.probe" "$ROOT_PROBE_TIMEOUT_SECONDS" probe_application_directory "$app_path"
+    _adp_rc=$?
+    _adp_state=`cat "\`scan_output_file\`.probe" 2>/dev/null`
+    rm -f "`scan_output_file`.probe" 2>/dev/null
+    if [ "$_adp_rc" -eq 124 ]; then
+        _adp_state=unresponsive
     fi
-
-    if ! directory_exists "$app_path"; then
-        printf 'Result: path is not a directory\n'
-        record_manifest_line "APP_DIR_NOT_DIRECTORY|$app_path"
-        blank_line
-        return
-    fi
-
-    if ! [ -r "$app_path" ]; then
-        printf 'Result: directory is not readable by the current user\n'
-        record_manifest_line "APP_DIR_UNREADABLE|$app_path"
-        blank_line
-        return
-    fi
+    case "$_adp_state" in
+        ok)
+            case "$COLLECTION_DIRECTORY" in
+                "$app_path"|"$app_path"/*)
+                    printf 'NOTE: the output directory of this collection lies inside this\n'
+                    printf '  application directory, so the evidence package itself - its report,\n'
+                    printf '  manifest and copied files - appears in the listing below. Those\n'
+                    printf '  entries are the collection, not the application.\n'
+                    log_event INFO evidence "the collection directory $COLLECTION_DIRECTORY lies inside application directory $app_path; the package appears in its own Section 22 listing"
+                    record_manifest_line "APP_DIR_CONTAINS_PACKAGE|`manifest_path "$app_path"`"
+                    ;;
+            esac
+            ;;
+        missing)
+            printf 'Result: path does not exist\n'
+            record_manifest_line "APP_DIR_MISSING|`manifest_path "$app_path"`"
+            blank_line
+            return
+            ;;
+        not_directory)
+            printf 'Result: path is not a directory\n'
+            record_manifest_line "APP_DIR_NOT_DIRECTORY|`manifest_path "$app_path"`"
+            blank_line
+            return
+            ;;
+        unresponsive)
+            printf 'Result: the directory did not answer within %s seconds - typically a\n' "$ROOT_PROBE_TIMEOUT_SECONDS"
+            printf '  path on an unresponsive network mount. It was not listed.\n'
+            log_event WARN evidence "application directory $app_path did not answer a stat within ${ROOT_PROBE_TIMEOUT_SECONDS}s and was not listed - typically an unresponsive network mount"
+            record_manifest_line "APP_DIR_UNRESPONSIVE|`manifest_path "$app_path"`|seconds=$ROOT_PROBE_TIMEOUT_SECONDS"
+            blank_line
+            return
+            ;;
+        *)
+            printf 'Result: directory is not readable by the current user\n'
+            record_manifest_line "APP_DIR_UNREADABLE|`manifest_path "$app_path"`"
+            blank_line
+            return
+            ;;
+    esac
 
     if ! command_exists ls; then
         printf 'Result: ls command not available on this host\n'
@@ -3530,8 +4809,22 @@ print_application_directory_listing() {
     blank_line
 
     subsection "Recursive Listing:"
-    ls $listing_flags "$app_path" 2>/dev/null || not_available
-    record_manifest_line "APP_DIR_LISTED|$app_path|flags=$listing_flags"
+    # Bounded like the scans: an application root on an unresponsive mount
+    # hung ls -R, and with it the collection. Ten minutes is generous for any
+    # real tree; a listing that needs more is disclosed as stopped.
+    bounded_run "$LISTING_TIMEOUT_SECONDS" ls $listing_flags "$app_path"
+    _adl_rc=$?
+    if [ "$_adl_rc" -eq 0 ]; then
+        record_manifest_line "APP_DIR_LISTED|`manifest_path "$app_path"`|flags=$listing_flags"
+    elif [ "$_adl_rc" -eq 124 ]; then
+        printf 'NOTE: the listing of %s did not finish within %s seconds and was\n' "$app_path" "$LISTING_TIMEOUT_SECONDS"
+        printf '  stopped - typically a directory on an unresponsive network mount.\n'
+        log_event WARN evidence "the recursive listing of $app_path did not finish within ${LISTING_TIMEOUT_SECONDS}s and was stopped; that application directory is not represented"
+        record_manifest_line "APP_DIR_LISTING_TIMEOUT|`manifest_path "$app_path"`|seconds=$LISTING_TIMEOUT_SECONDS"
+    else
+        not_available
+        record_manifest_line "APP_DIR_LISTED|`manifest_path "$app_path"`|flags=$listing_flags"
+    fi
     blank_line
 }
 
@@ -3591,7 +4884,18 @@ apply_output_directory() {
             mkdir -p "$OUTPUT_DIRECTORY" 2>/dev/null
         fi
         if [ -d "$OUTPUT_DIRECTORY" ] && [ -w "$OUTPUT_DIRECTORY" ]; then
+            OUTPUT_DIRECTORY=`absolute_directory "$OUTPUT_DIRECTORY"`
             WORKING_DIRECTORY=$OUTPUT_DIRECTORY
+        elif [ "$OUTPUT_DIRECTORY_FROM_FLAG" = "yes" ]; then
+            # The operator named a directory and it cannot be used. Writing
+            # somewhere else instead would break the one promise the client
+            # instructions make about where this script writes - and with a
+            # working directory of /, "somewhere else" is the root of a
+            # production filesystem.
+            printf 'FAIL: --output-dir %s cannot be used; it is not a directory that can be\n' "$OUTPUT_DIRECTORY" >&2
+            printf '      created or written to. Nothing was collected and nothing on this host\n' >&2
+            printf '      was changed. Choose a directory on a filesystem with free space.\n' >&2
+            exit 1
         else
             printf 'Output directory %s is not accessible. Falling back to %s.\n' "$OUTPUT_DIRECTORY" "$WORKING_DIRECTORY" >&2
         fi
@@ -3663,7 +4967,7 @@ write_handling_instructions() {
         printf 'while being a truncated delivery. Two commands tell you:\n'
         printf '\n'
         printf '    grep -E "^(FINAL_)?RESULT:" SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt\n'
-        printf '    grep -c "Execution Summary" SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt\n'
+        printf '    tail -n 5 SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt | grep -c "Review that file before relying"\n'
         printf '\n'
         printf 'The first prints the collection verdict. COMPLETED_CLEAN means\n'
         printf 'nothing limited the evidence; COMPLETED_WITH_WARNINGS means read\n'
@@ -3671,9 +4975,11 @@ write_handling_instructions() {
         printf 'means ask for a fresh collection. If FINAL_RESULT is present it\n'
         printf 'supersedes RESULT, because it also accounts for the archive step.\n'
         printf '\n'
-        printf 'The second must print 1. A 0 means the report was cut short before\n'
-        printf 'the collection finished, so what you have is a partial delivery\n'
-        printf 'regardless of how complete it looks.\n'
+        printf 'The second must print 1. It looks at the LAST lines of the report for\n'
+        printf 'its closing sentence - not anywhere in it, since a source file printed\n'
+        printf 'into the report can contain any words. A 0 means the report was cut\n'
+        printf 'short before the collection finished, so what you have is a partial\n'
+        printf 'delivery regardless of how complete it looks.\n'
         printf '\n'
         printf 'The audit team also has verify-package.sh, which runs these and\n'
         printf 'several more checks and returns a pass/fail exit code.\n'
@@ -3720,7 +5026,7 @@ write_handling_instructions() {
     } > "$_handling_file" 2>/dev/null
 
     if [ -f "$_handling_file" ]; then
-        record_manifest_line "GENERATED|$_handling_file"
+        record_manifest_line "GENERATED|`manifest_path "$_handling_file"`"
         log_event INFO handover "extraction and handling instructions written to $_handling_file"
     fi
 }
@@ -3790,26 +5096,50 @@ normalize_package_permissions() {
     fi
 }
 
-# Resolve the operator who invoked sudo, if any.
+# Resolve the operator who invoked sudo, if any - to NUMBERS. The operator
+# on a directory-joined host is usually a directory account, and both the
+# "id" that looked the account up and the "chown" that took its name went
+# through the resolver: with the directory server down, the collection that
+# had just survived every other lookup with a bound hung at the very end,
+# after the archive was written. The lookup now runs under the name-service
+# bound (and is skipped outright once that service is known to be broken),
+# and chown is given the uid:gid it returned, which the kernel applies with
+# no lookup at all. The result is cached because it is wanted twice.
+# The resolution runs in the main shell, once: the first version cached it
+# inside handover_target_owner, which is called in a command substitution,
+# so the cache died with the subshell and the bound was paid twice.
+HANDOVER_OWNER_RESOLVED=no
+HANDOVER_OWNER_IDS=""
+resolve_handover_owner() {
+    if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
+        return
+    fi
+    if [ "$HANDOVER_OWNER_RESOLVED" = "no" ]; then
+        HANDOVER_OWNER_RESOLVED=yes
+        if command_exists id && name_service_usable; then
+            _handover_ids=`bounded_run "$NAME_SERVICE_TIMEOUT_SECONDS" sh -c 'id -u "$1" && id -g "$1"' sh "$SUDO_USER" | tr '\n' ':' | sed 's/:$//'`
+            case "$_handover_ids" in
+                [0-9]*:[0-9]*) HANDOVER_OWNER_IDS=$_handover_ids ;;
+            esac
+        fi
+        if [ -z "$HANDOVER_OWNER_IDS" ]; then
+            log_event WARN handover "the account named by SUDO_USER ($SUDO_USER) could not be resolved to a uid and gid in time - typically a directory account with the directory server not answering; the evidence remains owned by root and will need elevated access to read"
+        fi
+    fi
+}
 handover_target_owner() {
     if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
         return 1
     fi
-    _handover_group=""
-    if command_exists id; then
-        _handover_group=`id -gn "$SUDO_USER" 2>/dev/null`
-    fi
-    if [ -n "$_handover_group" ]; then
-        printf '%s:%s' "$SUDO_USER" "$_handover_group"
-    else
-        printf '%s' "$SUDO_USER"
-    fi
+    [ -n "$HANDOVER_OWNER_IDS" ] || return 1
+    printf '%s' "$HANDOVER_OWNER_IDS"
     return 0
 }
 
 # Ownership of the evidence tree. Runs before the archive is created so the
 # archive records the operator as owner rather than root.
 apply_ownership_to_evidence() {
+    resolve_handover_owner
     if ! target_owner=`handover_target_owner`; then
         OWNERSHIP_STATUS="not adjusted (no SUDO_USER detected)"
         log_event INFO handover "no SUDO_USER present, so evidence ownership was left unchanged; whoever transfers this package may need elevated access to read it"
@@ -3822,8 +5152,8 @@ apply_ownership_to_evidence() {
     fi
 
     if [ "$chown_ok" = "yes" ]; then
-        OWNERSHIP_STATUS="evidence owned by $target_owner (directories 0750, files 0640)"
-        log_event INFO handover "evidence ownership transferred to $target_owner so it can be moved and read without root"
+        OWNERSHIP_STATUS="evidence owned by $SUDO_USER (uid:gid $target_owner; directories 0750, files 0640)"
+        log_event INFO handover "evidence ownership transferred to $SUDO_USER (uid:gid $target_owner) so it can be moved and read without root"
     else
         OWNERSHIP_STATUS="ownership adjustment to $target_owner encountered errors"
         log_event WARN handover "could not transfer ownership of the evidence to $target_owner; the files remain owned by root and will need elevated access to read"
@@ -3988,6 +5318,65 @@ if [ "$SHOW_HELP" = "yes" ]; then
     exit 0
 fi
 
+# Prove the tools the report and the verdict depend on actually work, before
+# anything is collected. This is not about a tool being absent from PATH - a
+# Unix host without awk does not exist - but about one that is present and
+# broken: wrong permissions, a damaged binary, a stub. With awk unusable the
+# collection ran to the end, "Permission denied" scrolled past hundreds of
+# times, two hundred lines of evidence silently vanished from the report, and
+# the verdict was COMPLETED_CLEAN. With expr or grep unusable the error
+# counters themselves cannot count. So each tool is exercised, not merely
+# located, and a failure here stops the run with nothing written.
+preflight_required_tools() {
+    _pf_missing=""
+    [ "`printf 'a b\n' | awk '{ print $2 }' 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing awk"
+    # The features the report's awk programs rely on, which the 1977 awk
+    # still shipped as Solaris /usr/bin/awk lacks: -v, user-defined
+    # functions, gsub, and POSIX character classes.
+    [ "`printf ' a\tb\n' | awk -v want=b 'function f(x) { gsub(/[[:space:]]+/, "-", x); return x } { print f($0) "=" want }' 2>/dev/null`" = "-a-b=b" ] || _pf_missing="$_pf_missing awk(POSIX:-v,functions,gsub,classes)"
+    [ "`printf 'ab\ncd\n' | grep -E 'a|d' 2>/dev/null | wc -l | tr -d ' '`" = "2" ] && printf 'x\n' | grep -q x 2>/dev/null || _pf_missing="$_pf_missing grep(POSIX:-E,-q)"
+    [ "`printf 'a\n' | sed 's/a/b/' 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing sed"
+    [ "`printf 'a\nb\n' | grep -c b 2>/dev/null`" = "1" ] || _pf_missing="$_pf_missing grep"
+    [ "`printf 'b\na\n' | sort 2>/dev/null | awk 'NR == 1' 2>/dev/null`" = "a" ] || _pf_missing="$_pf_missing sort"
+    [ "`expr 2 + 3 2>/dev/null`" = "5" ] || _pf_missing="$_pf_missing expr"
+    [ "`printf 'abc\n' | cut -c2 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing cut"
+    [ "`printf 'a\n' | tr a b 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing tr"
+    [ "`printf 'a\nb\n' | wc -l 2>/dev/null | tr -d ' '`" = "2" ] || _pf_missing="$_pf_missing wc"
+    [ "`date '+%Y' 2>/dev/null | wc -c | tr -d ' '`" = "5" ] || _pf_missing="$_pf_missing date"
+    ls -d / >/dev/null 2>&1 || _pf_missing="$_pf_missing ls"
+    [ "`dirname /a/b 2>/dev/null`" = "/a" ] || _pf_missing="$_pf_missing dirname"
+    [ "`basename /a/b 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing basename"
+    # Binary detection reads the first block of every printed file with dd
+    # and looks for a NUL with od. Without them, binary content would be
+    # printed into the report.
+    [ "`printf 'ab' | dd bs=1 count=1 2>/dev/null`" = "a" ] || _pf_missing="$_pf_missing dd"
+    [ "`printf 'a' | od -An -c 2>/dev/null | tr -d ' '`" = "a" ] || _pf_missing="$_pf_missing od"
+    # Every time bound in this script is a sleep in a watchdog. A sleep that
+    # cannot run would make each bound a no-op - the collection would still
+    # work, and could still hang on the first dead mount - so it is required.
+    sleep 0 2>/dev/null || _pf_missing="$_pf_missing sleep"
+    if [ -n "$_pf_missing" ]; then
+        printf 'FAIL: this host is missing, or cannot run, tools this script depends on:%s\n' "$_pf_missing" >&2
+        printf '      Without them the report would be silently incomplete and the verdict\n' >&2
+        printf '      could not be trusted, so nothing was collected. Nothing on this host\n' >&2
+        printf '      was changed. Please check the tools above and run the script again.\n' >&2
+        exit 1
+    fi
+    # ps is how a stopped job's whole process tree is found. Without it the
+    # bounds still fire, but only the job's top process can be signalled;
+    # its children would be left running on the host. Not fatal: a
+    # container image without ps is a real host, and the collection is
+    # still sound, but the operator should know before it starts.
+    PREFLIGHT_PS_USABLE=yes
+    if ! process_table | grep -q '[0-9]' 2>/dev/null; then
+        PREFLIGHT_PS_USABLE=no
+        printf 'WARNING: ps cannot list processes on this host. Time bounds still apply,\n' >&2
+        printf '         but a command stopped at a bound may leave its child processes\n' >&2
+        printf '         running; the collection log records this.\n' >&2
+    fi
+}
+preflight_required_tools
+
 if [ "$EFFECTIVE_UID_VALUE" != "0" ] && [ "$TEST_MODE" != "yes" ]; then
     printf '%s\n' 'This script must be run with sudo.'
     printf 'Use: sudo sh %s\n' "$SCRIPT_NAME"
@@ -4011,6 +5400,27 @@ apply_output_directory
 # uses whatever was supplied (or none, if nothing was supplied).
 prompt_for_app_directories
 
+# Application directories are recorded absolute for the same reason the output
+# directory is: "--app-dir app" is meaningless in a manifest read on another
+# machine. A path that does not exist is left as given and reported missing.
+if [ -n "$APP_DIRECTORIES" ]; then
+    _abs_app_list=""
+    _abs_app_ifs=$IFS
+    IFS='
+'
+    for _abs_app in $APP_DIRECTORIES; do
+        if [ -n "$_abs_app" ]; then
+            _abs_app_list="$_abs_app_list
+`absolute_directory "$_abs_app"`"
+        fi
+    done
+    IFS=$_abs_app_ifs
+    # The same directory named twice - "/opt" and "/opt/", or an operator
+    # pasting a list with a repeat - was listed twice, in full. Once is the
+    # evidence; the manifest records one APP_DIR_LISTED per directory.
+    APP_DIRECTORIES=`printf '%s\n' "$_abs_app_list" | awk '!seen[$0]++'`
+fi
+
 prepare_collection_directory
 
 # Interruption handling.
@@ -4033,6 +5443,34 @@ prepare_collection_directory
 handle_interruption() {
     _interrupt_signal=$1
     COLLECTION_STATUS="interrupted by $_interrupt_signal before completion"
+    # First, before anything that forks: a scan, a watchdog and its sleep, or
+    # a host command may be running, and an interrupted run must leave none
+    # of them behind on the client host. Background jobs ignore SIGINT, so
+    # the operator's Ctrl-C stopped the collector and left its find running.
+    kill_descendants "$$"
+    # An archive the interruption caught mid-build is removed: the tar that
+    # was writing it has just been stopped, and a truncated archive beside a
+    # package that says it was interrupted is exactly the kind of file that
+    # gets sent anyway. An archive already reported as created is kept.
+    if [ -z "$ARCHIVE_FILE" ] && [ -n "${archive_base:-}" ]; then
+        rm -f "$archive_base.tar" "$archive_base.tar.gz" 2>/dev/null
+    fi
+    if [ -n "$LOCK_FILE" ]; then
+        rm -f "$LOCK_FILE" 2>/dev/null
+    fi
+    rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-scan.* "`scan_skip_file`" 2>/dev/null
+    # An interrupted report is still going to be read - that is how the
+    # interruption is discovered - so it gets the same control-character
+    # sanitisation as a complete one. A half-finished sanitisation file from
+    # the normal path is removed rather than left in the package.
+    if [ -n "$REPORT_FILE" ] && [ -f "$REPORT_FILE" ]; then
+        rm -f "$REPORT_FILE.sanitizing" 2>/dev/null
+        sanitize_text_file "$REPORT_FILE"
+    fi
+    if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+        rm -f "$LOG_FILE.sanitizing" 2>/dev/null
+        sanitize_text_file "$LOG_FILE"
+    fi
 
     log_event ERROR completion "collection was interrupted by $_interrupt_signal before it finished; this package is incomplete and must not be relied upon"
 
@@ -4100,6 +5538,9 @@ log_event INFO startup "collection started on $HOSTNAME_VALUE (platform $OS_NAME
 log_event INFO startup "run mode: $RUN_PRIVILEGE_MODE"
 log_event INFO startup "invoked as: $SCRIPT_NAME"
 log_event INFO startup "this script is read-only and makes no configuration changes to this host"
+if [ "${PREFLIGHT_PS_USABLE:-yes}" = "no" ]; then
+    log_event WARN startup "ps cannot list processes on this host; a command stopped at a time bound may leave child processes running, because only its top process can be signalled"
+fi
 if [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
     log_event WARN startup "running without root privileges; files readable only by root will be missing from this package"
 fi
@@ -4158,7 +5599,19 @@ printf 'Client Non-Root Test Instruction: sh %s --dry-run\n' "$SCRIPT_NAME"
 #
 # $0 is the path the script was invoked by, so this measures the file that is
 # actually running rather than a file of the same name elsewhere.
-printf 'Collector Script Path: %s\n' "$0"
+# Recorded absolute: "./collector.sh" in a manifest read on another machine
+# says nothing about which copy ran.
+case "$0" in
+    /*/*) _self_dir=`absolute_directory "${0%/*}"` ;;
+    /*)   _self_dir=/ ;;
+    */*)  _self_dir=`absolute_directory "${0%/*}"` ;;
+    *)    _self_dir=$INVOCATION_DIRECTORY ;;
+esac
+case "$_self_dir" in
+    /) _self_path="/${0##*/}" ;;
+    *) _self_path="$_self_dir/${0##*/}" ;;
+esac
+printf 'Collector Script Path: %s\n' "$_self_path"
 if [ -f "$0" ]; then
     # The algorithm is named from the tool that was actually used rather than
     # assumed to be SHA-256. print_file_checksum falls back to cksum where no
@@ -4169,7 +5622,7 @@ if [ -f "$0" ]; then
     _self_checksum=`print_file_checksum "$0" | awk 'NR == 1 { print $1 }'`
     if [ -n "$_self_checksum" ]; then
         printf 'Collector Script Checksum: %s (%s)\n' "$_self_checksum" "$CHECKSUM_ALGORITHM"
-        record_manifest_line "COLLECTOR_SELF|$0|algorithm=$CHECKSUM_ALGORITHM|checksum=$_self_checksum"
+        record_manifest_line "COLLECTOR_SELF|`manifest_path "$_self_path"`|algorithm=$CHECKSUM_ALGORITHM|checksum=$_self_checksum"
         log_event INFO startup "collector script $0 measured as $CHECKSUM_ALGORITHM $_self_checksum"
         if [ "$CHECKSUM_ALGORITHM" != "sha256" ]; then
             printf '  NOTE: no SHA-256 tool is available on this host, so the value\n'
@@ -4179,11 +5632,11 @@ if [ -f "$0" ]; then
         fi
     else
         printf 'Collector Script Checksum: not available (no checksum tool on this host)\n'
-        record_manifest_line "COLLECTOR_SELF|$0|checksum=unavailable"
+        record_manifest_line "COLLECTOR_SELF|`manifest_path "$_self_path"`|checksum=unavailable"
     fi
 else
     printf 'Collector Script Checksum: not available (script path not resolvable)\n'
-    record_manifest_line "COLLECTOR_SELF|$0|checksum=unavailable"
+    record_manifest_line "COLLECTOR_SELF|`manifest_path "$_self_path"`|checksum=unavailable"
 fi
 
 if [ "$TEST_MODE" = "yes" ] && [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
@@ -4393,7 +5846,7 @@ printf 'limited the evidence gathered, is in:\n'
 printf '  %s\n' "${LOG_FILE:-not created}"
 printf 'Review that file before relying on any section reported as not available.\n'
 
-record_manifest_line "COLLECTION_LOG|${LOG_FILE:-not created}"
+record_manifest_line "COLLECTION_LOG|`manifest_path "${LOG_FILE:-not created}"`"
 
 # Order from here matters and is the reason the archive is built last.
 #
@@ -4405,21 +5858,34 @@ record_manifest_line "COLLECTION_LOG|${LOG_FILE:-not created}"
 #
 # Permissions and ownership are also applied before archiving, because the modes
 # recorded inside a tar are the modes the recipient gets.
+# The report is complete at this point; nothing below writes to it.
+sanitize_text_file "$REPORT_FILE"
+if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+    sanitize_text_file "$LOG_FILE"
+fi
+
 write_handling_instructions
 normalize_package_permissions
 apply_ownership_to_evidence
 
 # The summary block closes the log, so everything that has something to report
 # must have run by now. Only the archive follows, and it appends an addendum.
+verify_package_writable
 finalize_collection_log
 
 open_log_addendum
 create_collection_archive
 apply_ownership_to_archive
 close_log_addendum
+if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+    sanitize_text_file "$LOG_FILE"
+fi
 
+# The replay is a courtesy to an operator watching the terminal; a terminal
+# that has gone away (a pipe whose reader exited) must not turn it into a
+# "write error" on stderr or anything worse.
 if [ -r "$REPORT_FILE" ]; then
-    cat "$REPORT_FILE" >&3
+    cat "$REPORT_FILE" >&3 2>/dev/null || :
 fi
 
 # Leave the operator with the verdict and where to find the detail. This is the
@@ -4454,6 +5920,11 @@ _final_result=`collection_log_result`
 #
 # Deliberately only two values. A finer scale would invite callers to branch on
 # distinctions that belong in the log, and the log is the authoritative record.
+if [ -n "$LOCK_FILE" ]; then
+    rm -f "$LOCK_FILE" 2>/dev/null
+fi
+rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-scan.* "`scan_skip_file`" 2>/dev/null
+
 case "$_final_result" in
     COMPLETED_CLEAN|COMPLETED_WITH_WARNINGS)
         exit 0

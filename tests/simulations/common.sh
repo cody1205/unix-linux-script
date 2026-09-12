@@ -237,6 +237,13 @@ sim_mount_all() {
     # everything below to this fixture.
     mount --make-rprivate "$R"
 
+    # A real host has a working process table; a chroot without /proc does
+    # not, and the collector's preflight rightly warns that a ps that lists
+    # nothing means a stopped command's children cannot be found. The
+    # simulation is of the OS, not of a broken ps.
+    mkdir -p "$R/proc"
+    mount --bind /proc "$R/proc" 2>/dev/null || mount -t proc proc "$R/proc" 2>/dev/null || true
+
     # Shims shadow /usr/sbin, which the collector's fixed PATH searches first.
     mount --bind "$RSHIMS" "$R/usr/sbin"
 
@@ -381,9 +388,9 @@ sim_verify_common() {
     # verdicts above WARN lines. Counting the lines here catches any return of
     # that class of bug regardless of which call site regresses.
     sim_check
-    _sim_warn_lines=`grep -c ' | WARN  | ' "$LOGFILE" 2>/dev/null`
+    _sim_warn_lines=`grep -c '^[^|]* | WARN  | ' "$LOGFILE" 2>/dev/null`
     [ -n "$_sim_warn_lines" ] || _sim_warn_lines=0
-    _sim_err_lines=`grep -c ' | ERROR | ' "$LOGFILE" 2>/dev/null`
+    _sim_err_lines=`grep -c '^[^|]* | ERROR | ' "$LOGFILE" 2>/dev/null`
     [ -n "$_sim_err_lines" ] || _sim_err_lines=0
     _sim_final_warn=`sed -n 's/^FINAL_WARNINGS: //p' "$LOGFILE" 2>/dev/null | tail -1`
     _sim_final_err=`sed -n 's/^FINAL_ERRORS: //p' "$LOGFILE" 2>/dev/null | tail -1`

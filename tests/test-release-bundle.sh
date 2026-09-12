@@ -184,6 +184,20 @@ else
     fail "built a bundle with $INSTRUCTIONS missing - the client would get a script and no guidance"
 fi
 
+# A version string is part of the filename the client types. One with a space
+# built "sox-itgc-collector-v1 0.tar.gz"; one with a slash failed while
+# blaming the output directory.
+for _bad in "v1 0" "v1/0" "../v1"; do
+    checks=`expr $checks + 1`
+    sh "$REPO_ROOT/tools/make-release.sh" "$_bad" "$WORK/badver" > "$WORK/badver.log" 2>&1
+    _rc=$?
+    if [ "$_rc" -ne 0 ] && grep -q 'not usable in a filename' "$WORK/badver.log" && ! ls "$WORK/badver"/*.tar.gz >/dev/null 2>&1; then
+        pass "refuses version \"$_bad\" and says why"
+    else
+        fail "version \"$_bad\": exit $_rc, built=`ls "$WORK/badver"/*.tar.gz 2>/dev/null | wc -l`"
+    fi
+done
+
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -ne 0 ]; then

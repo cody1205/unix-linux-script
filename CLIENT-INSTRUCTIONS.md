@@ -33,9 +33,9 @@ form that changes state.
 | | |
 |---|---|
 | **Writes** | Only inside the `--output-dir` you choose, plus the archive in that same directory. Nothing in `/tmp`, nothing in any system path. One disclosed exception below. |
-| **Sends** | Nothing. No network connections, no sockets, no outbound anything. |
-| **Reads** | OS configuration relevant to access control. No user data, no application data, no databases. |
-| **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets. |
+| **Sends** | Nothing. The script itself opens no network connections, no sockets, no outbound anything. One thing it cannot control: account and group lookups go through your host's own name service (`getent`), so on a directory-joined host your resolver — `sssd`, `nscd`, or an in-process LDAP client — may contact your directory server exactly as any login would. Nothing is sent to us. Each such lookup is bounded to 45 seconds; if the directory does not answer, the script says so and uses the local files. |
+| **Reads** | OS configuration relevant to access control, and only regular files: a named pipe, socket, or device node where a configuration file is expected is noted and never opened. No user data, no application data, no databases. |
+| **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets — whether reached by their own path, through a symbolic link at some other name, or as a hard link or stray copy recognised by its contents. Links into home directories are not followed either. |
 | **Needs** | Root via `sudo`, a few hundred MB of free space, typically 1–10 minutes. |
 | **Requires** | No reboot, no restart, no maintenance window, no installation. |
 
@@ -61,7 +61,9 @@ Two details worth knowing before you run it:
   limited to system and application directories rather than whole filesystems,
   and **both stop at filesystem boundaries**, so neither can descend into NFS or
   SAN mounts and put load on a remote filer. Each reports its own elapsed time
-  on screen as it runs.
+  on screen as it runs. If a scanned directory sits on a mount that has stopped
+  answering, the walk of that directory is abandoned after four minutes and the
+  report says so; the script does not wait on a dead mount.
 
 ## Don't take that on trust — check it
 
@@ -157,8 +159,9 @@ sudo ./linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
   the request that accompanied this document.
 
 **You can stop it at any time with Ctrl-C.** It marks its own output as
-incomplete so a partial collection cannot be mistaken for a finished one, and
-exits. Nothing is left half-done, because nothing was being changed.
+incomplete so a partial collection cannot be mistaken for a finished one, stops
+every process it started, and exits. Nothing is left half-done, because nothing
+was being changed, and nothing is left running.
 
 ### Running it from a loose file
 
@@ -177,6 +180,30 @@ gateway rejected `.sh`, run `sudo sh <filename>.txt` — behaviour is identical.
 
 If you would rather mark it executable yourself, `chmod +x` is safe and changes
 nothing about what the script does.
+
+### If it stops immediately with `FAIL:`
+
+Three conditions are checked before anything is collected, and any of them
+stops the run with exit status 1 and nothing written:
+
+- **`FAIL: --output-dir ... cannot be used`** — the directory you named is a
+  file, or cannot be created or written to. The script does not write anywhere
+  else instead; choose a directory on a filesystem with free space and run it
+  again.
+- **`FAIL: this host is missing, or cannot run, tools this script depends on`**
+  — one of `awk`, `sed`, `grep`, `sort`, `expr`, `cut`, `tr`, `wc`, `date`,
+  `ls`, `dirname`, `basename`, `dd`, `od`, or `sleep` is present but does not work,
+  or `awk`/`grep` is an old pre-POSIX version (the message says which feature)
+  (wrong permissions, a damaged binary, a stub). The message names it. Without
+  these the report would be silently incomplete, so the script refuses rather
+  than produce something that looks whole and is not.
+- **`FAIL: another collection (process N) is already running in ...`** — the
+  script was started twice into the same directory. The second start is
+  refused so it cannot delete the first run's evidence mid-collection. Wait
+  for the first to finish, or use a different `--output-dir`. A lock left by
+  a run that was killed or lost to a reboot is ignored automatically.
+
+Neither changes anything on the host.
 
 **Exit status**, if you are running it from a script:
 
@@ -302,7 +329,13 @@ and do not cross into network-mounted storage. If you would prefer a maintenance
 window that is fine — nothing about it is time-sensitive.
 
 **Does it phone home or transmit anything?** No. It makes no network connections
-and contains no command that could. Verify it with the `strace` check above.
+and contains no command that could. Verify it with the `strace` check above. The
+one caveat is the name service: `getent` resolves accounts and groups through
+your host's own configuration, so on a directory-joined host that resolver may
+talk to your directory server — the same thing that happens at every login. If
+your resolver is an in-process LDAP client rather than `sssd` or `nscd`, the
+`strace` check will show that connection; it is the host's, made on the
+script's behalf, to your own server.
 
 **Could it lock accounts, expire passwords, or change a shell?** No. Where a
 platform's account-status command has a dangerous form — AIX `passwd -s` changes
@@ -313,7 +346,14 @@ automated test that fails the build if the unsafe command is ever called.
 **What if it is interrupted, or the server reboots mid-run?** Nothing is left in
 a partial state, because nothing is being changed. The output directory may hold
 an incomplete collection, which the script marks as incomplete. Delete it and
-re-run, or send it and tell us.
+re-run, or send it and tell us. A Ctrl-C, or a `kill` from another session, is
+acted on within a second even while the script is waiting on a slow command,
+and it stops the processes it started before it exits.
+
+**How long does it take on a host with a very large number of local accounts?**
+About the same. The account-status and password-ageing evidence is read from the
+password and shadow files in a single pass rather than by running a command per
+account, so 20,000 local accounts add seconds, not minutes.
 
 **Does it need internet access?** No. It has been tested running with no network
 interfaces present at all.

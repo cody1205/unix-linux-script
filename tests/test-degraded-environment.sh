@@ -147,19 +147,34 @@ else
     tail -5 "$WORK/ro.log" | sed 's/^/            /'
 fi
 
-printf '\n== 4. a full output filesystem does not yield a CLEAN verdict ==\n'
+printf '\n== 4. a full output filesystem yields FAILED, exit 1, and no half-written archive ==\n'
 checks=`expr $checks + 1`
 mkdir -p "$WORK/tiny"
 if command -v mount >/dev/null 2>&1 && mount -t tmpfs -o size=768k tmpfs "$WORK/tiny" 2>/dev/null; then
     sh "$COLLECTOR" --output-dir "$WORK/tiny" </dev/null >"$WORK/full.log" 2>&1
     rc=$?
     _fv=`verdict_of "$WORK/tiny"`
-    if [ "$_fv" = "COMPLETED_CLEAN" ]; then
-        fail "reported COMPLETED_CLEAN on a filesystem too small to hold the evidence"
-        printf '            A truncated package that calls itself clean is the worst\n'
-        printf '            possible outcome for an audit deliverable.\n'
+    _fterm=`grep 'COLLECTION RESULT:' "$WORK/full.log" | awk '{ print $3 }'`
+    _fleft=`ls "$WORK/tiny"/*.tar* 2>/dev/null | wc -l | tr -d ' '`
+    # "Not CLEAN" used to be the whole bar, and COMPLETED_WITH_WARNINGS cleared
+    # it - which the client instructions describe as "normal, send it". A
+    # report cut off mid-section and a 0-byte archive are not a warning. What
+    # is required: a verdict the instructions say NOT to rely on
+    # (COMPLETED_WITH_ERRORS or FAILED - which one depends on whether the disk
+    # filled during the collection or only during the archive step), exit 1,
+    # and no half-written archive left with the archive's name. The verdict
+    # in the log file may itself be lost to the full disk, so the one on the
+    # terminal is what is asserted.
+    case "$_fterm" in
+        FAILED|COMPLETED_WITH_ERRORS) _fok=yes ;;
+        *) _fok=no ;;
+    esac
+    if [ "$rc" = "1" ] && [ "$_fok" = "yes" ] && [ "$_fleft" = "0" ]; then
+        pass "full filesystem: terminal verdict $_fterm, exit 1, no archive left behind"
     else
-        pass "did not claim a clean collection on a full filesystem (verdict: ${_fv})"
+        fail "full filesystem: exit=$rc terminal=${_fterm:-none} log=${_fv:-none} leftover archives=$_fleft"
+        printf '            A truncated package that calls itself usable is the worst\n'
+        printf '            possible outcome for an audit deliverable.\n'
     fi
     umount "$WORK/tiny" 2>/dev/null || :
 else
@@ -229,8 +244,18 @@ for sig in INT TERM; do
             sleep 1
             _w=`expr $_w + 1`
         done
-        sleep 1
-        _target=`ps -eo pid,args 2>/dev/null | grep "[l]inux-unix-evidence-gathering-script.sh --output-dir $O" | awk 'NR == 1 { print $1 }'`
+        # No further delay: the log appears within the first second and the
+        # whole collection can finish in five, so an extra sleep here is what
+        # let the run complete before the signal arrived. Killing early is
+        # safe - before the trap is installed the run simply dies with no
+        # verdict, which the assertion below also accepts.
+        _target=""
+        _tries=0
+        while [ -z "$_target" ] && [ "$_tries" -lt 20 ]; do
+            _target=`ps -eo pid,args 2>/dev/null | grep "[l]inux-unix-evidence-gathering-script.sh --output-dir $O" | awk 'NR == 1 { print $1 }'`
+            [ -n "$_target" ] || sleep 1
+            _tries=`expr $_tries + 1`
+        done
         [ -n "$_target" ] && kill -"$sig" "$_target" 2>/dev/null
     ) &
     _killer=$!

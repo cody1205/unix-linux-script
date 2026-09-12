@@ -90,6 +90,35 @@ case "$TARGET" in
             printf 'CANNOT VERIFY: could not create a temporary directory\n' >&2
             exit 3
         }
+        # Refuse an archive that could write outside the extraction directory
+        # BEFORE handing it to tar. GNU and BSD tar strip or refuse absolute
+        # and ".." members by default, but the defaults differ, an old AIX tar
+        # does neither, and a symbolic link followed by a member written
+        # through it defeats some versions. None of these can appear in an
+        # archive the collector built - it writes regular files under one
+        # relative directory - so their presence means the archive is not the
+        # collector's output, which the auditor should hear as such rather
+        # than as "corrupt or truncated".
+        _listing=`tar -tvf "$TARGET_PATH" 2>/dev/null || tar -tvzf "$TARGET_PATH" 2>/dev/null`
+        _names=`tar -tf "$TARGET_PATH" 2>/dev/null || tar -tzf "$TARGET_PATH" 2>/dev/null`
+        _hostile=""
+        if printf '%s\n' "$_listing" | grep -q '^[lh]'; then
+            _hostile="$_hostile links"
+        fi
+        if printf '%s\n' "$_names" | grep -q '^/'; then
+            _hostile="$_hostile absolute-paths"
+        fi
+        if printf '%s\n' "$_names" | grep -qE '(^|/)\.\.(/|$)'; then
+            _hostile="$_hostile parent-directory-components"
+        fi
+        if [ -n "$_hostile" ]; then
+            printf 'CANNOT VERIFY: %s contains archive members that could write outside\n' "$TARGET" >&2
+            printf 'the directory it is extracted into (%s).\n' "`printf '%s' "$_hostile" | sed 's/^ //; s/ /, /g'`" >&2
+            printf 'The collector never produces such members, so this archive is not its\n' >&2
+            printf 'output as delivered. Do NOT extract it by hand. Treat it as suspect and\n' >&2
+            printf 'raise it with the client contact before anything else is done with it.\n' >&2
+            exit 3
+        fi
         if ! ( cd "$WORK" && tar -xf "$TARGET_PATH" ) 2>/dev/null; then
             # Retry without assuming the archive is compressed.
             if ! ( cd "$WORK" && tar -xzf "$TARGET_PATH" ) 2>/dev/null; then
@@ -117,6 +146,18 @@ case "$TARGET" in
         fi
         ;;
 esac
+
+# A directory with neither a report/ nor a metadata/ subdirectory is not an
+# evidence package at all - most likely the wrong path, such as report/ inside
+# one. That is "could not be examined" (exit 3), not "incomplete, request a
+# fresh collection" (exit 2), which would send the auditor back to the client
+# over a typo.
+if [ ! -d "$ROOT_DIR/report" ] && [ ! -d "$ROOT_DIR/metadata" ]; then
+    printf 'CANNOT VERIFY: %s is not an evidence package directory (no report/ or\n' "$TARGET" >&2
+    printf 'metadata/ inside it). Point this at the %s directory, its parent, or\n' "$PACKAGE_DIR_NAME" >&2
+    printf 'the .tar.gz archive.\n' >&2
+    exit 3
+fi
 
 REPORT="$ROOT_DIR/report/SOX-ITGC-AUDIT-REPORT.txt"
 LOG="$ROOT_DIR/metadata/COLLECTION-LOG.txt"
@@ -180,10 +221,18 @@ fi
 printf '\n'
 printf 'Completeness\n'
 
-if grep -q 'Execution Summary' "$REPORT" 2>/dev/null; then
-    report_ok "report reaches its execution summary (not truncated)"
+# Both markers are looked for at the END of the report, not anywhere in it. A
+# source file printed into the report can contain any words at all - one
+# planted with the text "Execution Summary" satisfied a grep of the whole
+# report on a run that had been killed moments after printing it. The report
+# ends with a fixed closing line pointing at the collection log; a report that
+# does not end that way was cut off, whatever its body says.
+if tail -n 5 "$REPORT" 2>/dev/null | grep -q 'Review that file before relying on any section'; then
+    report_ok "report ends with its closing section (not truncated)"
+elif grep -q 'Execution Summary' "$REPORT" 2>/dev/null && ! tail -n 5 "$REPORT" 2>/dev/null | grep -q 'Review that file before relying on any section'; then
+    report_problem "report contains an execution summary but does not end with its closing section - it was cut off after that point, or the text is from a printed file"
 else
-    report_problem "report has no execution summary - it was truncated before the collection finished"
+    report_problem "report has no closing section - it was truncated before the collection finished"
 fi
 
 # The log's summary block is likewise the last thing written to it.
@@ -218,7 +267,20 @@ if [ -s "$MANIFEST" ] && [ -d "$ROOT_DIR/raw_files" ]; then
             COPIED\|*) ;;
             *) continue ;;
         esac
-        claimed_path=`printf '%s' "$manifest_line" | sed 's/^COPIED|//' | cut -d'|' -f1`
+        # Paths are recorded with %, |, newline and carriage return encoded
+        # as %25, %7C, %0A and %0D, so a filename containing one of them
+        # cannot split or corrupt its own record. Decoded here, %25 last.
+        claimed_path=`printf '%s' "$manifest_line" | sed 's/^COPIED|//' | cut -d'|' -f1 | awk '
+            BEGIN { ORS = ""; hex = "0123456789ABCDEF" }
+            {
+                s = $0
+                while (match(s, /%[0-9A-F][0-9A-F]/)) {
+                    v = (index(hex, substr(s, RSTART + 1, 1)) - 1) * 16 + index(hex, substr(s, RSTART + 2, 1)) - 1
+                    printf "%s%c", substr(s, 1, RSTART - 1), v
+                    s = substr(s, RSTART + 3)
+                }
+                print s
+            }'`
         claimed=`expr "$claimed" + 1`
         if [ ! -f "$ROOT_DIR/raw_files$claimed_path" ]; then
             absent=`expr "$absent" + 1`
@@ -240,16 +302,25 @@ fi
 printf '\n'
 printf 'Collection verdict\n'
 
+# The LAST verdict line wins. A collection interrupted after its summary was
+# written - during the archive step - appends a second summary that says
+# FAILED and names the signal, and taking the first RESULT line accepted
+# such a package as clean. An INTERRUPTED_BY line anywhere in the log is
+# decisive on its own.
 verdict=`sed -n 's/^FINAL_RESULT: //p' "$LOG" 2>/dev/null | tail -1`
 verdict_source=FINAL_RESULT
 if [ -z "$verdict" ]; then
-    verdict=`sed -n 's/^RESULT: //p' "$LOG" 2>/dev/null | head -1`
+    verdict=`sed -n 's/^RESULT: //p' "$LOG" 2>/dev/null | tail -1`
     verdict_source=RESULT
 fi
+if grep -q '^INTERRUPTED_BY: ' "$LOG" 2>/dev/null; then
+    verdict=FAILED
+    verdict_source="INTERRUPTED_BY (`sed -n 's/^INTERRUPTED_BY: //p' "$LOG" | tail -1`)"
+fi
 
-warn_lines=`grep -c ' | WARN  | ' "$LOG" 2>/dev/null`
+warn_lines=`grep -c '^[^|]* | WARN  | ' "$LOG" 2>/dev/null`
 [ -n "$warn_lines" ] || warn_lines=0
-error_lines=`grep -c ' | ERROR | ' "$LOG" 2>/dev/null`
+error_lines=`grep -c '^[^|]* | ERROR | ' "$LOG" 2>/dev/null`
 [ -n "$error_lines" ] || error_lines=0
 
 printf '  %s: %s\n' "$verdict_source" "${verdict:-none found}"
@@ -276,7 +347,7 @@ esac
 if [ "$warn_lines" -gt 0 ]; then
     printf '\n'
     printf '  Warnings recorded during collection:\n'
-    grep ' | WARN  | ' "$LOG" 2>/dev/null | sed 's/^/    /' | head -20
+    grep '^[^|]* | WARN  | ' "$LOG" 2>/dev/null | sed 's/^/    /' | head -20
     if [ "$warn_lines" -gt 20 ]; then
         printf '    ... and %s more; see the collection log\n' "`expr "$warn_lines" - 20`"
     fi
@@ -285,7 +356,7 @@ fi
 if [ "$error_lines" -gt 0 ]; then
     printf '\n'
     printf '  Errors recorded during collection:\n'
-    grep ' | ERROR | ' "$LOG" 2>/dev/null | sed 's/^/    /' | head -20
+    grep '^[^|]* | ERROR | ' "$LOG" 2>/dev/null | sed 's/^/    /' | head -20
 fi
 
 # ---------------------------------------------------------------------------

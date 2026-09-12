@@ -363,6 +363,25 @@ Permissions inside the package are deliberately **not** uniform:
 `MANIFEST.txt` records the permissions and ownership each file had on the source
 system, which survives transfer even when filesystem metadata does not.
 
+Manifest and skip-list records are one per line with `|` between fields, and a
+filename can contain `|`, `%`, a newline, a carriage return, or any other
+control character. `%` and `|` are written as `%25` and `%7C`, and every C0
+control character and DEL as `%XX`, so a hostile name cannot split or corrupt
+its own record or carry a terminal escape into the manifest;
+`verify-package.sh` decodes them. A name containing a newline once split its
+`COPIED` record in two, and the verifier reported two files missing from a
+package that was complete.
+
+The report and the collection log are sanitised once, at the end of the run:
+every control character other than tab, newline, and carriage return is
+replaced by `?`, byte for byte. A cron file containing `ESC[2J` and a forged
+"COLLECTION RESULT" line reached the report verbatim and was replayed to the
+operator's terminal, which cleared the screen; an auditor running `cat` on the
+report would get the same. Anything printed into the report can carry such
+bytes — file contents, filenames, process titles, login records — so the whole
+file is cleaned rather than each route separately. The copies in `raw_files/`
+are untouched.
+
 ### Which version of the collector produced this package?
 
 Check this first when a package looks wrong. The report header records it:
@@ -407,10 +426,21 @@ and returns an exit code so it can gate an automated intake process:
 | `2` | Incomplete, truncated, or the collection reported errors. Request a fresh collection. |
 | `3` | Could not be examined at all (missing, corrupt, not a package). |
 
-It checks that the report reaches its execution summary and the log reaches its
+It checks that the report reaches its closing section and the log reaches its
 verdict — both written last, so their absence means the collection was captured
 mid-write — that the manifest names no file the package lacks, and that you can
-actually read what arrived.
+actually read what arrived. The closing-section check looks at the *end* of the
+report, not anywhere in it, because a source file printed into the report can
+contain any words at all.
+
+**It refuses, before extracting anything, an archive with members that could
+write outside the extraction directory** — an absolute path, a `..` component,
+or a symbolic or hard link — with exit `3` and a message saying so. The
+collector writes only regular files under one relative directory, so such
+members cannot be its output; the auditor should hear "this archive is not what
+the collector produced, do not extract it by hand", not "corrupt or truncated".
+GNU and BSD tar mostly defend against these on their own, but their defaults
+differ and the message would be the wrong one.
 
 `HOW-TO-READ-THIS-EVIDENCE.txt` carries a two-command version of the same check,
 so a recipient without this repository can still tell a complete delivery from a
@@ -456,6 +486,37 @@ leave the host. The substitution is stated in the file itself, in the manifest a
 `COPIED_REDACTED`, in the skip list, and as a `WARN`, so a redacted value can
 never be mistaken for the host's real configuration.
 
+**What a path leads to is judged, not how it is spelled.** A symbolic link is
+resolved before it is classified, so a link in `/etc/cron.d` pointing at
+`/etc/shadow` is withheld exactly as `/etc/shadow` itself would be — recorded in
+the manifest and skip list with the target named. Links into home directories
+and the process, device, and `sys` filesystems are treated the same way. An
+ordinary link (`/etc/os-release`, `/etc/resolv.conf` on systemd hosts) is still
+collected, with `symlink_target=` recorded on its manifest line. Before this,
+the check screened only the link's own path, and `/etc/shadow` reached
+`raw_files/` under a harmless name with a CLEAN verdict.
+
+**Only regular files are read.** A named pipe, socket, or device node in a
+configuration directory is recorded as `EXAMINED_SPECIAL` with a `WARN` and its
+contents are never opened — a pipe with no writer would otherwise block the
+collection indefinitely.
+
+**Credential material is also recognised by content, wherever it is.** A hard
+link to `/etc/shadow` is the same inode under another name — it resolves to
+itself, its path is in no table, and it was copied byte-for-byte before this
+rule existed. So any file whose colon-separated second field is a crypt hash,
+or that has the shape of a shadow or gshadow table, is withheld regardless of
+its name, and the skip list says why. `/etc/passwd` keeps its own redaction
+route. The rule is unit-tested against `/etc/group`, crontab, and `subuid`
+shapes to prove it does not over-block, and a normal run copies exactly the
+same files as before it existed.
+
+**Oversized content is capped and disclosed.** The report prints at most 4 MB of
+any one file, marking the cut and recording `PRINTED_TRUNCATED`; the copy in
+`raw_files/` is complete up to 64 MB, above which the file is recorded as
+`NOT_COPIED_TOO_LARGE` with its size and checksum. Binary content is never
+printed (`PRINTED_BINARY_OMITTED`) but is still copied for the reviewer.
+
 ## Impact on the target host
 
 The script is read-only: it does not create, modify, delete, enable, disable,
@@ -466,9 +527,9 @@ the report and manifest.
 
 | Section | Cost | Bounded how |
 | --- | --- | --- |
-| 10 — world-writable | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per category |
-| 11 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev` |
-| 23 — application directory listing | **unbounded**; only runs when `--app-dir` is given | not capped and not `-xdev`; the operator chooses the roots |
+| 9 — world-writable | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per scanned root per category (so an `--app-dir` root cannot be crowded out by system paths), each root's walk stopped after 240 seconds |
+| 10 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per scanned root per category with the cap disclosed, each root's walk stopped after 240 seconds |
+| 22 — application directory listing | up to ten minutes per root; only runs when `--app-dir` is given | not capped and not `-xdev` — the operator chooses the roots — but the listing is stopped after 600 seconds and the report says so |
 
 Sections 9 and 10 are pruned to system binary, system configuration, and
 application installation paths rather than scanning whole filesystems, and both
@@ -480,6 +541,10 @@ Section 22 is the one to watch on a large estate. It is opt-in, but when a root
 is supplied it recursively lists **every** file beneath it with no cap and without
 stopping at filesystem boundaries. That is intentional — the operator named the
 directory and the listing is the evidence — but it should be a considered choice.
+The only limit is time: a listing still running after ten minutes is stopped,
+noted in the section, logged as a `WARN`, and recorded in the manifest as
+`APP_DIR_LISTING_TIMEOUT`, so a root on an unresponsive mount cannot hold the
+collection open indefinitely.
 
 ## Known limitations
 
@@ -492,12 +557,109 @@ Stated here rather than discovered during an engagement:
   enumeration by default while still resolving accounts by name, so on a
   directory-joined host the interactive-user list may be local accounts only. The
   script detects this case, says so in the report, and raises a `WARN`.
+- **Name-service lookups are bounded, and are the one thing that may touch the
+  network.** `getent` resolves through the host's own resolver, which on a
+  directory-joined host may contact the directory server — the host's action,
+  not the script's, and nothing leaves for anywhere else. A resolver whose
+  server is down can block for its full retry cycle, and a `getent` that never
+  answered hung the collection until it was killed. Each query is now bounded
+  to 45 seconds; the first timeout marks the name service unusable for the
+  rest of the run, records `NAME_SERVICE_TIMEOUT` in the manifest with a
+  `WARN`, and every account and group section from then on reads the local
+  files and says so.
+- **Host commands that can block on something outside the host are bounded
+  too.** `df` on a stale NFS mount, `rpm` waiting for a package-manager lock,
+  `systemctl` on a wedged bus, `ntpq` resolving peer names, AIX `lsuser`
+  against a directory, Solaris `pkg list -u` refreshing its publisher
+  catalogues, `last` reading the whole wtmp file: each runs under a
+  60-second bound. A `df` that never
+  answered hung the collection until it was killed; now the section carries
+  a one-line note, the log a `WARN`, and the manifest a `COMMAND_TIMEOUT`
+  record, and the collection carries on. When the bound fires, the whole
+  process tree the command started is stopped, not just its top process, and
+  the timeout is taken from the watchdog's own record rather than from the
+  job's exit status — shells disagree about the status of a job that died of
+  a signal, and ksh93 reported a stopped pipeline as having succeeded. The
+  watchdog's own sleep is tracked by PID, so nothing is left running on the
+  client host afterwards. Verified under dash, bash, ksh93, mksh, yash, posh
+  and busybox. The one thing no watchdog can stop is a process the kernel
+  holds in uninterruptible sleep on a dead mount; that one lingers until the
+  mount answers, and the report names the path so the client knows which.
+- **Interruption stops everything, at once.** The handler for Ctrl-C, `kill`
+  and a dropped session first stops every process the collector started —
+  a scan, a watchdog and its sleep, a host command — and only then marks the
+  package incomplete. Bounded work runs where the shell sits in `wait`, which
+  every shell interrupts immediately; the earlier arrangement ran scans inside
+  command substitutions, and a shell blocked reading one does not run its
+  traps until it finishes, so a kill sent to a collector stuck in a scan was
+  ignored for the length of the scan's bound. Verified: the handler runs
+  within a second of the signal, and nothing is left running.
+- **Account status and password ageing are derived in one pass.** `passwd -S`
+  and `chage -l` read the whole shadow file to report one account, and were
+  run once per account: 20,000 local accounts took nine minutes in those two
+  subsections against five seconds for the rest of the collection. Root can
+  read the shadow file, so the same fields are now tabulated in one pass over
+  `/etc/passwd` and `/etc/shadow` — the hash column reduced to a status word,
+  never printed — in a fraction of a second. Hosts whose shadow file is not
+  readable or not in the nine-column form (trusted-mode HP-UX) keep the
+  per-account commands, capped at 2,000 accounts with a note, a `WARN` and a
+  `PER_ACCOUNT_COMMAND_CAPPED` record. AIX uses `lsuser ALL`, one command.
+- **Section 10 findings are recorded per root** as `PRIVILEGED_BIT_SCAN`
+  manifest lines (`setuid` and `setgid`, `entries=`, `truncated=`), the way
+  Section 9 records `WORLD_WRITABLE_SCAN`; an `--app-dir` that contains the
+  output directory is recorded as `APP_DIR_CONTAINS_PACKAGE` and the listing
+  says so. The preflight now also requires `sleep`, which every time bound
+  depends on, and warns if `ps` cannot list processes, since that is how a
+  stopped command's children are found.
+- **Looking at a root is bounded too, and so is the home-directory review.**
+  A `stat` of a directory on a hard NFS mount whose server has gone blocks in
+  the kernel before any walk begins. Each scan root is probed and resolved
+  under a 30-second bound; the `--app-dir` root is probed the same way
+  (`APP_DIR_UNRESPONSIVE`). Home directories are the one place the script
+  touches that is routinely on NFS, so the Section 13 reviews of homes,
+  `.ssh` and legacy trust files each run under a five-minute bound; what the
+  review had written by then is kept, the report says where it stopped, and
+  the manifest carries `SECTION_TIMEOUT` with `partial=yes`.
+- **The handover to the sudo operator is bounded and numeric.** The operator
+  on a directory-joined host is usually a directory account, and both the
+  `id` that looked it up and the `chown` that took its name went through the
+  resolver: with the directory server down, a collection that had survived
+  every other lookup hung at the very end, after the archive was written.
+  The lookup now runs once under the name-service bound, `chown` is given
+  the uid:gid it returned (which the kernel applies with no lookup), and an
+  account that cannot be resolved in time leaves the package owned by root
+  with a `WARN` saying so.
+- **Filesystem walks are bounded per root.** `find -xdev` keeps a scan from
+  crossing *into* a network mount, but a scan root that is itself on a dead
+  mount — `/opt` on NFS, an `--app-dir` on a SAN whose array has gone away —
+  hangs `find` before it walks anything, and a `find` that never returned
+  hung the collection until it was killed. Each root's walk in Sections 9
+  and 10 is stopped after 240 seconds; a root that times out once is skipped
+  by every later scan, so a dead mount costs one bound rather than one per
+  category. The affected sections carry a note naming the root, the log a
+  `WARN`, and the manifest a `SCAN_TIMEOUT` record. The other roots are still
+  scanned in full. The Section 22 listing has its own ten-minute bound.
+- **Solaris resolves its POSIX tools first.** `/usr/bin/awk` on Solaris is
+  the 1977 awk — no `-v`, no user functions, no `gsub`, no character
+  classes — and `/usr/bin/grep` has no `-E` or `-q`; the POSIX versions
+  live in `/usr/xpg4/bin`, which the script now puts first in its fixed
+  `PATH` (the directory exists nowhere else). The preflight exercises
+  exactly those awk and grep features, so a host that still resolves to the
+  old tools is refused up front rather than reported on with silently
+  empty sections. Solaris itself is not exercised by simulation; a dry run
+  on client hardware before the engagement remains advisable.
 - **AIX and HP-UX are exercised by simulation, not on real hardware.** Neither
   boots on x86. The simulations reproduce the file and command layer faithfully
   enough to have caught a real credential leak and a real account-modification
   bug, but **a dry run on client hardware before the engagement remains
   advisable.**
-- **Section 22 is unbounded** when used. See the table above.
+- **A busybox userland is verified, not just GNU.** The collector and the
+  verifier have been run with busybox applets bind-mounted over every tool
+  they use (`awk`, `sed`, `grep`, `tr`, `od`, `dd`, `sort`, `find`, `ls`,
+  `tar`, and twenty more), as an Alpine-based appliance would present them:
+  identical copied-file set, 24 sections, zero warnings, verifier CLEAN.
+- **Section 22 is uncapped** when used: every file beneath the root is
+  listed, at the operator's choice. See the table above.
 
 ## Tests
 

@@ -101,7 +101,7 @@ expect_exit "intact extracted directory" "$reference_exit" "`fresh_copy intact`"
 # relied on to provide. Construct one: strip the WARN lines and set the verdict to
 # match, so the package is internally consistent and genuinely clean.
 target=`fresh_copy clean`
-grep -v ' | WARN  | ' "$target/metadata/COLLECTION-LOG.txt" \
+grep -v '^[^|]* | WARN  | ' "$target/metadata/COLLECTION-LOG.txt" \
     | sed -e 's/^RESULT: .*/RESULT: COMPLETED_CLEAN/' \
           -e 's/^FINAL_RESULT: .*/FINAL_RESULT: COMPLETED_CLEAN/' \
           -e 's/^WARNINGS: .*/WARNINGS: 0/' \
@@ -137,6 +137,15 @@ target=`fresh_copy no_log`
 rm -f "$target/metadata/COLLECTION-LOG.txt"
 expect_exit "collection log absent entirely" 2 "$target"
 
+printf '\n== a collection interrupted after its summary is rejected ==\n'
+# Interrupted during the archive step, after RESULT: COMPLETED_CLEAN had
+# been written, the collector appends a second summary naming the signal.
+# The verifier took the FIRST RESULT line and verified such a package.
+target=`fresh_copy interrupted_late`
+grep -v '^FINAL_RESULT: \|^FINAL_WARNINGS: \|^FINAL_ERRORS: \|^ARCHIVE_RESULT: \|^ARCHIVE_FILE: ' "$target/metadata/COLLECTION-LOG.txt" > "$WORK/t" && mv "$WORK/t" "$target/metadata/COLLECTION-LOG.txt"
+printf '\nSUMMARY (INTERRUPTED RUN)\nRESULT: FAILED\nINTERRUPTED_BY: SIGTERM\n' >> "$target/metadata/COLLECTION-LOG.txt"
+expect_exit "second summary says the run was interrupted" 2 "$target"
+
 printf '\n== a package that lost all its collected files is rejected ==\n'
 # Removing raw_files/ entirely, rather than one file from it. The original guard
 # only ran the manifest check when raw_files/ existed, so a package that had lost
@@ -169,6 +178,41 @@ printf '\n== unexaminable inputs are distinguished from bad ones ==\n'
 head -c 400 "$ARCHIVE" > "$WORK/corrupt.tar.gz"
 expect_exit "archive truncated in transfer" 3 "$WORK/corrupt.tar.gz"
 expect_exit "target does not exist" 3 "$WORK/absent.tar.gz"
+# A subdirectory of a package is the wrong path, not a damaged package: it
+# must not send the auditor back to the client for a fresh collection.
+expect_exit "a subdirectory of a package (wrong path)" 3 "`fresh_copy subdir`/report"
+
+printf '\n== an archive that could write outside its extraction directory is refused ==\n'
+pass() { printf 'ok        %s\n' "$1"; }
+fail() { printf 'NOT OK    %s\n' "$1"; failures=`expr $failures + 1`; }
+# The collector writes regular files under one relative directory and nothing
+# else, so an absolute member, a ".." component, or a link member means the
+# archive is not its output. GNU and BSD tar mostly defend against these on
+# their own, but the verifier must say what it found rather than "corrupt".
+mkdir -p "$WORK/hostile/SOX-ITGC-AUDIT-LINUX-UNIX/report"
+printf 'x\n' > "$WORK/hostile/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+printf 'escape\n' > "$WORK/hostile/payload"
+( cd "$WORK/hostile" && tar -cf "$WORK/traversal.tar" SOX-ITGC-AUDIT-LINUX-UNIX --transform='s|^payload$|../../escaped-by-tar|' payload 2>/dev/null )
+( cd "$WORK/hostile" && ln -s /tmp lnk && tar -cf "$WORK/linkmember.tar" SOX-ITGC-AUDIT-LINUX-UNIX lnk 2>/dev/null )
+for _h in traversal linkmember; do
+    if [ -s "$WORK/$_h.tar" ]; then
+        expect_exit "archive with a hostile member ($_h)" 3 "$WORK/$_h.tar"
+        checks=`expr $checks + 1`
+        if sh "$VERIFIER" "$WORK/$_h.tar" 2>&1 | grep -q 'could write outside'; then
+            pass "names the reason: members that could write outside the extraction directory"
+        else
+            fail "refused without saying why ($_h)"
+        fi
+    else
+        printf 'SKIP      this tar cannot build the %s fixture\n' "$_h"
+    fi
+done
+checks=`expr $checks + 1`
+if [ -e "$WORK/escaped-by-tar" ] || [ -e "$WORK/../escaped-by-tar" ]; then
+    fail "the verifier extracted a traversal member outside its work directory"
+else
+    pass "nothing was written outside the work directory"
+fi
 
 printf '\n== a package with collection warnings is usable, not rejected ==\n'
 # A warning means evidence was limited, which the auditor must read - but the
