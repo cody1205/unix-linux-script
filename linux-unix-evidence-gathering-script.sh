@@ -2196,56 +2196,90 @@ name_service_usable() {
     command_exists getent && ! name_service_is_broken
 }
 
+# Run a command under a time bound. Prints what it printed; returns its
+# status, or 124 if it was stopped at the bound (the convention of the
+# timeout utility, which is not portable enough to rely on here).
+#
+# The watchdog's sleep is recorded by PID the moment it exists, because a
+# watchdog killed on its own re-parents its sleep to init where nothing can
+# find it, and a sleep was left behind on the client host per call until that
+# was fixed. The command is killed only if the sleep ran its full course: a
+# sleep ended by the parent returns non-zero, and by then the command's PID
+# may belong to another process.
+#
+# Usage: bounded_run SECONDS COMMAND [ARGS...]
+bounded_run() {
+    _br_secs=$1
+    shift
+    _br_out="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$"
+    _br_timer_pidfile="$_br_out.timer"
+    "$@" > "$_br_out" 2>/dev/null </dev/null &
+    _br_pid=$!
+    (
+        sleep "$_br_secs" &
+        _br_sleep=$!
+        printf '%s\n' "$_br_sleep" > "$_br_timer_pidfile" 2>/dev/null
+        wait "$_br_sleep"
+        if [ "$?" -eq 0 ]; then
+            kill "$_br_pid" 2>/dev/null
+        fi
+    ) &
+    _br_timer=$!
+    wait "$_br_pid"
+    _br_rc=$?
+    _br_i=0
+    while [ ! -s "$_br_timer_pidfile" ] && [ "$_br_i" -lt 500 ] && kill -0 "$_br_timer" 2>/dev/null; do
+        _br_i=`expr "$_br_i" + 1`
+    done
+    _br_sleep_pid=`cat "$_br_timer_pidfile" 2>/dev/null`
+    if [ -n "$_br_sleep_pid" ]; then
+        kill "$_br_sleep_pid" 2>/dev/null
+    fi
+    kill "$_br_timer" 2>/dev/null
+    wait "$_br_timer" 2>/dev/null
+    rm -f "$_br_timer_pidfile" 2>/dev/null
+    if [ "$_br_rc" -gt 128 ]; then
+        rm -f "$_br_out" 2>/dev/null
+        return 124
+    fi
+    cat "$_br_out" 2>/dev/null
+    rm -f "$_br_out" 2>/dev/null
+    return "$_br_rc"
+}
+
+# A host command that can block on something outside the host - df on a stale
+# NFS mount, rpm waiting for a package-manager lock, systemctl on a wedged
+# bus, ntpq resolving peer names - runs under a 60-second bound. A timeout is
+# reported in the section, logged, and recorded in the manifest; the
+# collection carries on. Usage: bounded_host_command COMMAND [ARGS...]
+HOST_COMMAND_TIMEOUT_SECONDS=60
+bounded_host_command() {
+    bounded_run "$HOST_COMMAND_TIMEOUT_SECONDS" "$@"
+    _bhc_rc=$?
+    if [ "$_bhc_rc" -eq 124 ]; then
+        printf '[%s did not finish within %s seconds and was stopped; see the collection log]\n' "$1" "$HOST_COMMAND_TIMEOUT_SECONDS"
+        log_event WARN evidence "'$*' did not finish within ${HOST_COMMAND_TIMEOUT_SECONDS}s and was stopped - typically a stale network mount, a package-manager lock, or a service that is not answering; the section it feeds is incomplete"
+        record_manifest_line "COMMAND_TIMEOUT|$*|seconds=$HOST_COMMAND_TIMEOUT_SECONDS"
+        return 1
+    fi
+    return "$_bhc_rc"
+}
+
 # Usage: name_service_query DATABASE [KEY]. Prints what getent printed;
 # returns getent's status, or 1 with nothing printed after a timeout.
 name_service_query() {
     if name_service_is_broken; then
         return 1
     fi
-    _nsq_out="${WORKING_DIRECTORY:-.}/.sox-itgc-name-service.$$"
-    _nsq_timer_pidfile="$_nsq_out.timer"
-    getent "$@" > "$_nsq_out" 2>/dev/null &
-    _nsq_pid=$!
-    # The watchdog. Its sleep's PID is written to a file the moment it exists,
-    # because killing the watchdog alone re-parents its sleep to init where
-    # nothing can find it, and a 45-second sleep was left behind on every run.
-    # getent is killed only if the sleep ran its full course: a sleep ended by
-    # the parent returns non-zero, and by then getent's PID may already belong
-    # to some other process.
-    (
-        sleep "$NAME_SERVICE_TIMEOUT_SECONDS" &
-        _nsq_sleep=$!
-        printf '%s\n' "$_nsq_sleep" > "$_nsq_timer_pidfile" 2>/dev/null
-        wait "$_nsq_sleep"
-        if [ "$?" -eq 0 ]; then
-            kill "$_nsq_pid" 2>/dev/null
-        fi
-    ) &
-    _nsq_timer=$!
-    wait "$_nsq_pid"
+    bounded_run "$NAME_SERVICE_TIMEOUT_SECONDS" getent "$@"
     _nsq_rc=$?
-    # Stop the watchdog: its sleep first, by the PID it recorded, then itself.
-    _nsq_i=0
-    while [ ! -s "$_nsq_timer_pidfile" ] && [ "$_nsq_i" -lt 500 ] && kill -0 "$_nsq_timer" 2>/dev/null; do
-        _nsq_i=`expr "$_nsq_i" + 1`
-    done
-    _nsq_sleep_pid=`cat "$_nsq_timer_pidfile" 2>/dev/null`
-    if [ -n "$_nsq_sleep_pid" ]; then
-        kill "$_nsq_sleep_pid" 2>/dev/null
-    fi
-    kill "$_nsq_timer" 2>/dev/null
-    wait "$_nsq_timer" 2>/dev/null
-    rm -f "$_nsq_timer_pidfile" 2>/dev/null
-    if [ "$_nsq_rc" -gt 128 ]; then
+    if [ "$_nsq_rc" -eq 124 ]; then
         NAME_SERVICE_BROKEN=yes
         : > "`name_service_state_file`" 2>/dev/null
-        rm -f "$_nsq_out" 2>/dev/null
         log_event WARN evidence "the name service did not answer 'getent $*' within ${NAME_SERVICE_TIMEOUT_SECONDS}s - a directory server that is down or unreachable, most likely; account and group evidence from here on is taken from the local files only, so directory-sourced accounts are not represented"
         record_manifest_line "NAME_SERVICE_TIMEOUT|getent $*|seconds=$NAME_SERVICE_TIMEOUT_SECONDS|fallback=local_files"
         return 1
     fi
-    cat "$_nsq_out" 2>/dev/null
-    rm -f "$_nsq_out" 2>/dev/null
     return "$_nsq_rc"
 }
 
@@ -3425,7 +3459,7 @@ print_account_status_summary() {
                 # AIX: never invoke passwd here. lsuser is the read-only query.
                 if command_exists lsuser; then
                     printf 'Command: lsuser -a account_locked expires login shell ALL\n'
-                    if lsuser -a account_locked expires login shell ALL </dev/null 2>/dev/null; then
+                    if bounded_host_command lsuser -a account_locked expires login shell ALL; then
                         found=yes
                     fi
                 fi
@@ -3453,7 +3487,7 @@ print_account_status_summary() {
         esac
 
         if [ "$found" = no ] && command_exists lsuser && [ "$OS_NAME" != "AIX" ]; then
-            lsuser -a account_locked expires login shell ALL </dev/null 2>/dev/null && found=yes
+            bounded_host_command lsuser -a account_locked expires login shell ALL && found=yes
         fi
         if [ "$found" = no ]; then
             not_available
@@ -3485,7 +3519,7 @@ print_password_expiry_details() {
                 blank_line
             done < /etc/passwd
         elif command_exists lsuser; then
-            lsuser -a maxage minage pwdwarntime expires account_locked ALL </dev/null 2>/dev/null && found=yes
+            bounded_host_command lsuser -a maxage minage pwdwarntime expires account_locked ALL && found=yes
         fi
         if [ "$found" = no ] && ! command_exists chage && ! command_exists lsuser; then
             not_available
@@ -3640,7 +3674,7 @@ print_service_startup_summary() {
         Linux)
             if command_exists systemctl; then
                 printf 'Command: systemctl list-unit-files --type=service\n'
-                systemctl list-unit-files --type=service 2>/dev/null || not_available
+                bounded_host_command systemctl list-unit-files --type=service || not_available
             else
                 print_file_with_header /etc/inittab
             fi
@@ -3816,7 +3850,7 @@ print_patch_update_summary() {
 
     if rpm_usable; then
         printf 'Command: rpm -qa --last\n'
-        rpm -qa --last 2>/dev/null || not_available
+        bounded_host_command rpm -qa --last || not_available
     elif dpkg_usable; then
         print_file_with_header /var/log/dpkg.log
     elif command_exists lslpp; then
@@ -3836,7 +3870,7 @@ print_patch_update_summary() {
 # or change monitoring configuration.
 print_backup_operational_summary() {
     if command_exists df; then
-        df -k 2>/dev/null || not_available
+        bounded_host_command df -k || not_available
     else
         not_available
     fi
@@ -3878,13 +3912,13 @@ print_time_sync_summary() {
     subsection "Synchronisation Status:"
     if command_exists timedatectl; then
         printf 'Command: timedatectl\n'
-        timedatectl </dev/null 2>/dev/null || not_available
+        bounded_host_command timedatectl || not_available
     elif command_exists chronyc; then
         printf 'Command: chronyc tracking\n'
-        chronyc tracking </dev/null 2>/dev/null || not_available
+        bounded_host_command chronyc tracking || not_available
     elif command_exists ntpq; then
         printf 'Command: ntpq -p\n'
-        ntpq -p </dev/null 2>/dev/null || not_available
+        bounded_host_command ntpq -p || not_available
     elif command_exists lssrc; then
         printf 'Command: lssrc -s xntpd (AIX)\n'
         lssrc -s xntpd </dev/null 2>/dev/null || not_available
@@ -4137,7 +4171,7 @@ print_auth_log_samples() {
         # contains SSH, sudo, su, and PAM events rather than unrelated noise.
         # Header lines such as "-- No entries --" are stripped so that an empty
         # journal is not mistaken for evidence that logging is operating.
-        journal_sample=`journalctl -n "$AUTH_LOG_SAMPLE_LINES" --no-pager --facility=auth,authpriv 2>/dev/null | grep -v '^-- '`
+        journal_sample=`bounded_host_command journalctl -n "$AUTH_LOG_SAMPLE_LINES" --no-pager --facility=auth,authpriv | grep -v '^-- '`
         if [ -n "$journal_sample" ]; then
             printf '%s\n' "$journal_sample"
             record_manifest_line "LOG_SAMPLED|journalctl|facility=auth,authpriv|lines=$AUTH_LOG_SAMPLE_LINES"
@@ -4870,7 +4904,7 @@ handle_interruption() {
     if [ -n "$LOCK_FILE" ]; then
         rm -f "$LOCK_FILE" 2>/dev/null
     fi
-    rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* 2>/dev/null
+    rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* 2>/dev/null
     # An interrupted report is still going to be read - that is how the
     # interruption is discovered - so it gets the same control-character
     # sanitisation as a complete one. A half-finished sanitisation file from
@@ -5332,7 +5366,7 @@ _final_result=`collection_log_result`
 if [ -n "$LOCK_FILE" ]; then
     rm -f "$LOCK_FILE" 2>/dev/null
 fi
-rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* 2>/dev/null
+rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* 2>/dev/null
 
 case "$_final_result" in
     COMPLETED_CLEAN|COMPLETED_WITH_WARNINGS)

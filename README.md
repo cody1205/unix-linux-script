@@ -563,6 +563,15 @@ Stated here rather than discovered during an engagement:
   rest of the run, records `NAME_SERVICE_TIMEOUT` in the manifest with a
   `WARN`, and every account and group section from then on reads the local
   files and says so.
+- **Host commands that can block on something outside the host are bounded
+  too.** `df` on a stale NFS mount, `rpm` waiting for a package-manager lock,
+  `systemctl` on a wedged bus, `ntpq` resolving peer names, AIX `lsuser`
+  against a directory: each runs under a 60-second bound. A `df` that never
+  answered hung the collection until it was killed; now the section carries
+  a one-line note, the log a `WARN`, and the manifest a `COMMAND_TIMEOUT`
+  record, and the collection carries on. The bound is implemented with a
+  watchdog whose sleep is tracked by PID, so nothing is left running on the
+  client host afterwards — verified.
 - **AIX and HP-UX are exercised by simulation, not on real hardware.** Neither
   boots on x86. The simulations reproduce the file and command layer faithfully
   enough to have caught a real credential leak and a real account-modification

@@ -714,6 +714,41 @@ else
 fi
 
 #############################################################################
+printf '\n== 17. a host command that never returns cannot hang the collection ==\n'
+# df blocks on a stale NFS mount; rpm waits for a package-manager lock;
+# systemctl on a wedged bus; ntpq resolving peer names. A df that never
+# answered hung the collection until it was killed. Each such command runs
+# under a bound; a timeout is noted in the section, logged, and recorded.
+checks=`expr $checks + 1`
+if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null && command -v df >/dev/null 2>&1; then
+    mkdir -p "$WORK/df"
+    printf '#!/bin/sh\nsleep 600\n' > "$WORK/df/fake-df"
+    chmod 755 "$WORK/df/fake-df"
+    _df=`command -v df`
+    _t0=`date +%s`
+    unshare -m sh -c "mount --bind '$WORK/df/fake-df' '$_df' && timeout 300 sh '$COLLECTOR' --output-dir '$WORK/df/out' </dev/null >/dev/null 2>&1; echo \$? > '$WORK/df/rc'" 2>/dev/null
+    _t1=`date +%s`
+    _drc=`cat "$WORK/df/rc" 2>/dev/null`
+    _dm="$WORK/df/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/MANIFEST.txt"
+    _dr="$WORK/df/out/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+    _delapsed=`expr $_t1 - $_t0`
+    if [ "$_drc" = "0" ] && [ "$_delapsed" -lt 200 ] && grep -q '^COMMAND_TIMEOUT|df' "$_dm" 2>/dev/null && grep -q 'did not finish within' "$_dr" 2>/dev/null; then
+        pass "completed in ${_delapsed}s; the stopped df is recorded and the section says so"
+    else
+        fail "hanging df: exit=${_drc:-none} elapsed=${_delapsed}s timeout-recorded=`grep -c '^COMMAND_TIMEOUT|df' "$_dm" 2>/dev/null`"
+    fi
+    for _sp in `ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && $3 == "600") || $0 ~ /fake-df/ { print $1 }'`; do kill "$_sp" 2>/dev/null; done
+    sleep 1
+else
+    skip "cannot create a mount namespace here; host-command timeout not exercised"
+    if grep -q '^bounded_host_command()' "$COLLECTOR"; then
+        pass "the bounded host-command runner is present"
+    else
+        fail "the bounded host-command runner is missing"
+    fi
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then
