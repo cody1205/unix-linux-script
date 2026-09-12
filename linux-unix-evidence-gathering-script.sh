@@ -2207,25 +2207,73 @@ name_service_usable() {
 # sleep ended by the parent returns non-zero, and by then the command's PID
 # may belong to another process.
 #
+# Stopping the command means stopping everything it started. A bounded scan
+# is a subshell running "find | sort | head", and stopping the subshell alone
+# left find, sort and head running on the client host for as long as the
+# dead mount kept find blocked. The tree is read from ps once, at the moment
+# of the kill, and signalled deepest first, the job itself last: the parent
+# shell wakes the instant the job dies, and the watchdog must be finished by
+# then rather than cut off in the middle of its list. A process the kernel
+# holds in uninterruptible sleep on a dead mount cannot be stopped by anyone;
+# that one lingers until the mount answers, and the report's note names the
+# root so the client knows which mount to look at.
+#
+# The timeout is detected from the watchdog's own record, not from the exit
+# status of the job. Shells disagree about the status of a job that died of
+# a signal (143 in most, 256+15 in ksh93, 384+15 in yash), and a job whose
+# children were stopped from under it can exit 0 - a pipeline whose find was
+# killed ends with head reading end-of-file - which turned a timed-out scan
+# into a clean, empty result.
+#
+# The parent never kills the watchdog, only its sleep: a watchdog killed
+# mid-list leaves the rest of the tree running. When the job finishes on its
+# own, ending the sleep makes the watchdog exit without touching anything.
+#
+# Both waits are silenced because dash and most other shells announce a
+# child that died of a signal - "Terminated" - on the terminal, and the
+# watchdog's sleep dies that way on every call that finishes in time. A
+# console full of "Terminated" reads as the collector having crashed.
+#
 # Usage: bounded_run SECONDS COMMAND [ARGS...]
+kill_process_tree() {
+    _kpt_pids=`ps -e -o pid= -o ppid= 2>/dev/null | awk -v top="$1" '
+        $1 ~ /^[0-9]+$/ { parent[$1] = $2 }
+        END {
+            queue[1] = top; count = 1; i = 0
+            while (i < count) {
+                i++
+                for (child in parent) {
+                    if (parent[child] == queue[i]) { count++; queue[count] = child }
+                }
+            }
+            for (j = count; j >= 1; j--) print queue[j]
+        }' 2>/dev/null`
+    [ -n "$_kpt_pids" ] || _kpt_pids=$1
+    for _kpt_pid in $_kpt_pids; do
+        kill "$_kpt_pid" 2>/dev/null
+    done
+}
 bounded_run() {
     _br_secs=$1
     shift
     _br_out="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$"
     _br_timer_pidfile="$_br_out.timer"
+    _br_fired="$_br_out.fired"
+    rm -f "$_br_fired" 2>/dev/null
     "$@" > "$_br_out" 2>/dev/null </dev/null &
     _br_pid=$!
     (
         sleep "$_br_secs" &
         _br_sleep=$!
         printf '%s\n' "$_br_sleep" > "$_br_timer_pidfile" 2>/dev/null
-        wait "$_br_sleep"
+        wait "$_br_sleep" 2>/dev/null
         if [ "$?" -eq 0 ]; then
-            kill "$_br_pid" 2>/dev/null
+            : > "$_br_fired"
+            kill_process_tree "$_br_pid"
         fi
-    ) &
+    ) 2>/dev/null &
     _br_timer=$!
-    wait "$_br_pid"
+    wait "$_br_pid" 2>/dev/null
     _br_rc=$?
     _br_i=0
     while [ ! -s "$_br_timer_pidfile" ] && [ "$_br_i" -lt 500 ] && kill -0 "$_br_timer" 2>/dev/null; do
@@ -2234,12 +2282,13 @@ bounded_run() {
     _br_sleep_pid=`cat "$_br_timer_pidfile" 2>/dev/null`
     if [ -n "$_br_sleep_pid" ]; then
         kill "$_br_sleep_pid" 2>/dev/null
+    else
+        kill "$_br_timer" 2>/dev/null
     fi
-    kill "$_br_timer" 2>/dev/null
     wait "$_br_timer" 2>/dev/null
     rm -f "$_br_timer_pidfile" 2>/dev/null
-    if [ "$_br_rc" -gt 128 ]; then
-        rm -f "$_br_out" 2>/dev/null
+    if [ -f "$_br_fired" ]; then
+        rm -f "$_br_out" "$_br_fired" 2>/dev/null
         return 124
     fi
     cat "$_br_out" 2>/dev/null
@@ -3051,6 +3100,74 @@ world_writable_search_paths() {
     } | physical_unique_roots
 }
 
+# The filesystem walks, bounded per root.
+#
+# find -xdev keeps a scan from crossing INTO a network mount, but a scan root
+# that is itself on a dead mount - /opt on NFS, an --app-dir on a SAN whose
+# array has gone away - hangs find before it walks anything, and a find that
+# never returned hung the collection until it was killed. Each root's walk
+# runs under a bound. A root that times out once is skipped by every later
+# scan, recorded in a file beside the lock (the walks run inside command
+# substitutions, whose variables die with the subshell), so a dead mount costs
+# one bound rather than one per category.
+SCAN_TIMEOUT_SECONDS=240
+LISTING_TIMEOUT_SECONDS=600
+scan_skip_file() {
+    printf '%s/.sox-itgc-scan-skip' "${WORKING_DIRECTORY:-.}"
+}
+scan_root_skipped() {
+    [ -f "`scan_skip_file`" ] && grep -Fxq "$1" "`scan_skip_file`" 2>/dev/null
+}
+# Nothing here may go to stdout: this runs inside the command substitution
+# that captures the scan, so anything printed would be taken for a path. The
+# report note is printed by the caller, once the substitution has returned.
+scan_root_timed_out() {
+    printf '%s\n' "$1" >> "`scan_skip_file`" 2>/dev/null
+    log_event WARN evidence "the filesystem scan of $1 did not finish within ${SCAN_TIMEOUT_SECONDS}s and was stopped - typically a root on an unresponsive network mount; that root is absent from the world-writable and SetUID/SetGID evidence"
+    record_manifest_line "SCAN_TIMEOUT|root=`manifest_path "$1"`|seconds=$SCAN_TIMEOUT_SECONDS"
+}
+# The report-side disclosure, for every root the scans have given up on. Each
+# section that would have covered the root says so, rather than one note in
+# the first section and silence in the rest.
+print_scan_skip_notes() {
+    for _pss_root in "$@"; do
+        if scan_root_skipped "$_pss_root"; then
+            printf 'NOTE: the scan of %s did not finish within %s seconds and was stopped -\n' "$_pss_root" "$SCAN_TIMEOUT_SECONDS"
+            printf '  typically a root on an unresponsive network mount. That root is not\n'
+            printf '  represented in this section.\n'
+        fi
+    done
+}
+find_world_writable_files_under() {
+    find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -0002 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"
+}
+find_world_writable_dirs_under() {
+    find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"
+}
+find_setuid_under() {
+    find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -4000 -print 2>/dev/null
+}
+find_setgid_under() {
+    find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -2000 -print 2>/dev/null
+}
+# Run one root's walk under the bound. Prints the list; prints nothing and
+# records the timeout if the bound is hit; prints nothing for a root already
+# known to be dead.
+bounded_scan() {
+    _bs_fn=$1
+    _bs_root=$2
+    if scan_root_skipped "$_bs_root"; then
+        return 1
+    fi
+    bounded_run "$SCAN_TIMEOUT_SECONDS" "$_bs_fn" "$_bs_root"
+    _bs_rc=$?
+    if [ "$_bs_rc" -eq 124 ]; then
+        scan_root_timed_out "$_bs_root"
+        return 1
+    fi
+    return 0
+}
+
 # List one root's findings for one category, applying the cap to that root
 # alone. Adds to the running totals _ww_files_total and _ww_files_truncated
 # that the caller resets per category. Prints nothing for a root with no
@@ -3163,8 +3280,12 @@ print_world_writable_review() {
     _ww_files_total=0
     _ww_files_truncated=no
     for _ww_root in "$@"; do
-        _ww_list=`find "$_ww_root" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -0002 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"`
-        print_world_writable_findings "files" "$_ww_root" "$_ww_list" "world-writable files"
+        _ww_list=`bounded_scan find_world_writable_files_under "$_ww_root"`
+        if scan_root_skipped "$_ww_root"; then
+            print_scan_skip_notes "$_ww_root"
+        else
+            print_world_writable_findings "files" "$_ww_root" "$_ww_list" "world-writable files"
+        fi
     done
     if [ "$_ww_files_total" -eq 0 ]; then
         no_entries_found
@@ -3179,8 +3300,12 @@ print_world_writable_review() {
     _ww_files_total=0
     _ww_files_truncated=no
     for _ww_root in "$@"; do
-        _ww_list=`find "$_ww_root" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"`
-        print_world_writable_findings "directories_without_sticky" "$_ww_root" "$_ww_list" "world-writable directories without a sticky bit"
+        _ww_list=`bounded_scan find_world_writable_dirs_under "$_ww_root"`
+        if scan_root_skipped "$_ww_root"; then
+            print_scan_skip_notes "$_ww_root"
+        else
+            print_world_writable_findings "directories_without_sticky" "$_ww_root" "$_ww_list" "world-writable directories without a sticky bit"
+        fi
     done
     if [ "$_ww_files_total" -eq 0 ]; then
         no_entries_found
@@ -3300,7 +3425,8 @@ print_setuid_setgid_files() {
     # ways; the pair that used to be here read as two distinct tests but was one
     # test performed twice.
     subsection "SetUID Files:"
-    _suid_list=`find "$@" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -4000 -print 2>/dev/null | sort -u 2>/dev/null`
+    _suid_list=`for _sx_root in "$@"; do bounded_scan find_setuid_under "$_sx_root"; done | sort -u 2>/dev/null`
+    print_scan_skip_notes "$@"
     if [ -n "$_suid_list" ]; then
         printf '%s\n' "$_suid_list"
     else
@@ -3309,7 +3435,8 @@ print_setuid_setgid_files() {
     blank_line
 
     subsection "SetGID Files:"
-    _sgid_list=`find "$@" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -2000 -print 2>/dev/null | sort -u 2>/dev/null`
+    _sgid_list=`for _sx_root in "$@"; do bounded_scan find_setgid_under "$_sx_root"; done | sort -u 2>/dev/null`
+    print_scan_skip_notes "$@"
     if [ -n "$_sgid_list" ]; then
         printf '%s\n' "$_sgid_list"
     else
@@ -4329,8 +4456,22 @@ print_application_directory_listing() {
     blank_line
 
     subsection "Recursive Listing:"
-    ls $listing_flags "$app_path" 2>/dev/null || not_available
-    record_manifest_line "APP_DIR_LISTED|`manifest_path "$app_path"`|flags=$listing_flags"
+    # Bounded like the scans: an application root on an unresponsive mount
+    # hung ls -R, and with it the collection. Ten minutes is generous for any
+    # real tree; a listing that needs more is disclosed as stopped.
+    bounded_run "$LISTING_TIMEOUT_SECONDS" ls $listing_flags "$app_path"
+    _adl_rc=$?
+    if [ "$_adl_rc" -eq 0 ]; then
+        record_manifest_line "APP_DIR_LISTED|`manifest_path "$app_path"`|flags=$listing_flags"
+    elif [ "$_adl_rc" -eq 124 ]; then
+        printf 'NOTE: the listing of %s did not finish within %s seconds and was\n' "$app_path" "$LISTING_TIMEOUT_SECONDS"
+        printf '  stopped - typically a directory on an unresponsive network mount.\n'
+        log_event WARN evidence "the recursive listing of $app_path did not finish within ${LISTING_TIMEOUT_SECONDS}s and was stopped; that application directory is not represented"
+        record_manifest_line "APP_DIR_LISTING_TIMEOUT|`manifest_path "$app_path"`|seconds=$LISTING_TIMEOUT_SECONDS"
+    else
+        not_available
+        record_manifest_line "APP_DIR_LISTED|`manifest_path "$app_path"`|flags=$listing_flags"
+    fi
     blank_line
 }
 
@@ -4904,7 +5045,7 @@ handle_interruption() {
     if [ -n "$LOCK_FILE" ]; then
         rm -f "$LOCK_FILE" 2>/dev/null
     fi
-    rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* 2>/dev/null
+    rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* "`scan_skip_file`" 2>/dev/null
     # An interrupted report is still going to be read - that is how the
     # interruption is discovered - so it gets the same control-character
     # sanitisation as a complete one. A half-finished sanitisation file from
@@ -5366,7 +5507,7 @@ _final_result=`collection_log_result`
 if [ -n "$LOCK_FILE" ]; then
     rm -f "$LOCK_FILE" 2>/dev/null
 fi
-rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* 2>/dev/null
+rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* "`scan_skip_file`" 2>/dev/null
 
 case "$_final_result" in
     COMPLETED_CLEAN|COMPLETED_WITH_WARNINGS)

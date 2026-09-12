@@ -527,9 +527,9 @@ the report and manifest.
 
 | Section | Cost | Bounded how |
 | --- | --- | --- |
-| 10 — world-writable | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per scanned root per category (so an `--app-dir` root cannot be crowded out by system paths) |
-| 11 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev` |
-| 23 — application directory listing | **unbounded**; only runs when `--app-dir` is given | not capped and not `-xdev`; the operator chooses the roots |
+| 9 — world-writable | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per scanned root per category (so an `--app-dir` root cannot be crowded out by system paths), each root's walk stopped after 240 seconds |
+| 10 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev`, each root's walk stopped after 240 seconds |
+| 22 — application directory listing | up to ten minutes per root; only runs when `--app-dir` is given | not capped and not `-xdev` — the operator chooses the roots — but the listing is stopped after 600 seconds and the report says so |
 
 Sections 9 and 10 are pruned to system binary, system configuration, and
 application installation paths rather than scanning whole filesystems, and both
@@ -541,6 +541,10 @@ Section 22 is the one to watch on a large estate. It is opt-in, but when a root
 is supplied it recursively lists **every** file beneath it with no cap and without
 stopping at filesystem boundaries. That is intentional — the operator named the
 directory and the listing is the evidence — but it should be a considered choice.
+The only limit is time: a listing still running after ten minutes is stopped,
+noted in the section, logged as a `WARN`, and recorded in the manifest as
+`APP_DIR_LISTING_TIMEOUT`, so a root on an unresponsive mount cannot hold the
+collection open indefinitely.
 
 ## Known limitations
 
@@ -569,9 +573,26 @@ Stated here rather than discovered during an engagement:
   against a directory: each runs under a 60-second bound. A `df` that never
   answered hung the collection until it was killed; now the section carries
   a one-line note, the log a `WARN`, and the manifest a `COMMAND_TIMEOUT`
-  record, and the collection carries on. The bound is implemented with a
-  watchdog whose sleep is tracked by PID, so nothing is left running on the
-  client host afterwards — verified.
+  record, and the collection carries on. When the bound fires, the whole
+  process tree the command started is stopped, not just its top process, and
+  the timeout is taken from the watchdog's own record rather than from the
+  job's exit status — shells disagree about the status of a job that died of
+  a signal, and ksh93 reported a stopped pipeline as having succeeded. The
+  watchdog's own sleep is tracked by PID, so nothing is left running on the
+  client host afterwards. Verified under dash, bash, ksh93, mksh, yash, posh
+  and busybox. The one thing no watchdog can stop is a process the kernel
+  holds in uninterruptible sleep on a dead mount; that one lingers until the
+  mount answers, and the report names the path so the client knows which.
+- **Filesystem walks are bounded per root.** `find -xdev` keeps a scan from
+  crossing *into* a network mount, but a scan root that is itself on a dead
+  mount — `/opt` on NFS, an `--app-dir` on a SAN whose array has gone away —
+  hangs `find` before it walks anything, and a `find` that never returned
+  hung the collection until it was killed. Each root's walk in Sections 9
+  and 10 is stopped after 240 seconds; a root that times out once is skipped
+  by every later scan, so a dead mount costs one bound rather than one per
+  category. The affected sections carry a note naming the root, the log a
+  `WARN`, and the manifest a `SCAN_TIMEOUT` record. The other roots are still
+  scanned in full. The Section 22 listing has its own ten-minute bound.
 - **AIX and HP-UX are exercised by simulation, not on real hardware.** Neither
   boots on x86. The simulations reproduce the file and command layer faithfully
   enough to have caught a real credential leak and a real account-modification
@@ -582,7 +603,8 @@ Stated here rather than discovered during an engagement:
   they use (`awk`, `sed`, `grep`, `tr`, `od`, `dd`, `sort`, `find`, `ls`,
   `tar`, and twenty more), as an Alpine-based appliance would present them:
   identical copied-file set, 24 sections, zero warnings, verifier CLEAN.
-- **Section 22 is unbounded** when used. See the table above.
+- **Section 22 is uncapped** when used: every file beneath the root is
+  listed, at the operator's choice. See the table above.
 
 ## Tests
 

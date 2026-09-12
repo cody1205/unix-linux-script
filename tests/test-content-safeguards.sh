@@ -749,6 +749,66 @@ else
 fi
 
 #############################################################################
+printf '\n== 18. a filesystem walk that never returns cannot hang the collection ==\n'
+# find -xdev keeps a scan from crossing INTO a network mount, but a scan root
+# that is itself on a dead mount hangs find before it walks anything, and so
+# did the recursive --app-dir listing. Exercised with a find that hangs only
+# when asked to walk the --app-dir root and behaves normally for every other
+# root, so the assertion is that ONE root costs one bound while the rest of
+# the evidence is still collected. Also asserts what the first version of the
+# fix got wrong: the timeout note went into the captured list as if it were
+# a path, the hung process tree was left running on the host, and the shell
+# announced "Terminated" on the console every time the watchdog fired.
+checks=`expr $checks + 1`
+if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null && command -v find >/dev/null 2>&1; then
+    mkdir -p "$WORK/fs/dead-root/sub" "$WORK/fs/out"
+    printf 'x\n' > "$WORK/fs/dead-root/sub/app.conf"
+    _find=`command -v find`
+    cp "$_find" "$WORK/fs/find.real"
+    printf '#!/bin/sh\ncase "$1" in\n    %s*) exec sleep 600 ;;\nesac\nexec %s "$@"\n' "$WORK/fs/dead-root" "$WORK/fs/find.real" > "$WORK/fs/fake-find"
+    chmod 755 "$WORK/fs/fake-find" "$WORK/fs/find.real"
+    _t0=`date +%s`
+    unshare -m sh -c "mount --bind '$WORK/fs/fake-find' '$_find' && timeout 900 sh '$COLLECTOR' --output-dir '$WORK/fs/out' --app-dir '$WORK/fs/dead-root' </dev/null >/dev/null 2>'$WORK/fs/stderr'; echo \$? > '$WORK/fs/rc'" 2>/dev/null
+    _t1=`date +%s`
+    _frc=`cat "$WORK/fs/rc" 2>/dev/null`
+    _fm="$WORK/fs/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/MANIFEST.txt"
+    _fr="$WORK/fs/out/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+    _felapsed=`expr $_t1 - $_t0`
+    _orphans=`ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && $3 == "600") { n++ } END { print n + 0 }'`
+    _timeouts=`grep -c '^SCAN_TIMEOUT|' "$_fm" 2>/dev/null`
+    _other_roots=`grep -c '^WORLD_WRITABLE_SCAN|files|root=' "$_fm" 2>/dev/null`
+    if [ "$_frc" = "0" ] && [ "$_felapsed" -lt 600 ] && [ "$_timeouts" = "1" ] && grep -q "^SCAN_TIMEOUT|root=$WORK/fs/dead-root|" "$_fm" 2>/dev/null \
+        && [ "${_other_roots:-0}" -ge 2 ] && grep -q 'NOTE: the scan of .*did not finish within' "$_fr" 2>/dev/null; then
+        pass "completed in ${_felapsed}s: one bound for the dead root, the other $_other_roots roots still scanned, the report says so"
+    else
+        fail "hanging find: exit=${_frc:-none} elapsed=${_felapsed}s scan-timeouts=$_timeouts other-roots=$_other_roots"
+    fi
+    checks=`expr $checks + 1`
+    if [ "$_orphans" = "0" ]; then
+        pass "the stopped walk's process tree is gone from the host"
+    else
+        fail "$_orphans process(es) from the stopped walk were left running on the host"
+    fi
+    checks=`expr $checks + 1`
+    if grep -q 'Terminated' "$WORK/fs/stderr" 2>/dev/null; then
+        fail "the shell announced 'Terminated' on the console when the watchdog fired"
+    elif grep -q 'Under .*NOTE:\|^NOTE: the scan of.*(metadata not available)' "$_fr" 2>/dev/null; then
+        fail "the timeout note was captured into a finding list as if it were a path"
+    else
+        pass "nothing on the console, and the note stands on its own in the report"
+    fi
+    for _sp in `ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && $3 == "600") || $0 ~ /fake-find/ { print $1 }'`; do kill "$_sp" 2>/dev/null; done
+    sleep 1
+else
+    skip "cannot create a mount namespace here; scan timeout not exercised"
+    if grep -q '^bounded_scan()' "$COLLECTOR"; then
+        pass "the bounded scan runner is present"
+    else
+        fail "the bounded scan runner is missing"
+    fi
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

@@ -61,7 +61,9 @@ Two details worth knowing before you run it:
   limited to system and application directories rather than whole filesystems,
   and **both stop at filesystem boundaries**, so neither can descend into NFS or
   SAN mounts and put load on a remote filer. Each reports its own elapsed time
-  on screen as it runs.
+  on screen as it runs. If a scanned directory sits on a mount that has stopped
+  answering, the walk of that directory is abandoned after four minutes and the
+  report says so; the script does not wait on a dead mount.
 
 ## Don't take that on trust — check it
 
