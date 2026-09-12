@@ -583,6 +583,34 @@ Stated here rather than discovered during an engagement:
   and busybox. The one thing no watchdog can stop is a process the kernel
   holds in uninterruptible sleep on a dead mount; that one lingers until the
   mount answers, and the report names the path so the client knows which.
+- **Interruption stops everything, at once.** The handler for Ctrl-C, `kill`
+  and a dropped session first stops every process the collector started —
+  a scan, a watchdog and its sleep, a host command — and only then marks the
+  package incomplete. Bounded work runs where the shell sits in `wait`, which
+  every shell interrupts immediately; the earlier arrangement ran scans inside
+  command substitutions, and a shell blocked reading one does not run its
+  traps until it finishes, so a kill sent to a collector stuck in a scan was
+  ignored for the length of the scan's bound. Verified: the handler runs
+  within a second of the signal, and nothing is left running.
+- **Account status and password ageing are derived in one pass.** `passwd -S`
+  and `chage -l` read the whole shadow file to report one account, and were
+  run once per account: 20,000 local accounts took nine minutes in those two
+  subsections against five seconds for the rest of the collection. Root can
+  read the shadow file, so the same fields are now tabulated in one pass over
+  `/etc/passwd` and `/etc/shadow` — the hash column reduced to a status word,
+  never printed — in a fraction of a second. Hosts whose shadow file is not
+  readable or not in the nine-column form (trusted-mode HP-UX) keep the
+  per-account commands, capped at 2,000 accounts with a note, a `WARN` and a
+  `PER_ACCOUNT_COMMAND_CAPPED` record. AIX uses `lsuser ALL`, one command.
+- **Looking at a root is bounded too, and so is the home-directory review.**
+  A `stat` of a directory on a hard NFS mount whose server has gone blocks in
+  the kernel before any walk begins. Each scan root is probed and resolved
+  under a 30-second bound; the `--app-dir` root is probed the same way
+  (`APP_DIR_UNRESPONSIVE`). Home directories are the one place the script
+  touches that is routinely on NFS, so the Section 13 reviews of homes,
+  `.ssh` and legacy trust files each run under a five-minute bound; what the
+  review had written by then is kept, the report says where it stopped, and
+  the manifest carries `SECTION_TIMEOUT` with `partial=yes`.
 - **Filesystem walks are bounded per root.** `find -xdev` keeps a scan from
   crossing *into* a network mount, but a scan root that is itself on a dead
   mount — `/opt` on NFS, an `--app-dir` on a SAN whose array has gone away —

@@ -2235,8 +2235,8 @@ name_service_usable() {
 # console full of "Terminated" reads as the collector having crashed.
 #
 # Usage: bounded_run SECONDS COMMAND [ARGS...]
-kill_process_tree() {
-    _kpt_pids=`ps -e -o pid= -o ppid= 2>/dev/null | awk -v top="$1" '
+process_tree_pids() {   # PID: the process and everything under it, deepest first
+    ps -e -o pid= -o ppid= 2>/dev/null | awk -v top="$1" '
         $1 ~ /^[0-9]+$/ { parent[$1] = $2 }
         END {
             queue[1] = top; count = 1; i = 0
@@ -2247,20 +2247,47 @@ kill_process_tree() {
                 }
             }
             for (j = count; j >= 1; j--) print queue[j]
-        }' 2>/dev/null`
+        }' 2>/dev/null
+}
+kill_process_tree() {
+    _kpt_pids=`process_tree_pids "$1"`
     [ -n "$_kpt_pids" ] || _kpt_pids=$1
     for _kpt_pid in $_kpt_pids; do
         kill "$_kpt_pid" 2>/dev/null
     done
 }
-bounded_run() {
-    _br_secs=$1
-    shift
-    _br_out="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$"
-    _br_timer_pidfile="$_br_out.timer"
-    _br_fired="$_br_out.fired"
+# Everything the collector has started, but not the collector: what the
+# interruption handler calls so that a stopped run leaves no scan, watchdog
+# or host command behind.
+kill_descendants() {
+    for _kd_pid in `process_tree_pids "$1"`; do
+        if [ "$_kd_pid" != "$1" ]; then
+            kill "$_kd_pid" 2>/dev/null
+        fi
+    done
+}
+# The bound itself. The job's output is left in FILE: complete if the job
+# finished, whatever had been written by the time the bound fired if not.
+# Returns the job's status, or 124 at the bound.
+#
+# Callers that need the output as a value read FILE afterwards rather than
+# wrapping this in a command substitution. That is not a style point: a
+# shell blocked reading a command substitution does not run its traps until
+# the substitution finishes (ksh93 excepted), so an operator's Ctrl-C, or a
+# kill from another terminal, was ignored for as long as the bound - up to
+# four minutes into a scan that was visibly stuck. A shell blocked in "wait"
+# runs the trap at once, in every shell tested.
+#
+# Usage: bounded_run_to_file FILE SECONDS COMMAND [ARGS...]
+bounded_run_to_file() {
+    _br_file=$1
+    _br_secs=$2
+    shift 2
+    _br_timer_pidfile="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$.timer"
+    _br_fired="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$.fired"
     rm -f "$_br_fired" 2>/dev/null
-    "$@" > "$_br_out" 2>/dev/null </dev/null &
+    : > "$_br_file" 2>/dev/null
+    "$@" > "$_br_file" 2>/dev/null </dev/null &
     _br_pid=$!
     (
         sleep "$_br_secs" &
@@ -2288,12 +2315,22 @@ bounded_run() {
     wait "$_br_timer" 2>/dev/null
     rm -f "$_br_timer_pidfile" 2>/dev/null
     if [ -f "$_br_fired" ]; then
-        rm -f "$_br_out" "$_br_fired" 2>/dev/null
+        rm -f "$_br_fired" 2>/dev/null
         return 124
     fi
-    cat "$_br_out" 2>/dev/null
-    rm -f "$_br_out" 2>/dev/null
     return "$_br_rc"
+}
+# The same, printing the output - all of it if the job finished, none of it
+# if the bound fired, since a partial listing looks like a complete one.
+bounded_run() {
+    _bru_out="${WORKING_DIRECTORY:-.}/.sox-itgc-bounded.$$"
+    bounded_run_to_file "$_bru_out" "$@"
+    _bru_rc=$?
+    if [ "$_bru_rc" -ne 124 ]; then
+        cat "$_bru_out" 2>/dev/null
+    fi
+    rm -f "$_bru_out" 2>/dev/null
+    return "$_bru_rc"
 }
 
 # A host command that can block on something outside the host - df on a stale
@@ -3053,7 +3090,7 @@ operator_app_scan_roots() {
         return
     fi
     printf '%s\n' "$APP_DIRECTORIES" | while IFS= read -r _app_scan_root; do
-        if [ -n "$_app_scan_root" ] && [ -d "$_app_scan_root" ]; then
+        if [ -n "$_app_scan_root" ]; then
             printf '%s\n' "$_app_scan_root"
         fi
     done
@@ -3071,17 +3108,25 @@ operator_app_scan_roots() {
 physical_unique_roots() {
     while IFS= read -r _pur_root; do
         [ -n "$_pur_root" ] || continue
-        absolute_directory "$_pur_root"
-        printf '\n'
+        if scan_root_skipped "$_pur_root"; then
+            continue
+        fi
+        bounded_run_to_file "`scan_output_file`.probe" "$ROOT_PROBE_TIMEOUT_SECONDS" probe_scan_root "$_pur_root"
+        _pur_rc=$?
+        if [ "$_pur_rc" -eq 124 ]; then
+            scan_root_timed_out "$_pur_root" "$ROOT_PROBE_TIMEOUT_SECONDS"
+        elif [ "$_pur_rc" -eq 0 ]; then
+            cat "`scan_output_file`.probe" 2>/dev/null
+            printf '\n'
+        fi
+        rm -f "`scan_output_file`.probe" 2>/dev/null
     done | awk '!seen[$0]++'
 }
 
 setuid_search_paths() {
     {
         for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
-            if [ -d "$candidate" ]; then
-                printf '%s\n' "$candidate"
-            fi
+            printf '%s\n' "$candidate"
         done
         operator_app_scan_roots
     } | physical_unique_roots
@@ -3092,9 +3137,7 @@ setuid_search_paths() {
 world_writable_search_paths() {
     {
         for candidate in /etc /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt; do
-            if [ -d "$candidate" ]; then
-                printf '%s\n' "$candidate"
-            fi
+            printf '%s\n' "$candidate"
         done
         operator_app_scan_roots
     } | physical_unique_roots
@@ -3121,22 +3164,33 @@ scan_root_skipped() {
 # Nothing here may go to stdout: this runs inside the command substitution
 # that captures the scan, so anything printed would be taken for a path. The
 # report note is printed by the caller, once the substitution has returned.
-scan_root_timed_out() {
+scan_root_timed_out() {   # ROOT [SECONDS]
+    _srt_secs=${2:-$SCAN_TIMEOUT_SECONDS}
     printf '%s\n' "$1" >> "`scan_skip_file`" 2>/dev/null
-    log_event WARN evidence "the filesystem scan of $1 did not finish within ${SCAN_TIMEOUT_SECONDS}s and was stopped - typically a root on an unresponsive network mount; that root is absent from the world-writable and SetUID/SetGID evidence"
-    record_manifest_line "SCAN_TIMEOUT|root=`manifest_path "$1"`|seconds=$SCAN_TIMEOUT_SECONDS"
+    log_event WARN evidence "the filesystem scan of $1 did not finish within ${_srt_secs}s and was stopped - typically a root on an unresponsive network mount; that root is absent from the world-writable and SetUID/SetGID evidence"
+    record_manifest_line "SCAN_TIMEOUT|root=`manifest_path "$1"`|seconds=$_srt_secs"
+}
+# Even looking at a root can hang: a stat of a directory on a hard NFS mount
+# whose server has gone away blocks in the kernel, before any walk begins,
+# and so does the cd/pwd -P that resolves the root physically. The probe
+# runs under its own, shorter bound.
+ROOT_PROBE_TIMEOUT_SECONDS=30
+probe_scan_root() {
+    [ -d "$1" ] || return 1
+    absolute_directory "$1"
 }
 # The report-side disclosure, for every root the scans have given up on. Each
 # section that would have covered the root says so, rather than one note in
 # the first section and silence in the rest.
 print_scan_skip_notes() {
-    for _pss_root in "$@"; do
-        if scan_root_skipped "$_pss_root"; then
-            printf 'NOTE: the scan of %s did not finish within %s seconds and was stopped -\n' "$_pss_root" "$SCAN_TIMEOUT_SECONDS"
-            printf '  typically a root on an unresponsive network mount. That root is not\n'
-            printf '  represented in this section.\n'
-        fi
-    done
+    if [ -s "`scan_skip_file`" ]; then
+        while IFS= read -r _pss_root; do
+            [ -n "$_pss_root" ] || continue
+            printf 'NOTE: the scan of %s did not finish within its time bound and was\n' "$_pss_root"
+            printf '  stopped - typically a root on an unresponsive network mount. That root\n'
+            printf '  is not represented in this section; the collection log has the bound.\n'
+        done < "`scan_skip_file`"
+    fi
 }
 find_world_writable_files_under() {
     find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -0002 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"
@@ -3153,15 +3207,20 @@ find_setgid_under() {
 # Run one root's walk under the bound. Prints the list; prints nothing and
 # records the timeout if the bound is hit; prints nothing for a root already
 # known to be dead.
+scan_output_file() {
+    printf '%s/.sox-itgc-scan.%s' "${WORKING_DIRECTORY:-.}" "$$"
+}
 bounded_scan() {
     _bs_fn=$1
     _bs_root=$2
+    : > "`scan_output_file`" 2>/dev/null
     if scan_root_skipped "$_bs_root"; then
         return 1
     fi
-    bounded_run "$SCAN_TIMEOUT_SECONDS" "$_bs_fn" "$_bs_root"
+    bounded_run_to_file "`scan_output_file`" "$SCAN_TIMEOUT_SECONDS" "$_bs_fn" "$_bs_root"
     _bs_rc=$?
     if [ "$_bs_rc" -eq 124 ]; then
+        : > "`scan_output_file`" 2>/dev/null
         scan_root_timed_out "$_bs_root"
         return 1
     fi
@@ -3280,7 +3339,8 @@ print_world_writable_review() {
     _ww_files_total=0
     _ww_files_truncated=no
     for _ww_root in "$@"; do
-        _ww_list=`bounded_scan find_world_writable_files_under "$_ww_root"`
+        bounded_scan find_world_writable_files_under "$_ww_root"
+        _ww_list=`cat "\`scan_output_file\`" 2>/dev/null`
         if scan_root_skipped "$_ww_root"; then
             print_scan_skip_notes "$_ww_root"
         else
@@ -3300,7 +3360,8 @@ print_world_writable_review() {
     _ww_files_total=0
     _ww_files_truncated=no
     for _ww_root in "$@"; do
-        _ww_list=`bounded_scan find_world_writable_dirs_under "$_ww_root"`
+        bounded_scan find_world_writable_dirs_under "$_ww_root"
+        _ww_list=`cat "\`scan_output_file\`" 2>/dev/null`
         if scan_root_skipped "$_ww_root"; then
             print_scan_skip_notes "$_ww_root"
         else
@@ -3425,7 +3486,13 @@ print_setuid_setgid_files() {
     # ways; the pair that used to be here read as two distinct tests but was one
     # test performed twice.
     subsection "SetUID Files:"
-    _suid_list=`for _sx_root in "$@"; do bounded_scan find_setuid_under "$_sx_root"; done | sort -u 2>/dev/null`
+    : > "`scan_output_file`.all" 2>/dev/null
+    for _sx_root in "$@"; do
+        bounded_scan find_setuid_under "$_sx_root"
+        cat "`scan_output_file`" >> "`scan_output_file`.all" 2>/dev/null
+    done
+    _suid_list=`sort -u "\`scan_output_file\`.all" 2>/dev/null`
+    rm -f "`scan_output_file`.all" 2>/dev/null
     print_scan_skip_notes "$@"
     if [ -n "$_suid_list" ]; then
         printf '%s\n' "$_suid_list"
@@ -3435,7 +3502,13 @@ print_setuid_setgid_files() {
     blank_line
 
     subsection "SetGID Files:"
-    _sgid_list=`for _sx_root in "$@"; do bounded_scan find_setgid_under "$_sx_root"; done | sort -u 2>/dev/null`
+    : > "`scan_output_file`.all" 2>/dev/null
+    for _sx_root in "$@"; do
+        bounded_scan find_setgid_under "$_sx_root"
+        cat "`scan_output_file`" >> "`scan_output_file`.all" 2>/dev/null
+    done
+    _sgid_list=`sort -u "\`scan_output_file\`.all" 2>/dev/null`
+    rm -f "`scan_output_file`.all" 2>/dev/null
     print_scan_skip_notes "$@"
     if [ -n "$_sgid_list" ]; then
         printf '%s\n' "$_sgid_list"
@@ -3581,6 +3654,9 @@ print_account_status_summary() {
         record_file_reference /etc/passwd
         found=no
 
+        if shadow_file_usable; then
+            print_account_status_from_shadow && found=yes
+        else
         case "$OS_NAME" in
             AIX)
                 # AIX: never invoke passwd here. lsuser is the read-only query.
@@ -3594,9 +3670,12 @@ print_account_status_summary() {
             SunOS|HP-UX)
                 if command_exists passwd; then
                     printf 'Command: passwd -s (per account)\n'
+                    _pac_count=0
                     while IFS=: read -r user _rest; do
-                        if passwd -s "$user" </dev/null 2>/dev/null; then
-                            found=yes
+                        if per_account_command_allowed "passwd -s"; then
+                            if passwd -s "$user" </dev/null 2>/dev/null; then
+                                found=yes
+                            fi
                         fi
                     done < /etc/passwd
                 fi
@@ -3604,14 +3683,18 @@ print_account_status_summary() {
             *)
                 if command_exists passwd; then
                     printf 'Command: passwd -S (per account)\n'
+                    _pac_count=0
                     while IFS=: read -r user _rest; do
-                        if passwd -S "$user" </dev/null 2>/dev/null; then
-                            found=yes
+                        if per_account_command_allowed "passwd -S"; then
+                            if passwd -S "$user" </dev/null 2>/dev/null; then
+                                found=yes
+                            fi
                         fi
                     done < /etc/passwd
                 fi
                 ;;
         esac
+        fi
 
         if [ "$found" = no ] && command_exists lsuser && [ "$OS_NAME" != "AIX" ]; then
             bounded_host_command lsuser -a account_locked expires login shell ALL && found=yes
@@ -3622,6 +3705,113 @@ print_account_status_summary() {
     else
         not_available
     fi
+}
+
+# Account status and password ageing, read straight from the shadow file.
+#
+# passwd -S and chage -l report, per account, fields that are simply the
+# columns of /etc/shadow, and each invocation reads the whole shadow file to
+# find its one account. Run once per account, that is a walk of the file for
+# every line in it: 20,000 local accounts - a real number on a host that
+# carries an application's users locally - took nine minutes in these two
+# subsections, most of it forking, while the rest of the collection took
+# five seconds. Root can read the shadow file directly, so the same fields
+# are derived here in one pass over the two files, and no password hash is
+# ever printed: the hash column is reduced to a status word.
+#
+# The per-account commands remain the path for a host whose shadow file is
+# not readable or not in the nine-column form (trusted-mode HP-UX, for one),
+# under a cap on the number of accounts so that host cannot repeat the nine
+# minutes. AIX uses lsuser, which is already one command for all accounts.
+shadow_file_usable() {
+    file_readable /etc/shadow && awk -F: 'NF == 9 { found = 1; exit } END { exit !found }' /etc/shadow 2>/dev/null
+}
+PER_ACCOUNT_COMMAND_MAX=2000
+per_account_command_allowed() {   # COMMAND-LABEL
+    _pac_count=${_pac_count:-0}
+    _pac_count=`expr "$_pac_count" + 1`
+    if [ "$_pac_count" -le "$PER_ACCOUNT_COMMAND_MAX" ]; then
+        return 0
+    fi
+    if [ "$_pac_count" -eq `expr "$PER_ACCOUNT_COMMAND_MAX" + 1` ]; then
+        printf 'NOTE: %s was run for the first %s accounts only; the remaining accounts\n' "$1" "$PER_ACCOUNT_COMMAND_MAX"
+        printf '  are not covered here. The account list itself is complete in the\n'
+        printf '  copied passwd file.\n'
+        log_event WARN evidence "'$1' was run for the first $PER_ACCOUNT_COMMAND_MAX accounts only; the host has more local accounts than that and the per-account form of this evidence is incomplete"
+        record_manifest_line "PER_ACCOUNT_COMMAND_CAPPED|$1|limit=$PER_ACCOUNT_COMMAND_MAX"
+    fi
+    return 1
+}
+# Days since the epoch, as the shadow file stores dates, to a calendar date.
+# Integer arithmetic only, so it is the same under every awk.
+SHADOW_AWK_DATE='
+function civil_date(z,    era, doe, yoe, y, doy, mp, d, m) {
+    z = z + 719468
+    era = int((z >= 0 ? z : z - 146096) / 146097)
+    doe = z - era * 146097
+    yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + int(yoe / 4) - int(yoe / 100))
+    mp = int((5 * doy + 2) / 153)
+    d = doy - int((153 * mp + 2) / 5) + 1
+    m = mp < 10 ? mp + 3 : mp - 9
+    if (m <= 2) y = y + 1
+    return sprintf("%04d-%02d-%02d", y, m, d)
+}
+function day_or(v, none) { return (v == "" ? none : (v + 0 <= 0 ? none : civil_date(v + 0))) }
+'
+print_account_status_from_shadow() {
+    record_file_reference /etc/shadow
+    printf 'Derived in one pass from /etc/passwd and /etc/shadow: the fields passwd -S\n'
+    printf '  reports per account. The password hash itself is never printed.\n'
+    printf 'Status: P = usable password set; L = locked, or no usable password\n'
+    printf '  (hash begins with ! or *); NP = empty password field; NS = no shadow\n'
+    printf '  entry for this account.\n'
+    blank_line
+    printf '%-24s %-3s %-12s %6s %6s %6s %8s %s\n' ACCOUNT ST LAST_CHANGE MIN MAX WARN INACTIVE ACCOUNT_EXPIRES
+    awk -F: "$SHADOW_AWK_DATE"'
+        FNR == NR { if (NF >= 2) { seen[$1] = 1; hash[$1] = $2; last[$1] = $3; min[$1] = $4; max[$1] = $5; warn[$1] = $6; inact[$1] = $7; expd[$1] = $8 }; next }
+        NF >= 1 && $1 != "" {
+            u = $1
+            if (!(u in seen)) { st = "NS" }
+            else if (hash[u] == "") { st = "NP" }
+            else if (hash[u] ~ /^[!*]/) { st = "L" }
+            else { st = "P" }
+            lc = (u in seen) ? (last[u] == "0" ? "next-login" : day_or(last[u], "unknown")) : "-"
+            printf "%-24s %-3s %-12s %6s %6s %6s %8s %s\n", u, st, lc, (u in seen ? min[u] : "-"), (u in seen ? max[u] : "-"), (u in seen ? warn[u] : "-"), (u in seen ? inact[u] : "-"), (u in seen ? day_or(expd[u], "never") : "-")
+            n++
+        }
+        END { exit (n == 0) }
+    ' /etc/shadow /etc/passwd 2>/dev/null
+}
+print_password_expiry_from_shadow() {
+    record_file_reference /etc/shadow
+    printf 'Derived in one pass from /etc/passwd and /etc/shadow: the dates chage -l\n'
+    printf '  reports per account. Password expires = last change + maximum age;\n'
+    printf '  password inactive = that date + the inactivity period. "never" means the\n'
+    printf '  field is unset; "next-login" means a change is forced at next login.\n'
+    blank_line
+    printf '%-24s %-12s %-12s %-12s %-12s %5s %6s %5s\n' ACCOUNT LAST_CHANGE PW_EXPIRES PW_INACTIVE ACCT_EXPIRES MIN MAX WARN
+    awk -F: "$SHADOW_AWK_DATE"'
+        FNR == NR { if (NF >= 2) { seen[$1] = 1; last[$1] = $3; min[$1] = $4; max[$1] = $5; warn[$1] = $6; inact[$1] = $7; expd[$1] = $8 }; next }
+        NF >= 1 && $1 != "" {
+            u = $1
+            if (!(u in seen)) { printf "%-24s %s\n", u, "no shadow entry"; n++; next }
+            if (last[u] == "0") { lc = "next-login"; pe = "next-login"; pi = "-" }
+            else if (last[u] == "" || last[u] + 0 <= 0) { lc = "unknown"; pe = "unknown"; pi = "unknown" }
+            else {
+                lc = civil_date(last[u] + 0)
+                if (max[u] == "" || max[u] + 0 >= 99999 || max[u] + 0 < 0) { pe = "never"; pi = "never" }
+                else {
+                    pe = civil_date(last[u] + max[u] + 0)
+                    pi = (inact[u] == "" || inact[u] + 0 < 0) ? "never" : civil_date(last[u] + max[u] + inact[u] + 0)
+                }
+            }
+            printf "%-24s %-12s %-12s %-12s %-12s %5s %6s %5s\n", u, lc, pe, pi, day_or(expd[u], "never"), min[u], max[u], warn[u]
+            n++
+        }
+        END { exit (n == 0) }
+    ' /etc/shadow /etc/passwd 2>/dev/null
 }
 
 # Password expiry detail:
@@ -3635,15 +3825,20 @@ print_password_expiry_details() {
         # chage is Linux-only and read-only with -l. lsuser is the AIX
         # equivalent. Both take stdin from /dev/null so they cannot consume the
         # account list this loop is reading; see print_account_status_summary.
-        if command_exists chage; then
+        if shadow_file_usable; then
+            print_password_expiry_from_shadow && found=yes
+        elif command_exists chage; then
+            _pac_count=0
             while IFS=: read -r user _rest; do
-                printf 'User: %s\n' "$user"
-                if chage -l "$user" </dev/null 2>/dev/null; then
-                    found=yes
-                else
-                    not_available
+                if per_account_command_allowed "chage -l"; then
+                    printf 'User: %s\n' "$user"
+                    if chage -l "$user" </dev/null 2>/dev/null; then
+                        found=yes
+                    else
+                        not_available
+                    fi
+                    blank_line
                 fi
-                blank_line
             done < /etc/passwd
         elif command_exists lsuser; then
             bounded_host_command lsuser -a maxage minage pwdwarntime expires account_locked ALL && found=yes
@@ -3660,30 +3855,53 @@ print_password_expiry_details() {
 # The script lists ownership and permission metadata for home directories,
 # .ssh directories, and authorized_keys files. Authorized keys are summarized
 # rather than printed in full.
+# Home directories are the one place this script touches that is routinely
+# on NFS, and a stat of a home on a mount that has stopped answering blocks
+# in the kernel. Each review runs under a bound; what it had written by
+# then is kept - it is complete for the accounts it covers - and the report
+# says where it stopped.
+HOME_REVIEW_TIMEOUT_SECONDS=300
+print_home_review_bounded() {   # LABEL FUNCTION
+    _hrb_file="`scan_output_file`.home"
+    bounded_run_to_file "$_hrb_file" "$HOME_REVIEW_TIMEOUT_SECONDS" "$2"
+    _hrb_rc=$?
+    cat "$_hrb_file" 2>/dev/null
+    if [ "$_hrb_rc" -eq 124 ]; then
+        printf 'NOTE: this review did not finish within %s seconds and was stopped -\n' "$HOME_REVIEW_TIMEOUT_SECONDS"
+        printf '  typically a home directory on an unresponsive network mount. Accounts\n'
+        printf '  after the last one shown were not reviewed.\n'
+        log_event WARN evidence "the $1 did not finish within ${HOME_REVIEW_TIMEOUT_SECONDS}s and was stopped - typically a home directory on an unresponsive network mount; accounts after the last one shown in Section 13 were not reviewed"
+        record_manifest_line "SECTION_TIMEOUT|$1|seconds=$HOME_REVIEW_TIMEOUT_SECONDS|partial=yes"
+    fi
+    rm -f "$_hrb_file" 2>/dev/null
+}
 print_ssh_home_permission_review() {
     subsection "Home Directory, .ssh, and authorized_keys Permission Review:"
-    found=no
-
     if file_readable /etc/passwd; then
         record_file_reference /etc/passwd
-        while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
-            if [ -n "$home_dir" ] && [ "$home_dir" != "/" ] && [ -d "$home_dir" ]; then
-                printf 'User: %s\n' "$user"
-                ls -ld "$home_dir" 2>/dev/null || not_available
-                if [ -d "$home_dir/.ssh" ]; then
-                    ls -ld "$home_dir/.ssh" 2>/dev/null || not_available
-                    found=yes
-                fi
-                if [ -f "$home_dir/.ssh/authorized_keys" ]; then
-                    ls -l "$home_dir/.ssh/authorized_keys" 2>/dev/null || not_available
-                    print_sensitive_file_review "$home_dir/.ssh/authorized_keys"
-                    found=yes
-                fi
-                blank_line
-            fi
-        done < /etc/passwd
+        print_home_review_bounded home_directory_review review_home_directories
+    else
+        not_available
     fi
-
+}
+review_home_directories() {
+    found=no
+    while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
+        if [ -n "$home_dir" ] && [ "$home_dir" != "/" ] && [ -d "$home_dir" ]; then
+            printf 'User: %s\n' "$user"
+            ls -ld "$home_dir" 2>/dev/null || not_available
+            if [ -d "$home_dir/.ssh" ]; then
+                ls -ld "$home_dir/.ssh" 2>/dev/null || not_available
+                found=yes
+            fi
+            if [ -f "$home_dir/.ssh/authorized_keys" ]; then
+                ls -l "$home_dir/.ssh/authorized_keys" 2>/dev/null || not_available
+                print_sensitive_file_review "$home_dir/.ssh/authorized_keys"
+                found=yes
+            fi
+            blank_line
+        fi
+    done < /etc/passwd
     if [ "$found" = no ]; then
         no_entries_found
     fi
@@ -3707,22 +3925,39 @@ print_legacy_trust_content() {
 
     if file_readable /etc/passwd; then
         record_file_reference /etc/passwd
-        while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
-            if [ -n "$home_dir" ] && [ "$home_dir" != "/" ]; then
-                for trust_file in "$home_dir/.rhosts" "$home_dir/.shosts"; do
-                    if [ -f "$trust_file" ]; then
-                        printf 'User: %s\n' "$user"
-                        print_file_with_header "$trust_file"
-                        found=yes
-                    fi
-                done
-            fi
-        done < /etc/passwd
+        _ltc_file="`scan_output_file`.home"
+        bounded_run_to_file "$_ltc_file" "$HOME_REVIEW_TIMEOUT_SECONDS" review_home_trust_files
+        _ltc_rc=$?
+        if [ -s "$_ltc_file" ]; then
+            cat "$_ltc_file" 2>/dev/null
+            found=yes
+        fi
+        if [ "$_ltc_rc" -eq 124 ]; then
+            printf 'NOTE: the per-account trust-file review did not finish within %s seconds\n' "$HOME_REVIEW_TIMEOUT_SECONDS"
+            printf '  and was stopped - typically a home directory on an unresponsive network\n'
+            printf '  mount. Accounts after the last one shown were not reviewed.\n'
+            log_event WARN evidence "the legacy trust-file review did not finish within ${HOME_REVIEW_TIMEOUT_SECONDS}s and was stopped - typically a home directory on an unresponsive network mount; accounts after the last one shown in Section 13 were not reviewed"
+            record_manifest_line "SECTION_TIMEOUT|legacy_trust_review|seconds=$HOME_REVIEW_TIMEOUT_SECONDS|partial=yes"
+            found=yes
+        fi
+        rm -f "$_ltc_file" 2>/dev/null
     fi
 
     if [ "$found" = no ]; then
         no_entries_found
     fi
+}
+review_home_trust_files() {
+    while IFS=: read -r user _password _uid _gid _gecos home_dir _shell; do
+        if [ -n "$home_dir" ] && [ "$home_dir" != "/" ]; then
+            for trust_file in "$home_dir/.rhosts" "$home_dir/.shosts"; do
+                if [ -f "$trust_file" ]; then
+                    printf 'User: %s\n' "$user"
+                    print_file_with_header "$trust_file"
+                fi
+            done
+        fi
+    done < /etc/passwd
 }
 
 # Shell timeout and login banner review:
@@ -4412,6 +4647,17 @@ application_listing_ls_flags() {
 # or removed by this helper. Errors during traversal (for example, an
 # unreadable subdirectory under the supplied root) are suppressed so a single
 # unreadable element does not abort the listing of the rest of the tree.
+probe_application_directory() {
+    if ! [ -e "$1" ]; then
+        printf 'missing'
+    elif ! [ -d "$1" ]; then
+        printf 'not_directory'
+    elif ! [ -r "$1" ]; then
+        printf 'unreadable'
+    else
+        printf 'ok'
+    fi
+}
 print_application_directory_listing() {
     app_path=$1
 
@@ -4423,26 +4669,45 @@ print_application_directory_listing() {
         return
     fi
 
-    if ! path_exists "$app_path"; then
-        printf 'Result: path does not exist\n'
-        record_manifest_line "APP_DIR_MISSING|`manifest_path "$app_path"`"
-        blank_line
-        return
+    # One bounded look at the path. Three unbounded stats sat here, and a
+    # root on a dead mount hung the first of them before the listing's own
+    # bound could apply.
+    bounded_run_to_file "`scan_output_file`.probe" "$ROOT_PROBE_TIMEOUT_SECONDS" probe_application_directory "$app_path"
+    _adp_rc=$?
+    _adp_state=`cat "\`scan_output_file\`.probe" 2>/dev/null`
+    rm -f "`scan_output_file`.probe" 2>/dev/null
+    if [ "$_adp_rc" -eq 124 ]; then
+        _adp_state=unresponsive
     fi
-
-    if ! directory_exists "$app_path"; then
-        printf 'Result: path is not a directory\n'
-        record_manifest_line "APP_DIR_NOT_DIRECTORY|`manifest_path "$app_path"`"
-        blank_line
-        return
-    fi
-
-    if ! [ -r "$app_path" ]; then
-        printf 'Result: directory is not readable by the current user\n'
-        record_manifest_line "APP_DIR_UNREADABLE|`manifest_path "$app_path"`"
-        blank_line
-        return
-    fi
+    case "$_adp_state" in
+        ok) ;;
+        missing)
+            printf 'Result: path does not exist\n'
+            record_manifest_line "APP_DIR_MISSING|`manifest_path "$app_path"`"
+            blank_line
+            return
+            ;;
+        not_directory)
+            printf 'Result: path is not a directory\n'
+            record_manifest_line "APP_DIR_NOT_DIRECTORY|`manifest_path "$app_path"`"
+            blank_line
+            return
+            ;;
+        unresponsive)
+            printf 'Result: the directory did not answer within %s seconds - typically a\n' "$ROOT_PROBE_TIMEOUT_SECONDS"
+            printf '  path on an unresponsive network mount. It was not listed.\n'
+            log_event WARN evidence "application directory $app_path did not answer a stat within ${ROOT_PROBE_TIMEOUT_SECONDS}s and was not listed - typically an unresponsive network mount"
+            record_manifest_line "APP_DIR_UNRESPONSIVE|`manifest_path "$app_path"`|seconds=$ROOT_PROBE_TIMEOUT_SECONDS"
+            blank_line
+            return
+            ;;
+        *)
+            printf 'Result: directory is not readable by the current user\n'
+            record_manifest_line "APP_DIR_UNREADABLE|`manifest_path "$app_path"`"
+            blank_line
+            return
+            ;;
+    esac
 
     if ! command_exists ls; then
         printf 'Result: ls command not available on this host\n'
@@ -5042,10 +5307,15 @@ prepare_collection_directory
 handle_interruption() {
     _interrupt_signal=$1
     COLLECTION_STATUS="interrupted by $_interrupt_signal before completion"
+    # First, before anything that forks: a scan, a watchdog and its sleep, or
+    # a host command may be running, and an interrupted run must leave none
+    # of them behind on the client host. Background jobs ignore SIGINT, so
+    # the operator's Ctrl-C stopped the collector and left its find running.
+    kill_descendants "$$"
     if [ -n "$LOCK_FILE" ]; then
         rm -f "$LOCK_FILE" 2>/dev/null
     fi
-    rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* "`scan_skip_file`" 2>/dev/null
+    rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-scan.* "`scan_skip_file`" 2>/dev/null
     # An interrupted report is still going to be read - that is how the
     # interruption is discovered - so it gets the same control-character
     # sanitisation as a complete one. A half-finished sanitisation file from
@@ -5507,7 +5777,7 @@ _final_result=`collection_log_result`
 if [ -n "$LOCK_FILE" ]; then
     rm -f "$LOCK_FILE" 2>/dev/null
 fi
-rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* "`scan_skip_file`" 2>/dev/null
+rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-bounded.* "${WORKING_DIRECTORY:-.}"/.sox-itgc-scan.* "`scan_skip_file`" 2>/dev/null
 
 case "$_final_result" in
     COMPLETED_CLEAN|COMPLETED_WITH_WARNINGS)

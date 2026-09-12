@@ -809,6 +809,137 @@ else
 fi
 
 #############################################################################
+printf '\n== 19. an interrupted collection stops at once and leaves nothing running ==\n'
+# A shell blocked reading a command substitution does not run its traps until
+# the substitution finishes, so a kill sent to a collector stuck in a scan
+# was ignored for the length of the scan's bound - 240 seconds - and the
+# handler, when it finally ran, left the scan's process tree and the
+# watchdog's sleep running on the host. Bounded work now runs where the
+# shell sits in "wait", which every shell interrupts at once, and the
+# handler's first act is to stop every process the collector started.
+# SIGTERM is used because a job started from a non-interactive shell has
+# SIGINT ignored; the handler is the same for both.
+checks=`expr $checks + 1`
+if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null && [ -x "$WORK/fs/fake-find" ]; then
+    mkdir -p "$WORK/fs/int"
+    _t0=`date +%s`
+    unshare -m sh -c "mount --bind '$WORK/fs/fake-find' '$_find' && sh '$COLLECTOR' --output-dir '$WORK/fs/int' --app-dir '$WORK/fs/dead-root' </dev/null >/dev/null 2>'$WORK/fs/int.stderr' & p=\$!; sleep 20; kill -TERM \$p; wait \$p; echo \$? > '$WORK/fs/int.rc'" 2>/dev/null
+    _t1=`date +%s`
+    _irc=`cat "$WORK/fs/int.rc" 2>/dev/null`
+    _il="$WORK/fs/int/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
+    _ir="$WORK/fs/int/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+    _ielapsed=`expr $_t1 - $_t0`
+    _iorphans=`ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && ($3 == "600" || $3 == "240")) { n++ } END { print n + 0 }'`
+    if [ "$_ielapsed" -lt 40 ] && grep -q '^RESULT: FAILED' "$_il" 2>/dev/null && grep -q '^INTERRUPTED_BY: SIGTERM' "$_il" 2>/dev/null && grep -q 'COLLECTION INTERRUPTED' "$_ir" 2>/dev/null; then
+        pass "the handler ran within `expr $_ielapsed - 20`s of the signal (exit $_irc), and the package says it is incomplete"
+    else
+        fail "interrupt during a scan: exit=${_irc:-none} elapsed=${_ielapsed}s (signal at 20s) verdict=`sed -n 's/^RESULT: //p' "$_il" 2>/dev/null | head -1`"
+    fi
+    checks=`expr $checks + 1`
+    if [ "$_iorphans" = "0" ] && [ ! -f "$WORK/fs/int/.sox-itgc-collector.lock" ] && [ "`ls -a "$WORK/fs/int" 2>/dev/null | grep -c '^\.sox-itgc-'`" = "0" ]; then
+        pass "no scan, watchdog, lock or scratch file left behind"
+    else
+        fail "left behind: orphans=$_iorphans lock=`ls "$WORK/fs/int/.sox-itgc-collector.lock" 2>/dev/null | wc -l` scratch=`ls -a "$WORK/fs/int" 2>/dev/null | grep -c '^\.sox-itgc-'`"
+    fi
+    for _sp in `ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && ($3 == "600" || $3 == "240")) || $0 ~ /fake-find/ { print $1 }'`; do kill "$_sp" 2>/dev/null; done
+    sleep 1
+else
+    skip "cannot create a mount namespace here; interruption during a scan not exercised"
+    if grep -q '^kill_descendants()' "$COLLECTOR"; then
+        pass "the interruption handler's process cleanup is present"
+    else
+        fail "the interruption handler's process cleanup is missing"
+    fi
+fi
+
+#############################################################################
+printf '\n== 20. twenty thousand local accounts do not take nine minutes ==\n'
+# passwd -S and chage -l were run once per account, and each reads the whole
+# shadow file: 20,000 accounts took 531 seconds in two subsections, against
+# 5 seconds for everything else. The same fields are now derived in one pass
+# over the two files. The assertion is the time, the row count, and that the
+# hash column became a status word rather than reaching the report.
+checks=`expr $checks + 1`
+if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null; then
+    mkdir -p "$WORK/acct/out"
+    cp /etc/passwd "$WORK/acct/passwd"; cp /etc/shadow "$WORK/acct/shadow"; cp /etc/group "$WORK/acct/group"
+    awk 'BEGIN { for (i = 1; i <= 20000; i++) printf "bulk%05d:x:%d:%d:Bulk account %d:/home/bulk%05d:/bin/sh\n", i, 30000 + i, 30000 + i, i, i }' >> "$WORK/acct/passwd"
+    awk 'BEGIN { for (i = 1; i <= 20000; i++) printf "bulk%05d:$6$saltsalt$QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ:19000:0:90:7:14::\n", i }' >> "$WORK/acct/shadow"
+    awk 'BEGIN { for (i = 1; i <= 20000; i++) printf "bulk%05d:x:%d:\n", i, 30000 + i }' >> "$WORK/acct/group"
+    _t0=`date +%s`
+    unshare -m sh -c "mount --bind '$WORK/acct/passwd' /etc/passwd && mount --bind '$WORK/acct/shadow' /etc/shadow && mount --bind '$WORK/acct/group' /etc/group && timeout 600 sh '$COLLECTOR' --output-dir '$WORK/acct/out' </dev/null >/dev/null 2>&1; echo \$? > '$WORK/acct/rc'" 2>/dev/null
+    _t1=`date +%s`
+    _arc=`cat "$WORK/acct/rc" 2>/dev/null`
+    _ar="$WORK/acct/out/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+    _aelapsed=`expr $_t1 - $_t0`
+    _arows=`grep -c '^bulk[0-9]* *P *2022-01-08 ' "$_ar" 2>/dev/null`
+    _aexp=`grep -c '^bulk20000 *2022-01-08 *2022-04-08 *2022-04-22 *never ' "$_ar" 2>/dev/null`
+    if [ "$_arc" = "0" ] && [ "$_aelapsed" -lt 180 ] && [ "$_arows" = "20000" ] && [ "$_aexp" = "1" ]; then
+        pass "completed in ${_aelapsed}s with all 20,000 accounts in the status table and the expiry dates computed"
+    else
+        fail "20,000 accounts: exit=${_arc:-none} elapsed=${_aelapsed}s status-rows=$_arows expiry-row-for-bulk20000=$_aexp"
+    fi
+    checks=`expr $checks + 1`
+    if grep -q 'saltsalt' "$_ar" 2>/dev/null || grep -rq 'saltsalt' "$WORK/acct/out/SOX-ITGC-AUDIT-LINUX-UNIX/raw_files" 2>/dev/null; then
+        fail "a password hash from the shadow file reached the package"
+    else
+        pass "no password hash reached the report or the copied files"
+    fi
+else
+    skip "cannot create a mount namespace here; account-count scaling not exercised"
+    if grep -q '^print_account_status_from_shadow()' "$COLLECTOR"; then
+        pass "the one-pass account status table is present"
+    else
+        fail "the one-pass account status table is missing"
+    fi
+fi
+
+#############################################################################
+printf '\n== 21. a root or a home directory that never answers costs one bound ==\n'
+# Before any walk, each scan root is stat-ed and resolved physically, and
+# the home-directory review stats every local account's home: on a hard NFS
+# mount whose server is gone, each of those blocks in the kernel. Neither
+# can be produced on demand without a dead NFS server, so the bounded
+# functions are exercised with their probes replaced by ones that hang for
+# a chosen path, under a short bound, and the assertions are about what the
+# collector does around the hang: the dead root is skipped and recorded, the
+# live roots still come back, a second look does not pay the bound again,
+# and a review stopped mid-way keeps what it had.
+checks=`expr $checks + 1`
+mkdir -p "$WORK/probe"
+sed -n '/^process_tree_pids()/,/^}/p; /^kill_process_tree()/,/^}/p; /^bounded_run_to_file()/,/^}/p; /^bounded_run()/,/^}/p; /^scan_output_file()/,/^}/p; /^scan_skip_file()/,/^}/p; /^scan_root_skipped()/,/^}/p; /^scan_root_timed_out()/,/^}/p; /^probe_scan_root()/,/^}/p; /^physical_unique_roots()/,/^}/p; /^print_scan_skip_notes()/,/^}/p; /^absolute_directory()/,/^}/p; /^print_home_review_bounded()/,/^}/p' "$COLLECTOR" > "$WORK/probe/functions.sh"
+cat > "$WORK/probe/check.sh" <<'PROBE'
+. "$1"
+WORKING_DIRECTORY=$2; INVOCATION_DIRECTORY=/; SCAN_TIMEOUT_SECONDS=240; ROOT_PROBE_TIMEOUT_SECONDS=3; HOME_REVIEW_TIMEOUT_SECONDS=3
+log_event() { printf 'LOG %s %s: %s\n' "$1" "$2" "$3" >> "$WORKING_DIRECTORY/log"; }
+record_manifest_line() { printf '%s\n' "$1" >> "$WORKING_DIRECTORY/manifest"; }
+manifest_path() { printf '%s' "$1"; }
+no_entries_found() { echo "no entries found"; }
+probe_scan_root() { case "$1" in /dead*) sleep 600 ;; esac; [ -d "$1" ] || return 1; absolute_directory "$1"; }
+t0=`date +%s`
+roots=`printf '/etc\n/dead/mount\n/nonexistent-zz\n/usr/bin\n/etc\n' | physical_unique_roots | tr '\n' ' '`
+t1=`expr \`date +%s\` - $t0`
+again=`printf '/dead/mount\n/etc\n' | physical_unique_roots | tr '\n' ' '`
+t2=`expr \`date +%s\` - $t0`
+slow_review() { echo "User: a"; echo "User: b"; sleep 600; echo "User: never"; }
+review=`print_home_review_bounded home_directory_review slow_review | tr '\n' '|'`
+printf 'roots=[%s] first=%ss again=[%s] total=%ss\n' "$roots" "$t1" "$again" "$t2"
+printf 'skip=[%s] manifest=[%s]\n' "`tr '\n' ' ' < \"\`scan_skip_file\`\"`" "`tr '\n' ' ' < $WORKING_DIRECTORY/manifest`"
+printf 'review=[%s]\n' "$review"
+printf 'orphans=%s\n' "`ps -e -o args= | grep -c '^sleep 600'`"
+PROBE
+sh "$WORK/probe/check.sh" "$WORK/probe/functions.sh" "$WORK/probe" > "$WORK/probe/out" 2>&1
+if grep -q '^roots=\[/etc /usr/bin \] first=[0-9]s again=\[/etc \] total=[0-9]s$' "$WORK/probe/out" \
+    && grep -q '^skip=\[/dead/mount \] manifest=\[SCAN_TIMEOUT|root=/dead/mount|seconds=3 SECTION_TIMEOUT|home_directory_review|seconds=3|partial=yes \]$' "$WORK/probe/out" \
+    && grep -q '^review=\[User: a|User: b|NOTE: this review did not finish within 3 seconds' "$WORK/probe/out" \
+    && grep -q '^orphans=0$' "$WORK/probe/out"; then
+    pass "dead root skipped once and recorded, live roots returned, partial home review kept, nothing left running"
+else
+    fail "bounded probes: `tr '\n' ' ' < "$WORK/probe/out" | cut -c1-300`"
+fi
+for _sp in `ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && $3 == "600") { print $1 }'`; do kill "$_sp" 2>/dev/null; done
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

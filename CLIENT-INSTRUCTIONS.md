@@ -159,8 +159,9 @@ sudo ./linux-unix-evidence-gathering-script.sh --output-dir /var/tmp/audit
   the request that accompanied this document.
 
 **You can stop it at any time with Ctrl-C.** It marks its own output as
-incomplete so a partial collection cannot be mistaken for a finished one, and
-exits. Nothing is left half-done, because nothing was being changed.
+incomplete so a partial collection cannot be mistaken for a finished one, stops
+every process it started, and exits. Nothing is left half-done, because nothing
+was being changed, and nothing is left running.
 
 ### Running it from a loose file
 
@@ -344,7 +345,14 @@ automated test that fails the build if the unsafe command is ever called.
 **What if it is interrupted, or the server reboots mid-run?** Nothing is left in
 a partial state, because nothing is being changed. The output directory may hold
 an incomplete collection, which the script marks as incomplete. Delete it and
-re-run, or send it and tell us.
+re-run, or send it and tell us. A Ctrl-C, or a `kill` from another session, is
+acted on within a second even while the script is waiting on a slow command,
+and it stops the processes it started before it exits.
+
+**How long does it take on a host with a very large number of local accounts?**
+About the same. The account-status and password-ageing evidence is read from the
+password and shadow files in a single pass rather than by running a command per
+account, so 20,000 local accounts add seconds, not minutes.
 
 **Does it need internet access?** No. It has been tested running with no network
 interfaces present at all.
