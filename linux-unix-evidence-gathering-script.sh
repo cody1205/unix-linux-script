@@ -3225,17 +3225,25 @@ print_scan_skip_notes() {
         done < "`scan_skip_file`"
     fi
 }
+# The package's own files are dropped from every scan by filtering find's
+# output rather than with -path ... -prune: -path reached POSIX only in
+# 2008 and Solaris 10's find does not have it, and a find that rejects its
+# own arguments prints nothing, which reads as a clean host. The package
+# is walked, which costs a few milliseconds, and never reported.
+outside_collection_directory() {
+    awk -v prefix="$COLLECTION_DIRECTORY/" 'index($0, prefix) != 1 && $0 != substr(prefix, 1, length(prefix) - 1)'
+}
 find_world_writable_files_under() {
-    find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -0002 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"
+    find "$1" -xdev -type f -perm -0002 -print 2>/dev/null | outside_collection_directory | sort -u 2>/dev/null | head -n "$ww_limit_probe"
 }
 find_world_writable_dirs_under() {
-    find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sort -u 2>/dev/null | head -n "$ww_limit_probe"
+    find "$1" -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | outside_collection_directory | sort -u 2>/dev/null | head -n "$ww_limit_probe"
 }
 find_setuid_under() {
-    find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -4000 -print 2>/dev/null
+    find "$1" -xdev -type f -perm -4000 -print 2>/dev/null | outside_collection_directory
 }
 find_setgid_under() {
-    find "$1" -xdev \( -path "$COLLECTION_DIRECTORY" -prune \) -o -type f -perm -2000 -print 2>/dev/null
+    find "$1" -xdev -type f -perm -2000 -print 2>/dev/null | outside_collection_directory
 }
 # Run one root's walk under the bound. Prints the list; prints nothing and
 # records the timeout if the bound is hit; prints nothing for a root already
@@ -4651,7 +4659,9 @@ create_collection_archive() {
 
     if command_exists tar; then
         if command_exists gzip; then
-            if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null && [ -s "$archive_base.tar.gz" ]; then
+            # A subshell cd rather than tar -C: HP-UX tar has no -C, and an
+            # archive that could not be created is a failed collection.
+            if ( cd "$WORKING_DIRECTORY" && tar -cf "$archive_base.tar" SOX-ITGC-AUDIT-LINUX-UNIX ) 2>/dev/null && gzip -f "$archive_base.tar" 2>/dev/null && [ -s "$archive_base.tar.gz" ]; then
                 ARCHIVE_FILE=$archive_base.tar.gz
                 ARCHIVE_STATUS="created"
                 log_event INFO archive "compressed archive created at $ARCHIVE_FILE"
@@ -4659,7 +4669,7 @@ create_collection_archive() {
             fi
             rm -f "$archive_base.tar" "$archive_base.tar.gz" 2>/dev/null
         fi
-        if tar -cf "$archive_base.tar" -C "$WORKING_DIRECTORY" SOX-ITGC-AUDIT-LINUX-UNIX 2>/dev/null && [ -s "$archive_base.tar" ]; then
+        if ( cd "$WORKING_DIRECTORY" && tar -cf "$archive_base.tar" SOX-ITGC-AUDIT-LINUX-UNIX ) 2>/dev/null && [ -s "$archive_base.tar" ]; then
             ARCHIVE_FILE=$archive_base.tar
             ARCHIVE_STATUS="created"
             log_event WARN archive "gzip unavailable or failed; created an uncompressed archive at $ARCHIVE_FILE"
