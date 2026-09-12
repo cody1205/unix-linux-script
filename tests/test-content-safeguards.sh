@@ -999,6 +999,45 @@ fi
 rm -rf "$WORK/suid"
 
 #############################################################################
+printf '\n== 24. a sudo operator the directory cannot resolve does not hang the handover ==\n'
+# The operator on a directory-joined host is usually a directory account.
+# "id" looked it up and "chown" took its name, both through the resolver:
+# with the directory server down, a collection that had survived every
+# other lookup hung at the very end, after the archive was written. The
+# lookup is now bounded and numeric, and paid once - the first version
+# cached it in a subshell and paid the bound twice.
+checks=`expr $checks + 1`
+if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null && command -v id >/dev/null 2>&1; then
+    mkdir -p "$WORK/hand/out"
+    _id=`command -v id`
+    cp "$_id" "$WORK/hand/id.real"
+    printf '#!/bin/sh\ncase "$*" in *ldapoperator*) exec sleep 600 ;; esac\nexec %s "$@"\n' "$WORK/hand/id.real" > "$WORK/hand/fake-id"
+    chmod 755 "$WORK/hand/fake-id" "$WORK/hand/id.real"
+    _t0=`date +%s`
+    unshare -m sh -c "mount --bind '$WORK/hand/fake-id' '$_id' && SUDO_USER=ldapoperator timeout 300 sh '$COLLECTOR' --output-dir '$WORK/hand/out' </dev/null >/dev/null 2>&1; echo \$? > '$WORK/hand/rc'" 2>/dev/null
+    _t1=`date +%s`
+    _hrc=`cat "$WORK/hand/rc" 2>/dev/null`
+    _hl="$WORK/hand/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
+    _helapsed=`expr $_t1 - $_t0`
+    _hwarns=`grep -c ' | WARN  | handover    | .*could not be resolved' "$_hl" 2>/dev/null`
+    if [ "$_hrc" = "0" ] && [ "$_helapsed" -lt 150 ] && [ "$_hwarns" = "1" ] && [ "`ls "$WORK/hand/out"/*.tar.gz 2>/dev/null | wc -l`" = "1" ] \
+        && [ "`ls -ld "$WORK/hand/out/SOX-ITGC-AUDIT-LINUX-UNIX" | awk '{ print $3 }'`" = "root" ]; then
+        pass "completed in ${_helapsed}s with one bound paid, one WARN, the archive written and the package left to root"
+    else
+        fail "unresolvable SUDO_USER: exit=${_hrc:-none} elapsed=${_helapsed}s warns=$_hwarns archive=`ls "$WORK/hand/out"/*.tar.gz 2>/dev/null | wc -l`"
+    fi
+    for _sp in `ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && $3 == "600") || $0 ~ /fake-id/ { print $1 }'`; do kill "$_sp" 2>/dev/null; done
+    sleep 1
+else
+    skip "cannot create a mount namespace here; handover resolution not exercised"
+    if grep -q '^resolve_handover_owner()' "$COLLECTOR"; then
+        pass "the bounded, numeric handover resolution is present"
+    else
+        fail "the bounded, numeric handover resolution is missing"
+    fi
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

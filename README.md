@@ -611,6 +611,15 @@ Stated here rather than discovered during an engagement:
   `.ssh` and legacy trust files each run under a five-minute bound; what the
   review had written by then is kept, the report says where it stopped, and
   the manifest carries `SECTION_TIMEOUT` with `partial=yes`.
+- **The handover to the sudo operator is bounded and numeric.** The operator
+  on a directory-joined host is usually a directory account, and both the
+  `id` that looked it up and the `chown` that took its name went through the
+  resolver: with the directory server down, a collection that had survived
+  every other lookup hung at the very end, after the archive was written.
+  The lookup now runs once under the name-service bound, `chown` is given
+  the uid:gid it returned (which the kernel applies with no lookup), and an
+  account that cannot be resolved in time leaves the package owned by root
+  with a `WARN` saying so.
 - **Filesystem walks are bounded per root.** `find -xdev` keeps a scan from
   crossing *into* a network mount, but a scan root that is itself on a dead
   mount — `/opt` on NFS, an `--app-dir` on a SAN whose array has gone away —

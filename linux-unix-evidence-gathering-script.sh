@@ -3014,7 +3014,7 @@ print_sulog_content() {
 print_recent_login_activity() {
     if command_exists last; then
         printf 'Command: last (limited to 50 most recent entries)\n'
-        last 2>/dev/null | awk 'NR <= 50 { print }' || not_available
+        bounded_host_command last | awk 'NR <= 50 { print }' || not_available
     else
         not_available
     fi
@@ -5055,26 +5055,50 @@ normalize_package_permissions() {
     fi
 }
 
-# Resolve the operator who invoked sudo, if any.
+# Resolve the operator who invoked sudo, if any - to NUMBERS. The operator
+# on a directory-joined host is usually a directory account, and both the
+# "id" that looked the account up and the "chown" that took its name went
+# through the resolver: with the directory server down, the collection that
+# had just survived every other lookup with a bound hung at the very end,
+# after the archive was written. The lookup now runs under the name-service
+# bound (and is skipped outright once that service is known to be broken),
+# and chown is given the uid:gid it returned, which the kernel applies with
+# no lookup at all. The result is cached because it is wanted twice.
+# The resolution runs in the main shell, once: the first version cached it
+# inside handover_target_owner, which is called in a command substitution,
+# so the cache died with the subshell and the bound was paid twice.
+HANDOVER_OWNER_RESOLVED=no
+HANDOVER_OWNER_IDS=""
+resolve_handover_owner() {
+    if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
+        return
+    fi
+    if [ "$HANDOVER_OWNER_RESOLVED" = "no" ]; then
+        HANDOVER_OWNER_RESOLVED=yes
+        if command_exists id && name_service_usable; then
+            _handover_ids=`bounded_run "$NAME_SERVICE_TIMEOUT_SECONDS" sh -c 'id -u "$1" && id -g "$1"' sh "$SUDO_USER" | tr '\n' ':' | sed 's/:$//'`
+            case "$_handover_ids" in
+                [0-9]*:[0-9]*) HANDOVER_OWNER_IDS=$_handover_ids ;;
+            esac
+        fi
+        if [ -z "$HANDOVER_OWNER_IDS" ]; then
+            log_event WARN handover "the account named by SUDO_USER ($SUDO_USER) could not be resolved to a uid and gid in time - typically a directory account with the directory server not answering; the evidence remains owned by root and will need elevated access to read"
+        fi
+    fi
+}
 handover_target_owner() {
     if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = "root" ]; then
         return 1
     fi
-    _handover_group=""
-    if command_exists id; then
-        _handover_group=`id -gn "$SUDO_USER" 2>/dev/null`
-    fi
-    if [ -n "$_handover_group" ]; then
-        printf '%s:%s' "$SUDO_USER" "$_handover_group"
-    else
-        printf '%s' "$SUDO_USER"
-    fi
+    [ -n "$HANDOVER_OWNER_IDS" ] || return 1
+    printf '%s' "$HANDOVER_OWNER_IDS"
     return 0
 }
 
 # Ownership of the evidence tree. Runs before the archive is created so the
 # archive records the operator as owner rather than root.
 apply_ownership_to_evidence() {
+    resolve_handover_owner
     if ! target_owner=`handover_target_owner`; then
         OWNERSHIP_STATUS="not adjusted (no SUDO_USER detected)"
         log_event INFO handover "no SUDO_USER present, so evidence ownership was left unchanged; whoever transfers this package may need elevated access to read it"
@@ -5087,8 +5111,8 @@ apply_ownership_to_evidence() {
     fi
 
     if [ "$chown_ok" = "yes" ]; then
-        OWNERSHIP_STATUS="evidence owned by $target_owner (directories 0750, files 0640)"
-        log_event INFO handover "evidence ownership transferred to $target_owner so it can be moved and read without root"
+        OWNERSHIP_STATUS="evidence owned by $SUDO_USER (uid:gid $target_owner; directories 0750, files 0640)"
+        log_event INFO handover "evidence ownership transferred to $SUDO_USER (uid:gid $target_owner) so it can be moved and read without root"
     else
         OWNERSHIP_STATUS="ownership adjustment to $target_owner encountered errors"
         log_event WARN handover "could not transfer ownership of the evidence to $target_owner; the files remain owned by root and will need elevated access to read"
