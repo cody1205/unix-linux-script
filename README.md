@@ -363,6 +363,13 @@ Permissions inside the package are deliberately **not** uniform:
 `MANIFEST.txt` records the permissions and ownership each file had on the source
 system, which survives transfer even when filesystem metadata does not.
 
+Manifest and skip-list records are one per line with `|` between fields, and a
+filename can contain `|`, `%`, a newline, or a carriage return. Those four are
+written as `%7C`, `%25`, `%0A`, and `%0D` so a hostile name cannot split or
+corrupt its own record; `verify-package.sh` decodes them. A name containing a
+newline once split its `COPIED` record in two, and the verifier reported two
+files missing from a package that was complete.
+
 ### Which version of the collector produced this package?
 
 Check this first when a package looks wrong. The report header records it:

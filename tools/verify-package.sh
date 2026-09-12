@@ -226,7 +226,10 @@ if [ -s "$MANIFEST" ] && [ -d "$ROOT_DIR/raw_files" ]; then
             COPIED\|*) ;;
             *) continue ;;
         esac
-        claimed_path=`printf '%s' "$manifest_line" | sed 's/^COPIED|//' | cut -d'|' -f1`
+        # Paths are recorded with %, |, newline and carriage return encoded
+        # as %25, %7C, %0A and %0D, so a filename containing one of them
+        # cannot split or corrupt its own record. Decoded here, %25 last.
+        claimed_path=`printf '%s' "$manifest_line" | sed 's/^COPIED|//' | cut -d'|' -f1 | awk 'BEGIN { ORS = "" } { gsub(/%7C/, "|"); gsub(/%0A/, "\n"); gsub(/%0D/, "\r"); gsub(/%25/, "%"); print }'`
         claimed=`expr "$claimed" + 1`
         if [ ! -f "$ROOT_DIR/raw_files$claimed_path" ]; then
             absent=`expr "$absent" + 1`

@@ -927,6 +927,29 @@ write_redacted_passwd_copy() {
     return 1
 }
 
+# A path as it is written into the manifest and the skip list.
+#
+# Both files are one record per line with fields separated by "|", and a
+# filename can contain either character - or "%", used here as the escape. A
+# file named "zz<newline>probe" in /etc/cron.d split its own COPIED record
+# across two lines, and the receipt verifier then reported two files missing
+# from a package that was complete. The four characters are encoded as %25,
+# %7C, %0A and %0D; the verifier decodes them. Nothing is forked unless the
+# path actually contains one of them, which is nearly never.
+MANIFEST_NL='
+'
+MANIFEST_CR=`printf '\r'`
+manifest_path() {
+    case "$1" in
+        *[%\|]*|*"$MANIFEST_NL"*|*"$MANIFEST_CR"*)
+            printf '%s' "$1" | awk 'BEGIN { ORS = "" } NR > 1 { print "%0A" } { gsub(/%/, "%25"); gsub(/\|/, "%7C"); gsub(/\r/, "%0D"); print }'
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
 record_manifest_line() {
     if [ -f "$MANIFEST_FILE" ]; then
         printf '%s\n' "$1" >> "$MANIFEST_FILE"
@@ -948,8 +971,9 @@ record_manifest_line() {
 # duplicate check keeps the list readable as an inventory.
 record_sensitive_skip() {
     if [ -f "$SENSITIVE_SKIPPED_FILE" ]; then
-        if ! grep -Fxq "$1" "$SENSITIVE_SKIPPED_FILE" 2>/dev/null; then
-            printf '%s\n' "$1" >> "$SENSITIVE_SKIPPED_FILE"
+        _rss_entry=`manifest_path "$1"`
+        if ! grep -Fxq "$_rss_entry" "$SENSITIVE_SKIPPED_FILE" 2>/dev/null; then
+            printf '%s\n' "$_rss_entry" >> "$SENSITIVE_SKIPPED_FILE"
             log_event INFO sensitive "$1 held back from the package by the credential safeguards; metadata recorded instead of contents"
         fi
         return
@@ -1501,7 +1525,7 @@ record_file_reference() {
 # later identical ones are suppressed.
 record_reference_outcome() {
     _outcome_verb=$1
-    _outcome_path=$2
+    _outcome_path=`manifest_path "$2"`
     _outcome_extra=$3
 
     if [ ! -f "$MANIFEST_FILE" ]; then
@@ -1607,11 +1631,11 @@ copy_file_to_collection() {
     # still be tied to what the report cites.
     _copy_size=`file_size_bytes "$file_path"`
     if [ "${_copy_size:-0}" -gt "$RAW_COPY_LIMIT_BYTES" ] 2>/dev/null; then
-        if ! grep -Fq "NOT_COPIED_TOO_LARGE|$file_path|" "$MANIFEST_FILE" 2>/dev/null; then
+        if ! grep -Fq "NOT_COPIED_TOO_LARGE|`manifest_path "$file_path"`|" "$MANIFEST_FILE" 2>/dev/null; then
             _big_sum=`print_file_checksum "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
             _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
             _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
-            record_manifest_line "NOT_COPIED_TOO_LARGE|$file_path|size=$_copy_size|limit=$RAW_COPY_LIMIT_BYTES|checksum=${_big_sum:-unavailable}|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+            record_manifest_line "NOT_COPIED_TOO_LARGE|`manifest_path "$file_path"`|size=$_copy_size|limit=$RAW_COPY_LIMIT_BYTES|checksum=${_big_sum:-unavailable}|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
             log_event WARN evidence "$file_path is $_copy_size bytes, above the $RAW_COPY_LIMIT_BYTES-byte copy limit; it was recorded with its checksum and NOT copied into raw_files/"
         fi
         return
@@ -1639,7 +1663,7 @@ copy_file_to_collection() {
             if write_redacted_passwd_copy "$file_path" "$target_path"; then
                 _src_perms=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $1 }'`
                 _src_owner=`ls -ld "$file_path" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }'`
-                record_manifest_line "COPIED_REDACTED|$file_path|field=2_password_hash|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+                record_manifest_line "COPIED_REDACTED|`manifest_path "$file_path"`|field=2_password_hash|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
                 record_sensitive_skip "$file_path (field 2 only; this host stores password hashes inline in /etc/passwd, so a redacted copy was delivered in place of the original)"
                 log_event WARN sensitive "/etc/passwd on this host carries password hashes inline in field 2 rather than in a shadow file; raw_files/etc/passwd is a REDACTED copy with field 2 removed and is not a byte-for-byte reproduction of the source"
             else
@@ -1659,9 +1683,9 @@ copy_file_to_collection() {
             # them to the link's own metadata needs to know that.
             _src_real=`canonical_path "$file_path"`
             if [ -n "$_src_real" ] && [ "$_src_real" != "$file_path" ]; then
-                record_manifest_line "COPIED|$file_path|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}|symlink_target=$_src_real"
+                record_manifest_line "COPIED|`manifest_path "$file_path"`|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}|symlink_target=$_src_real"
             else
-                record_manifest_line "COPIED|$file_path|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
+                record_manifest_line "COPIED|`manifest_path "$file_path"`|source_perms=${_src_perms:-unknown}|source_owner=${_src_owner:-unknown}"
             fi
         else
             log_event WARN evidence "$file_path was readable but could not be copied into the package; the report may reference a file that was not delivered"
@@ -1968,7 +1992,7 @@ print_file_with_header() {
             printf '(symbolic link; the content below is that of %s)\n' "$_pfh_real"
         fi
         if print_file_body "$file_path"; then
-            record_manifest_line "PRINTED|$file_path"
+            record_manifest_line "PRINTED|`manifest_path "$file_path"`"
         fi
     else
         not_available
@@ -2814,7 +2838,7 @@ print_world_writable_findings() {
     _pwf_count=`printf '%s' "$_pwf_list" | grep -c . 2>/dev/null`
     [ -n "$_pwf_count" ] || _pwf_count=0
     if [ "$_pwf_count" -eq 0 ]; then
-        record_manifest_line "WORLD_WRITABLE_SCAN|$_pwf_kind|root=$_pwf_root|entries=0|truncated=no"
+        record_manifest_line "WORLD_WRITABLE_SCAN|$_pwf_kind|root=`manifest_path "$_pwf_root"`|entries=0|truncated=no"
         return
     fi
     printf 'Under %s:\n' "$_pwf_root"
@@ -2838,7 +2862,7 @@ print_world_writable_findings() {
     done
     blank_line
     _ww_files_total=`expr "$_ww_files_total" + "$_pwf_count"`
-    record_manifest_line "WORLD_WRITABLE_SCAN|$_pwf_kind|root=$_pwf_root|$_pwf_tally"
+    record_manifest_line "WORLD_WRITABLE_SCAN|$_pwf_kind|root=`manifest_path "$_pwf_root"`|$_pwf_tally"
 }
 
 print_world_writable_review() {
@@ -4044,21 +4068,21 @@ print_application_directory_listing() {
 
     if ! path_exists "$app_path"; then
         printf 'Result: path does not exist\n'
-        record_manifest_line "APP_DIR_MISSING|$app_path"
+        record_manifest_line "APP_DIR_MISSING|`manifest_path "$app_path"`"
         blank_line
         return
     fi
 
     if ! directory_exists "$app_path"; then
         printf 'Result: path is not a directory\n'
-        record_manifest_line "APP_DIR_NOT_DIRECTORY|$app_path"
+        record_manifest_line "APP_DIR_NOT_DIRECTORY|`manifest_path "$app_path"`"
         blank_line
         return
     fi
 
     if ! [ -r "$app_path" ]; then
         printf 'Result: directory is not readable by the current user\n'
-        record_manifest_line "APP_DIR_UNREADABLE|$app_path"
+        record_manifest_line "APP_DIR_UNREADABLE|`manifest_path "$app_path"`"
         blank_line
         return
     fi
@@ -4076,7 +4100,7 @@ print_application_directory_listing() {
 
     subsection "Recursive Listing:"
     ls $listing_flags "$app_path" 2>/dev/null || not_available
-    record_manifest_line "APP_DIR_LISTED|$app_path|flags=$listing_flags"
+    record_manifest_line "APP_DIR_LISTED|`manifest_path "$app_path"`|flags=$listing_flags"
     blank_line
 }
 
@@ -4276,7 +4300,7 @@ write_handling_instructions() {
     } > "$_handling_file" 2>/dev/null
 
     if [ -f "$_handling_file" ]; then
-        record_manifest_line "GENERATED|$_handling_file"
+        record_manifest_line "GENERATED|`manifest_path "$_handling_file"`"
         log_event INFO handover "extraction and handling instructions written to $_handling_file"
     fi
 }
@@ -4791,7 +4815,7 @@ if [ -f "$0" ]; then
     _self_checksum=`print_file_checksum "$0" | awk 'NR == 1 { print $1 }'`
     if [ -n "$_self_checksum" ]; then
         printf 'Collector Script Checksum: %s (%s)\n' "$_self_checksum" "$CHECKSUM_ALGORITHM"
-        record_manifest_line "COLLECTOR_SELF|$_self_path|algorithm=$CHECKSUM_ALGORITHM|checksum=$_self_checksum"
+        record_manifest_line "COLLECTOR_SELF|`manifest_path "$_self_path"`|algorithm=$CHECKSUM_ALGORITHM|checksum=$_self_checksum"
         log_event INFO startup "collector script $0 measured as $CHECKSUM_ALGORITHM $_self_checksum"
         if [ "$CHECKSUM_ALGORITHM" != "sha256" ]; then
             printf '  NOTE: no SHA-256 tool is available on this host, so the value\n'
@@ -4801,11 +4825,11 @@ if [ -f "$0" ]; then
         fi
     else
         printf 'Collector Script Checksum: not available (no checksum tool on this host)\n'
-        record_manifest_line "COLLECTOR_SELF|$_self_path|checksum=unavailable"
+        record_manifest_line "COLLECTOR_SELF|`manifest_path "$_self_path"`|checksum=unavailable"
     fi
 else
     printf 'Collector Script Checksum: not available (script path not resolvable)\n'
-    record_manifest_line "COLLECTOR_SELF|$_self_path|checksum=unavailable"
+    record_manifest_line "COLLECTOR_SELF|`manifest_path "$_self_path"`|checksum=unavailable"
 fi
 
 if [ "$TEST_MODE" = "yes" ] && [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
@@ -5015,7 +5039,7 @@ printf 'limited the evidence gathered, is in:\n'
 printf '  %s\n' "${LOG_FILE:-not created}"
 printf 'Review that file before relying on any section reported as not available.\n'
 
-record_manifest_line "COLLECTION_LOG|${LOG_FILE:-not created}"
+record_manifest_line "COLLECTION_LOG|`manifest_path "${LOG_FILE:-not created}"`"
 
 # Order from here matters and is the reason the archive is built last.
 #

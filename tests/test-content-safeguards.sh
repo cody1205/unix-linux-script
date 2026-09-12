@@ -468,6 +468,43 @@ else
 fi
 
 #############################################################################
+printf '\n== 11. a filename containing |, %% or a newline cannot corrupt the manifest ==\n'
+# The manifest is one record per line with "|" between fields. A file named
+# "zz<newline>probe" split its own COPIED record across two lines, and the
+# receipt verifier then reported two files missing from a complete package.
+if [ -d /etc/cron.d ]; then
+    _nl='/etc/cron.d/zz-safeguard-nl
+probe'
+    printf '# h\n' > "$_nl" && plant "$_nl"
+    printf '# h\n' > '/etc/cron.d/zz-safeguard-pipe|probe' && plant '/etc/cron.d/zz-safeguard-pipe|probe'
+    printf '# h\n' > '/etc/cron.d/zz-safeguard-pct%probe' && plant '/etc/cron.d/zz-safeguard-pct%probe'
+    OUT11="$WORK/names"
+    run_collector "$OUT11"
+    P11="$OUT11/SOX-ITGC-AUDIT-LINUX-UNIX"
+    checks=`expr $checks + 1`
+    if grep -q '^COPIED|/etc/cron.d/zz-safeguard-nl%0Aprobe|' "$P11/metadata/MANIFEST.txt" && grep -q '^COPIED|/etc/cron.d/zz-safeguard-pipe%7Cprobe|' "$P11/metadata/MANIFEST.txt" && grep -q '^COPIED|/etc/cron.d/zz-safeguard-pct%25probe|' "$P11/metadata/MANIFEST.txt"; then
+        pass "each hostile name is one encoded record in the manifest"
+    else
+        fail "hostile names were not encoded as single records:"
+        grep -n -A1 'zz-safeguard-nl\|zz-safeguard-pipe\|zz-safeguard-pct' "$P11/metadata/MANIFEST.txt" | sed 's/^/            /'
+    fi
+    checks=`expr $checks + 1`
+    _arc11=`ls "$OUT11"/*.tar.gz 2>/dev/null | head -1`
+    sh "$REPO_ROOT/tools/verify-package.sh" "$_arc11" >"$WORK/verify11.txt" 2>&1
+    _vrc=$?
+    if [ "$_vrc" -le 1 ] && ! grep -q 'missing from the package' "$WORK/verify11.txt"; then
+        pass "the receipt verifier decodes them and finds every copy (exit $_vrc)"
+    else
+        fail "the verifier rejected a complete package (exit $_vrc):"
+        grep -i 'PROBLEM' "$WORK/verify11.txt" | sed 's/^/            /'
+    fi
+    for p in $PLANTED; do rm -f "$p"; done
+    PLANTED=""
+else
+    skip "/etc/cron.d absent; hostile-name case not exercised"
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then
