@@ -570,7 +570,9 @@ Stated here rather than discovered during an engagement:
 - **Host commands that can block on something outside the host are bounded
   too.** `df` on a stale NFS mount, `rpm` waiting for a package-manager lock,
   `systemctl` on a wedged bus, `ntpq` resolving peer names, AIX `lsuser`
-  against a directory: each runs under a 60-second bound. A `df` that never
+  against a directory, Solaris `pkg list -u` refreshing its publisher
+  catalogues, `last` reading the whole wtmp file: each runs under a
+  60-second bound. A `df` that never
   answered hung the collection until it was killed; now the section carries
   a one-line note, the log a `WARN`, and the manifest a `COMMAND_TIMEOUT`
   record, and the collection carries on. When the bound fires, the whole

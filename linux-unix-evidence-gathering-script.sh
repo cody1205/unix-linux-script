@@ -4236,7 +4236,11 @@ print_patch_update_summary() {
         SunOS)
             if command_exists pkg; then
                 printf 'Command: pkg list -u (IPS updates available)\n'
-                pkg list -u </dev/null 2>/dev/null || not_available
+                # pkg list -u compares the installed set against the
+                # publisher catalogues, and older releases refresh those
+                # catalogues over the network first; on a host with no route
+                # to its publisher that is a hang, not an answer.
+                bounded_host_command pkg list -u || not_available
                 return
             elif command_exists showrev; then
                 printf 'Command: showrev -p (native Solaris patch list)\n'
