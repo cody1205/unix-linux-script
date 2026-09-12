@@ -384,6 +384,90 @@ else
 fi
 
 #############################################################################
+printf '\n== 9. credential material is recognised by content: hard links and stray copies ==\n'
+# A hard link is the same inode under another name. It resolves to itself, its
+# path is in no table, and it was copied byte-for-byte into raw_files/. A copy
+# of the shadow file left in a configuration directory leaked the same way.
+if [ -d /etc/cron.d ] && [ -f /etc/shadow ]; then
+    if ln /etc/shadow /etc/cron.d/zz-safeguard-hardlink 2>/dev/null; then
+        plant /etc/cron.d/zz-safeguard-hardlink
+    fi
+    cp /etc/shadow /etc/cron.d/zz-safeguard-copy && plant /etc/cron.d/zz-safeguard-copy
+    # A genuine credential table with real hashes, since this host's accounts
+    # may all be locked (field 2 = "*") and the shape rule alone would carry it.
+    printf 'svc:$6$saltsalt$abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ:20000:0:99999:7:::\n' > /etc/cron.d/zz-safeguard-hashline
+    plant /etc/cron.d/zz-safeguard-hashline
+
+    OUT9="$WORK/content"
+    run_collector "$OUT9"
+    P9="$OUT9/SOX-ITGC-AUDIT-LINUX-UNIX"
+
+    checks=`expr $checks + 1`
+    _leaked=""
+    for f in zz-safeguard-hardlink zz-safeguard-copy zz-safeguard-hashline; do
+        [ -f "$P9/raw_files/etc/cron.d/$f" ] && _leaked="$_leaked $f"
+    done
+    if [ -z "$_leaked" ]; then
+        pass "no hard link, copy, or hash-bearing file reached raw_files/"
+    else
+        fail "credential material reached raw_files/ through:$_leaked"
+    fi
+
+    checks=`expr $checks + 1`
+    if grep -q "zz-safeguard-copy.*credential material" "$P9/metadata/SENSITIVE_FILES_SKIPPED.txt" 2>/dev/null; then
+        pass "the skip list names the copy and says it was withheld for its contents"
+    else
+        fail "the skip list does not record the withheld copy with a content reason"
+        grep 'zz-safeguard' "$P9/metadata/SENSITIVE_FILES_SKIPPED.txt" 2>/dev/null | sed 's/^/            /'
+    fi
+
+    checks=`expr $checks + 1`
+    if grep -q '\$6\$saltsalt\$' "$P9/report/SOX-ITGC-AUDIT-REPORT.txt" 2>/dev/null; then
+        fail "a password hash was printed in the report"
+    else
+        pass "no password hash reached the report"
+    fi
+
+    # The rule must not over-block: the real account and group files, which
+    # share the colon-separated shape, must still be collected.
+    checks=`expr $checks + 1`
+    if [ -f "$P9/raw_files/etc/passwd" ] && [ -f "$P9/raw_files/etc/group" ]; then
+        pass "/etc/passwd and /etc/group are still collected"
+    else
+        fail "the content rule over-blocked /etc/passwd or /etc/group"
+    fi
+
+    for p in $PLANTED; do rm -f "$p"; done
+    PLANTED=""
+else
+    skip "/etc/cron.d or /etc/shadow absent; content cases not exercised"
+fi
+
+#############################################################################
+printf '\n== 10. every scanned root is a real directory, each listed once ==\n'
+# POSIX find does not follow a symbolic link given as a starting point. A root
+# that is a link - /bin on a merged-/usr host, /opt relocated to a data volume
+# - was listed under "Paths scanned" while examining nothing. The manifest
+# must name the physical directory that was walked, once.
+checks=`expr $checks + 1`
+_rm10="$OUT1/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/MANIFEST.txt"
+_roots=`grep '^WORLD_WRITABLE_SCAN|files|root=' "$_rm10" 2>/dev/null | cut -d'|' -f3 | sed 's/^root=//'`
+_linked=0
+_missing=0
+printf '%s\n' "$_roots" | while IFS= read -r _r; do
+    [ -n "$_r" ] || continue
+    if [ -L "$_r" ]; then printf 'LINK %s\n' "$_r"; fi
+    if [ ! -d "$_r" ]; then printf 'MISSING %s\n' "$_r"; fi
+done > "$WORK/roots.txt"
+_dupes=`printf '%s\n' "$_roots" | sort | uniq -d | wc -l | tr -d ' '`
+if [ -n "$_roots" ] && [ ! -s "$WORK/roots.txt" ] && [ "$_dupes" = "0" ]; then
+    pass "all `printf '%s\n' "$_roots" | grep -c .` recorded scan roots are real directories, none a link, none repeated"
+else
+    fail "scan roots are not clean: duplicates=$_dupes"
+    sed 's/^/            /' "$WORK/roots.txt"
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

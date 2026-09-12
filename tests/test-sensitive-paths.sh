@@ -80,6 +80,12 @@ assert_sensitive /etc/sssd/sssd.conf
 assert_sensitive /etc/krb5.keytab
 assert_sensitive /etc/krb5/krb5.keytab
 assert_sensitive /etc/ldap.secret
+# The backup copies passwd, useradd and pwconv leave beside the live file. They
+# hold the same hashes and exist on every Linux host.
+assert_sensitive /etc/shadow-
+assert_sensitive /etc/gshadow-
+assert_sensitive /etc/shadow.bak
+assert_sensitive /etc/security/passwd.bak
 
 printf '\n== key material and trust files must be protected ==\n'
 assert_sensitive /root/.ssh/id_rsa
@@ -127,6 +133,7 @@ sed -n '/^path_exists()/,/^}/p'          "$COLLECTOR" >  "$WORK/cls.sh"
 sed -n '/^canonical_path()/,/^}/p'       "$COLLECTOR" >> "$WORK/cls.sh"
 sed -n '/^directory_is_physical()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
 sed -n '/^symlink_target_off_limits()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
+sed -n '/^file_contains_credential_material()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
 sed -n '/^classify_source_file()/,/^}/p' "$COLLECTOR" >> "$WORK/cls.sh"
 # shellcheck source=/dev/null
 . "$WORK/cls.sh"
@@ -172,6 +179,24 @@ if mkfifo "$WORK/pipe.conf" 2>/dev/null; then
     assert_class "named pipe where a file is expected"    "$WORK/pipe.conf"          special
 fi
 assert_class "a directory"                                "$WORK/linked-dir-target"  special
+
+# Credential material recognised by CONTENT. A hard link to /etc/shadow is the
+# same inode under an innocent name: it resolves to itself and no path rule
+# can see it, yet it was copied byte-for-byte. The bytes are what is judged.
+printf 'root:$6$saltsalt$abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ:20000:0:99999:7:::\n' > "$WORK/one-hash.txt"
+printf 'root:*:20501:0:99999:7:::\ndaemon:*:20501:0:99999:7:::\nbin:!:20501:0:99999:7:::\n' > "$WORK/locked-shadow.txt"
+printf 'root:*::\ndaemon:!::\nsudo:!::\n' > "$WORK/gshadow-shape.txt"
+printf 'root:x:0:\ndaemon:x:1:\nsudo:x:27:alice\n' > "$WORK/group-like.txt"
+printf '0 5 * * * root /usr/bin/backup >/dev/null 2>&1\n# comment: with colons 1:2:3:4:5:6:7:8\n' > "$WORK/crontab-like.txt"
+printf 'alice:100000:65536\nbob:165536:65536\n' > "$WORK/subuid-like.txt"
+printf 'web:$apr1$abcdefgh$ijklmnopqrstuvwxyz012\n' > "$WORK/htpasswd-like.txt"
+assert_class "one line with a crypt hash in field 2"      "$WORK/one-hash.txt"       withheld
+assert_class "shadow-shaped table, all accounts locked"   "$WORK/locked-shadow.txt"  withheld
+assert_class "gshadow-shaped table"                       "$WORK/gshadow-shape.txt"  withheld
+assert_class "htpasswd-style hash line"                   "$WORK/htpasswd-like.txt"  withheld
+assert_class "/etc/group-shaped file (no hashes)"         "$WORK/group-like.txt"     collectable
+assert_class "crontab with colons in a comment"           "$WORK/crontab-like.txt"   collectable
+assert_class "subuid-shaped numeric table"                "$WORK/subuid-like.txt"    collectable
 
 # Root can read anything, so the unreadable cases only mean something when the
 # test is not running as root. Skipped loudly rather than silently passing.

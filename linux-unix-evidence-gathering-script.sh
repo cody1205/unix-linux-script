@@ -227,6 +227,23 @@ if ! ( exec 3>&2 ); then
     exec 2>/dev/null
 fi
 
+# Locale. Everything that shapes evidence text - collation order, number and
+# date formats, tool messages - is fixed to the C locale, so two hosts produce
+# comparably formatted reports and a reviewer is not reading German month
+# names in an ls listing. The character-type category is left as the host has
+# it, so filenames in the host's encoding still render in listings rather
+# than as "?". LC_ALL would override every category at once, which is why it
+# is unset and its value carried into LC_CTYPE.
+_host_ctype=${LC_ALL:-${LC_CTYPE:-${LANG:-C}}}
+unset LC_ALL
+LC_CTYPE=$_host_ctype
+LC_COLLATE=C
+LC_NUMERIC=C
+LC_TIME=C
+LC_MESSAGES=C
+LANG=C
+export LC_CTYPE LC_COLLATE LC_NUMERIC LC_TIME LC_MESSAGES LANG
+
 # The run lock: set when the evidence directory is prepared, removed at exit.
 LOCK_FILE=""
 
@@ -788,6 +805,12 @@ is_sensitive_path() {
         /etc/shadow|/etc/gshadow|/etc/sssd/sssd.conf|/etc/krb5.keytab|/etc/krb5/krb5.keytab|/etc/ldap.secret)
             return 0
             ;;
+        /etc/shadow-|/etc/gshadow-|/etc/shadow.*|/etc/gshadow.*|*/shadow.bak|*/shadow.old|/etc/security/passwd.*)
+            # The backup copies passwd, useradd and pwconv leave beside the
+            # live file - /etc/shadow- exists on every Linux host - hold the
+            # same hashes as the original.
+            return 0
+            ;;
         /etc/security/passwd|/etc/security/opasswd|/etc/opasswd|/etc/security/ldap/ldap.cfg|/etc/security/passwd.conf)
             # AIX stores password hashes in /etc/security/passwd; opasswd holds
             # password history hashes; the AIX LDAP client config embeds a bind
@@ -1322,7 +1345,44 @@ classify_source_file() {
         printf 'unreadable'
         return
     fi
+    if file_contains_credential_material "$_cls_path"; then
+        printf 'withheld'
+        return
+    fi
     printf 'collectable'
+}
+
+# Credential material recognised by CONTENT, wherever the file is.
+#
+# Path rules cannot see a hard link. /etc/cron.d/x linked to /etc/shadow is the
+# same inode under another name; it resolves to itself, its path is not in any
+# table, and it was copied byte-for-byte into raw_files/ and printed in the
+# report. Path rules also miss a copy of the shadow file left in an odd place.
+# What both have in common is what the bytes look like, so that is what is
+# tested: any colon-separated line whose second field is a crypt hash
+# ($6$..., $y$..., $1$..., $apr1$...) is credential material outright; a file
+# with three or more lines in shadow's nine-field shape, or gshadow's
+# four-field shape with a locked-account placeholder, is an account table
+# whether or not the hashes happen to be present.
+#
+# /etc/passwd is exempt: on a host that keeps hashes inline it is delivered as
+# a REDACTED copy by its own route, because the account inventory is required
+# evidence. Only the first 500 lines are examined; a credential file is not a
+# large file.
+file_contains_credential_material() {
+    _fcc_path=$1
+    if [ "$_fcc_path" = "/etc/passwd" ]; then
+        return 1
+    fi
+    [ -f "$_fcc_path" ] && [ -r "$_fcc_path" ] || return 1
+    awk -F: '
+        NR > 500          { exit }
+        /^[[:space:]]*#/  { next }
+        NF >= 2 && $2 ~ /^\$[0-9A-Za-z]+\$/ { found = 1; exit }
+        NF == 9 && ($2 == "*" || $2 == "!" || $2 == "!!" || $2 == "") && $3 ~ /^[0-9]*$/ && $4 ~ /^[0-9]*$/ && $5 ~ /^[0-9]*$/ { shadow++ }
+        NF == 4 && ($2 == "*" || $2 == "!" || $2 == "!!") && $1 ~ /^[A-Za-z_][A-Za-z0-9_.-]*$/ { gshadow++ }
+        END { if (found || shadow >= 3 || gshadow >= 3) exit 0; exit 1 }
+    ' "$_fcc_path" 2>/dev/null
 }
 
 # The single record of a deliberate withholding: manifest and skip list together,
@@ -1338,15 +1398,20 @@ record_withheld_file() {
     fi
 }
 
-# The reason a withheld path was withheld, when it was withheld for where it
-# LEADS rather than for its own name. Empty for an ordinary sensitive path.
-withheld_via_symlink_note() {
+# The reason a withheld path was withheld, when it was withheld for something
+# other than its own name: for where it leads, or for what it contains. Empty
+# for an ordinary sensitive path, whose name is reason enough.
+withheld_reason_note() {
     if is_sensitive_path "$1"; then
         return
     fi
     _wvs_real=`canonical_path "$1"`
-    if [ -n "$_wvs_real" ] && [ "$_wvs_real" != "$1" ]; then
+    if [ -n "$_wvs_real" ] && [ "$_wvs_real" != "$1" ] && symlink_target_off_limits "$_wvs_real"; then
         printf 'symbolic link to %s; target withheld' "$_wvs_real"
+        return
+    fi
+    if file_contains_credential_material "$1"; then
+        printf 'contents are credential material: password hashes or a shadow-format account table; withheld regardless of the file name'
     fi
 }
 
@@ -1526,7 +1591,7 @@ copy_file_to_collection() {
             # which meant /etc/shadow, the single most sensitive file this tool
             # handles, was cited in the report with its permissions and checksum
             # and had no manifest entry at all.
-            record_withheld_file "$file_path" "`withheld_via_symlink_note "$file_path"`"
+            record_withheld_file "$file_path" "`withheld_reason_note "$file_path"`"
             return
             ;;
         collectable)
@@ -1706,7 +1771,7 @@ print_noncomment_or_not_available() {
     # route had correctly withheld it.
     case `classify_source_file "$file_path"` in
         withheld)
-            _pnc_note=`withheld_via_symlink_note "$file_path"`
+            _pnc_note=`withheld_reason_note "$file_path"`
             printf 'Withheld: contents deliberately not read (%s)\n' "${_pnc_note:-credential file}"
             record_withheld_file "$file_path" "$_pnc_note"
             return
@@ -1873,7 +1938,7 @@ print_file_with_header() {
     printf 'File: %s\n' "$file_path"
     case `classify_source_file "$file_path"` in
         withheld)
-            _pfh_note=`withheld_via_symlink_note "$file_path"`
+            _pfh_note=`withheld_reason_note "$file_path"`
             if [ -n "$_pfh_note" ]; then
                 _pfh_real=`canonical_path "$file_path"`
                 printf 'This path is a symbolic link to %s\n' "$_pfh_real"
@@ -2694,24 +2759,43 @@ operator_app_scan_roots() {
 
 # Scope of the SetUID/SetGID scan: binary paths, plus any application roots the
 # operator supplied. Emitted one per line so callers can split on newlines only.
+# Scan roots are resolved to their physical directories and de-duplicated.
+# POSIX find does not follow a symbolic link given as a starting point, so a
+# root that is a link - /opt or /usr/local relocated to a data volume, or /bin
+# on a merged-/usr host - was listed under "Paths scanned" and examined
+# nothing. Resolving first means the report names the directory that was
+# actually walked; de-duplicating means /bin and /usr/bin are one root, not
+# two headings for the same tree.
+physical_unique_roots() {
+    while IFS= read -r _pur_root; do
+        [ -n "$_pur_root" ] || continue
+        absolute_directory "$_pur_root"
+        printf '\n'
+    done | awk '!seen[$0]++'
+}
+
 setuid_search_paths() {
-    for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
-        if [ -d "$candidate" ]; then
-            printf '%s\n' "$candidate"
-        fi
-    done
-    operator_app_scan_roots
+    {
+        for candidate in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local/bin /usr/local/sbin /usr/local/lib /opt; do
+            if [ -d "$candidate" ]; then
+                printf '%s\n' "$candidate"
+            fi
+        done
+        operator_app_scan_roots
+    } | physical_unique_roots
 }
 
 # Scope of the world-writable scan: system binary and configuration paths, plus
 # any application roots the operator supplied.
 world_writable_search_paths() {
-    for candidate in /etc /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt; do
-        if [ -d "$candidate" ]; then
-            printf '%s\n' "$candidate"
-        fi
-    done
-    operator_app_scan_roots
+    {
+        for candidate in /etc /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt; do
+            if [ -d "$candidate" ]; then
+                printf '%s\n' "$candidate"
+            fi
+        done
+        operator_app_scan_roots
+    } | physical_unique_roots
 }
 
 # List one root's findings for one category, applying the cap to that root
@@ -4684,7 +4768,19 @@ printf 'Client Non-Root Test Instruction: sh %s --dry-run\n' "$SCRIPT_NAME"
 #
 # $0 is the path the script was invoked by, so this measures the file that is
 # actually running rather than a file of the same name elsewhere.
-printf 'Collector Script Path: %s\n' "$0"
+# Recorded absolute: "./collector.sh" in a manifest read on another machine
+# says nothing about which copy ran.
+case "$0" in
+    /*/*) _self_dir=`absolute_directory "${0%/*}"` ;;
+    /*)   _self_dir=/ ;;
+    */*)  _self_dir=`absolute_directory "${0%/*}"` ;;
+    *)    _self_dir=$INVOCATION_DIRECTORY ;;
+esac
+case "$_self_dir" in
+    /) _self_path="/${0##*/}" ;;
+    *) _self_path="$_self_dir/${0##*/}" ;;
+esac
+printf 'Collector Script Path: %s\n' "$_self_path"
 if [ -f "$0" ]; then
     # The algorithm is named from the tool that was actually used rather than
     # assumed to be SHA-256. print_file_checksum falls back to cksum where no
@@ -4695,7 +4791,7 @@ if [ -f "$0" ]; then
     _self_checksum=`print_file_checksum "$0" | awk 'NR == 1 { print $1 }'`
     if [ -n "$_self_checksum" ]; then
         printf 'Collector Script Checksum: %s (%s)\n' "$_self_checksum" "$CHECKSUM_ALGORITHM"
-        record_manifest_line "COLLECTOR_SELF|$0|algorithm=$CHECKSUM_ALGORITHM|checksum=$_self_checksum"
+        record_manifest_line "COLLECTOR_SELF|$_self_path|algorithm=$CHECKSUM_ALGORITHM|checksum=$_self_checksum"
         log_event INFO startup "collector script $0 measured as $CHECKSUM_ALGORITHM $_self_checksum"
         if [ "$CHECKSUM_ALGORITHM" != "sha256" ]; then
             printf '  NOTE: no SHA-256 tool is available on this host, so the value\n'
@@ -4705,11 +4801,11 @@ if [ -f "$0" ]; then
         fi
     else
         printf 'Collector Script Checksum: not available (no checksum tool on this host)\n'
-        record_manifest_line "COLLECTOR_SELF|$0|checksum=unavailable"
+        record_manifest_line "COLLECTOR_SELF|$_self_path|checksum=unavailable"
     fi
 else
     printf 'Collector Script Checksum: not available (script path not resolvable)\n'
-    record_manifest_line "COLLECTOR_SELF|$0|checksum=unavailable"
+    record_manifest_line "COLLECTOR_SELF|$_self_path|checksum=unavailable"
 fi
 
 if [ "$TEST_MODE" = "yes" ] && [ "$EFFECTIVE_UID_VALUE" != "0" ]; then

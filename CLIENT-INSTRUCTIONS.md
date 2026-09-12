@@ -35,7 +35,7 @@ form that changes state.
 | **Writes** | Only inside the `--output-dir` you choose, plus the archive in that same directory. Nothing in `/tmp`, nothing in any system path. One disclosed exception below. |
 | **Sends** | Nothing. No network connections, no sockets, no outbound anything. |
 | **Reads** | OS configuration relevant to access control, and only regular files: a named pipe, socket, or device node where a configuration file is expected is noted and never opened. No user data, no application data, no databases. |
-| **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets — whether reached by their own path or through a symbolic link at some other name. Links into home directories are not followed either. |
+| **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets — whether reached by their own path, through a symbolic link at some other name, or as a hard link or stray copy recognised by its contents. Links into home directories are not followed either. |
 | **Needs** | Root via `sudo`, a few hundred MB of free space, typically 1–10 minutes. |
 | **Requires** | No reboot, no restart, no maintenance window, no installation. |
 

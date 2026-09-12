@@ -471,6 +471,16 @@ configuration directory is recorded as `EXAMINED_SPECIAL` with a `WARN` and its
 contents are never opened — a pipe with no writer would otherwise block the
 collection indefinitely.
 
+**Credential material is also recognised by content, wherever it is.** A hard
+link to `/etc/shadow` is the same inode under another name — it resolves to
+itself, its path is in no table, and it was copied byte-for-byte before this
+rule existed. So any file whose colon-separated second field is a crypt hash,
+or that has the shape of a shadow or gshadow table, is withheld regardless of
+its name, and the skip list says why. `/etc/passwd` keeps its own redaction
+route. The rule is unit-tested against `/etc/group`, crontab, and `subuid`
+shapes to prove it does not over-block, and a normal run copies exactly the
+same files as before it existed.
+
 **Oversized content is capped and disclosed.** The report prints at most 4 MB of
 any one file, marking the cut and recording `PRINTED_TRUNCATED`; the copy in
 `raw_files/` is complete up to 64 MB, above which the file is recorded as
