@@ -237,6 +237,13 @@ sim_mount_all() {
     # everything below to this fixture.
     mount --make-rprivate "$R"
 
+    # A real host has a working process table; a chroot without /proc does
+    # not, and the collector's preflight rightly warns that a ps that lists
+    # nothing means a stopped command's children cannot be found. The
+    # simulation is of the OS, not of a broken ps.
+    mkdir -p "$R/proc"
+    mount --bind /proc "$R/proc" 2>/dev/null || mount -t proc proc "$R/proc" 2>/dev/null || true
+
     # Shims shadow /usr/sbin, which the collector's fixed PATH searches first.
     mount --bind "$RSHIMS" "$R/usr/sbin"
 

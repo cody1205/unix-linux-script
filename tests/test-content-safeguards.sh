@@ -1038,6 +1038,44 @@ else
 fi
 
 #############################################################################
+printf '\n== 25. the preflight knows what the time bounds themselves depend on ==\n'
+# Every bound is a sleep in a watchdog, and every tree kill starts from ps.
+# A sleep that cannot run made each bound a silent no-op; a ps that cannot
+# list processes leaves a stopped command's children running. The first is
+# refused up front like the other required tools; the second is a warning
+# on the console and in the log, because the collection is still sound.
+checks=`expr $checks + 1`
+if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null; then
+    mkdir -p "$WORK/pf/out"
+    printf '#!/bin/sh\nexit 1\n' > "$WORK/pf/broken"; chmod 755 "$WORK/pf/broken"
+    _sleep=`command -v sleep`; _ps=`command -v ps`
+    unshare -m sh -c "mount --bind '$WORK/pf/broken' '$_sleep' && sh '$COLLECTOR' --output-dir '$WORK/pf/out' </dev/null >/dev/null 2>'$WORK/pf/sleep.err'; echo \$? > '$WORK/pf/sleep.rc'" 2>/dev/null
+    if [ "`cat "$WORK/pf/sleep.rc" 2>/dev/null`" = "1" ] && grep -q 'depends on:.*sleep' "$WORK/pf/sleep.err" 2>/dev/null && [ "`ls "$WORK/pf/out" | wc -l`" = "0" ]; then
+        pass "a sleep that cannot run is refused before anything is collected"
+    else
+        fail "broken sleep: rc=`cat "$WORK/pf/sleep.rc" 2>/dev/null` stderr=`head -c 100 "$WORK/pf/sleep.err" 2>/dev/null | tr '\n' ' '`"
+    fi
+    checks=`expr $checks + 1`
+    rm -rf "$WORK/pf/out"; mkdir -p "$WORK/pf/out"
+    unshare -m sh -c "mount --bind '$WORK/pf/broken' '$_ps' && sh '$COLLECTOR' --output-dir '$WORK/pf/out' </dev/null >/dev/null 2>'$WORK/pf/ps.err'; echo \$? > '$WORK/pf/ps.rc'" 2>/dev/null
+    _pl="$WORK/pf/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
+    if [ "`cat "$WORK/pf/ps.rc" 2>/dev/null`" = "0" ] && grep -q '^WARNING: ps cannot list' "$WORK/pf/ps.err" 2>/dev/null && grep -q ' | WARN  | startup     | ps cannot list' "$_pl" 2>/dev/null \
+        && [ "`ls "$WORK/pf/out"/*.tar.gz 2>/dev/null | wc -l`" = "1" ]; then
+        pass "a ps that cannot list processes is a warning on the console and in the log, and the collection completes"
+    else
+        fail "broken ps: rc=`cat "$WORK/pf/ps.rc" 2>/dev/null` console=`grep -c 'ps cannot list' "$WORK/pf/ps.err" 2>/dev/null` logged=`grep -c 'ps cannot list' "$_pl" 2>/dev/null`"
+    fi
+    rm -rf "$WORK/pf"
+else
+    skip "cannot create a mount namespace here; preflight of sleep and ps not exercised"
+    if grep -q 'PREFLIGHT_PS_USABLE=no' "$COLLECTOR" && grep -q '_pf_missing sleep' "$COLLECTOR"; then
+        pass "the sleep requirement and the ps warning are present"
+    else
+        fail "the sleep requirement or the ps warning is missing"
+    fi
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

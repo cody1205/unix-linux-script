@@ -604,6 +604,13 @@ Stated here rather than discovered during an engagement:
   readable or not in the nine-column form (trusted-mode HP-UX) keep the
   per-account commands, capped at 2,000 accounts with a note, a `WARN` and a
   `PER_ACCOUNT_COMMAND_CAPPED` record. AIX uses `lsuser ALL`, one command.
+- **Section 10 findings are recorded per root** as `PRIVILEGED_BIT_SCAN`
+  manifest lines (`setuid` and `setgid`, `entries=`, `truncated=`), the way
+  Section 9 records `WORLD_WRITABLE_SCAN`; an `--app-dir` that contains the
+  output directory is recorded as `APP_DIR_CONTAINS_PACKAGE` and the listing
+  says so. The preflight now also requires `sleep`, which every time bound
+  depends on, and warns if `ps` cannot list processes, since that is how a
+  stopped command's children are found.
 - **Looking at a root is bounded too, and so is the home-directory review.**
   A `stat` of a directory on a hard NFS mount whose server has gone blocks in
   the kernel before any walk begins. Each scan root is probed and resolved

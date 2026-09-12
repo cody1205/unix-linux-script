@@ -2241,8 +2241,21 @@ name_service_usable() {
 # console full of "Terminated" reads as the collector having crashed.
 #
 # Usage: bounded_run SECONDS COMMAND [ARGS...]
+# The process table as "pid ppid" lines. The XPG form is first; HP-UX only
+# honours -o with UNIX95 set, and the last resort parses ps -ef, whose
+# second and third columns are PID and PPID on every System V descendant.
+process_table() {
+    _pt_out=`ps -e -o pid= -o ppid= 2>/dev/null`
+    if ! printf '%s\n' "$_pt_out" | grep -q '[0-9]' 2>/dev/null; then
+        _pt_out=`UNIX95=1 ps -e -o pid= -o ppid= 2>/dev/null`
+    fi
+    if ! printf '%s\n' "$_pt_out" | grep -q '[0-9]' 2>/dev/null; then
+        _pt_out=`ps -ef 2>/dev/null | awk 'NR > 1 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print $2, $3 }'`
+    fi
+    printf '%s\n' "$_pt_out"
+}
 process_tree_pids() {   # PID: the process and everything under it, deepest first
-    ps -e -o pid= -o ppid= 2>/dev/null | awk -v top="$1" '
+    process_table | awk -v top="$1" '
         $1 ~ /^[0-9]+$/ { parent[$1] = $2 }
         END {
             queue[1] = top; count = 1; i = 0
@@ -5309,12 +5322,28 @@ preflight_required_tools() {
     # printed into the report.
     [ "`printf 'ab' | dd bs=1 count=1 2>/dev/null`" = "a" ] || _pf_missing="$_pf_missing dd"
     [ "`printf 'a' | od -An -c 2>/dev/null | tr -d ' '`" = "a" ] || _pf_missing="$_pf_missing od"
+    # Every time bound in this script is a sleep in a watchdog. A sleep that
+    # cannot run would make each bound a no-op - the collection would still
+    # work, and could still hang on the first dead mount - so it is required.
+    sleep 0 2>/dev/null || _pf_missing="$_pf_missing sleep"
     if [ -n "$_pf_missing" ]; then
         printf 'FAIL: this host is missing, or cannot run, tools this script depends on:%s\n' "$_pf_missing" >&2
         printf '      Without them the report would be silently incomplete and the verdict\n' >&2
         printf '      could not be trusted, so nothing was collected. Nothing on this host\n' >&2
         printf '      was changed. Please check the tools above and run the script again.\n' >&2
         exit 1
+    fi
+    # ps is how a stopped job's whole process tree is found. Without it the
+    # bounds still fire, but only the job's top process can be signalled;
+    # its children would be left running on the host. Not fatal: a
+    # container image without ps is a real host, and the collection is
+    # still sound, but the operator should know before it starts.
+    PREFLIGHT_PS_USABLE=yes
+    if ! process_table | grep -q '[0-9]' 2>/dev/null; then
+        PREFLIGHT_PS_USABLE=no
+        printf 'WARNING: ps cannot list processes on this host. Time bounds still apply,\n' >&2
+        printf '         but a command stopped at a bound may leave its child processes\n' >&2
+        printf '         running; the collection log records this.\n' >&2
     fi
 }
 preflight_required_tools
@@ -5473,6 +5502,9 @@ log_event INFO startup "collection started on $HOSTNAME_VALUE (platform $OS_NAME
 log_event INFO startup "run mode: $RUN_PRIVILEGE_MODE"
 log_event INFO startup "invoked as: $SCRIPT_NAME"
 log_event INFO startup "this script is read-only and makes no configuration changes to this host"
+if [ "${PREFLIGHT_PS_USABLE:-yes}" = "no" ]; then
+    log_event WARN startup "ps cannot list processes on this host; a command stopped at a time bound may leave child processes running, because only its top process can be signalled"
+fi
 if [ "$EFFECTIVE_UID_VALUE" != "0" ]; then
     log_event WARN startup "running without root privileges; files readable only by root will be missing from this package"
 fi
