@@ -651,6 +651,24 @@ else
 fi
 
 #############################################################################
+printf '\n== 15. a terminal that goes away mid-run does not kill the collection ==\n'
+# "sudo ./script | head", "| less" quit early, "| tee" killed: the collector
+# writes a progress line to the terminal during the run, and with SIGPIPE at
+# its default the first write after the reader exits killed the shell itself
+# - mid-collection, exit 141, no verdict, no archive, lock left behind.
+checks=`expr $checks + 1`
+mkdir -p "$WORK/pipe"
+( sh "$COLLECTOR" --output-dir "$WORK/pipe" </dev/null 2>"$WORK/pipe-stderr.txt"; printf '%s\n' "$?" > "$WORK/pipe-rc.txt" ) | head -n 3 >/dev/null
+_prc=`cat "$WORK/pipe-rc.txt" 2>/dev/null`
+_pv=`verdict_of "$WORK/pipe"`
+_parc=`ls "$WORK/pipe"/*.tar.gz 2>/dev/null | wc -l | tr -d ' '`
+if [ "${_prc:-141}" -le 1 ] && [ -n "$_pv" ] && [ "$_parc" = "1" ] && [ ! -f "$WORK/pipe/.sox-itgc-collector.lock" ] && [ ! -s "$WORK/pipe-stderr.txt" ]; then
+    pass "piped into head: exit $_prc, verdict $_pv, archive built, no lock left, nothing on stderr"
+else
+    fail "piped into head: exit=${_prc:-none} verdict=${_pv:-none} archive=$_parc lock=`[ -f "$WORK/pipe/.sox-itgc-collector.lock" ] && echo left || echo removed` stderr=`wc -l < "$WORK/pipe-stderr.txt" 2>/dev/null` lines"
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

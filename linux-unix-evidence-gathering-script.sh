@@ -244,6 +244,16 @@ LC_MESSAGES=C
 LANG=C
 export LC_CTYPE LC_COLLATE LC_NUMERIC LC_TIME LC_MESSAGES LANG
 
+# SIGPIPE is ignored. The operator's terminal may be a pipe whose reader has
+# gone away - "sudo ./script | head", "| less" quit early, "| tee" killed -
+# and the collector writes a progress line to it during the run. With the
+# default disposition the first such write after the reader exits delivers
+# SIGPIPE to this shell, which dies mid-collection: no verdict, no archive,
+# exit status 141, and the lock left behind. Ignored, the write simply fails,
+# every terminal write here already tolerates that, and the collection - whose
+# report goes to a file, not the terminal - runs to its proper end.
+trap '' PIPE
+
 # The run lock: set when the evidence directory is prepared, removed at exit.
 LOCK_FILE=""
 
@@ -4763,6 +4773,18 @@ handle_interruption() {
     if [ -n "$LOCK_FILE" ]; then
         rm -f "$LOCK_FILE" 2>/dev/null
     fi
+    # An interrupted report is still going to be read - that is how the
+    # interruption is discovered - so it gets the same control-character
+    # sanitisation as a complete one. A half-finished sanitisation file from
+    # the normal path is removed rather than left in the package.
+    if [ -n "$REPORT_FILE" ] && [ -f "$REPORT_FILE" ]; then
+        rm -f "$REPORT_FILE.sanitizing" 2>/dev/null
+        sanitize_text_file "$REPORT_FILE"
+    fi
+    if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+        rm -f "$LOG_FILE.sanitizing" 2>/dev/null
+        sanitize_text_file "$LOG_FILE"
+    fi
 
     log_event ERROR completion "collection was interrupted by $_interrupt_signal before it finished; this package is incomplete and must not be relied upon"
 
@@ -5170,8 +5192,11 @@ if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
     sanitize_text_file "$LOG_FILE"
 fi
 
+# The replay is a courtesy to an operator watching the terminal; a terminal
+# that has gone away (a pipe whose reader exited) must not turn it into a
+# "write error" on stderr or anything worse.
 if [ -r "$REPORT_FILE" ]; then
-    cat "$REPORT_FILE" >&3
+    cat "$REPORT_FILE" >&3 2>/dev/null || :
 fi
 
 # Leave the operator with the verdict and where to find the detail. This is the
