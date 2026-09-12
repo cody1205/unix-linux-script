@@ -147,6 +147,18 @@ case "$TARGET" in
         ;;
 esac
 
+# A directory with neither a report/ nor a metadata/ subdirectory is not an
+# evidence package at all - most likely the wrong path, such as report/ inside
+# one. That is "could not be examined" (exit 3), not "incomplete, request a
+# fresh collection" (exit 2), which would send the auditor back to the client
+# over a typo.
+if [ ! -d "$ROOT_DIR/report" ] && [ ! -d "$ROOT_DIR/metadata" ]; then
+    printf 'CANNOT VERIFY: %s is not an evidence package directory (no report/ or\n' "$TARGET" >&2
+    printf 'metadata/ inside it). Point this at the %s directory, its parent, or\n' "$PACKAGE_DIR_NAME" >&2
+    printf 'the .tar.gz archive.\n' >&2
+    exit 3
+fi
+
 REPORT="$ROOT_DIR/report/SOX-ITGC-AUDIT-REPORT.txt"
 LOG="$ROOT_DIR/metadata/COLLECTION-LOG.txt"
 MANIFEST="$ROOT_DIR/metadata/MANIFEST.txt"

@@ -169,6 +169,9 @@ printf '\n== unexaminable inputs are distinguished from bad ones ==\n'
 head -c 400 "$ARCHIVE" > "$WORK/corrupt.tar.gz"
 expect_exit "archive truncated in transfer" 3 "$WORK/corrupt.tar.gz"
 expect_exit "target does not exist" 3 "$WORK/absent.tar.gz"
+# A subdirectory of a package is the wrong path, not a damaged package: it
+# must not send the auditor back to the client for a fresh collection.
+expect_exit "a subdirectory of a package (wrong path)" 3 "`fresh_copy subdir`/report"
 
 printf '\n== an archive that could write outside its extraction directory is refused ==\n'
 pass() { printf 'ok        %s\n' "$1"; }
