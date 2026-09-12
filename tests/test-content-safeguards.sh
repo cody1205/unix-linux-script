@@ -57,10 +57,16 @@ fi
 SENTINEL="SENTINEL-CONTENT-SAFEGUARD-7c3e9a1d"
 SECRET=/root/.content-safeguard-secret
 PLANTED=""
+# A planted name containing a newline cannot live in the whitespace-separated
+# PLANTED list - the cleanup loop would split it in two and remove neither,
+# leaving junk in /etc/cron.d on whatever machine ran this test. It is held
+# on its own and removed explicitly.
+NL_PLANT=""
 
 WORK=`mktemp -d`
 cleanup() {
     for p in $PLANTED; do rm -f "$p" 2>/dev/null; done
+    [ -n "$NL_PLANT" ] && rm -f "$NL_PLANT" 2>/dev/null
     rm -f "$SECRET" 2>/dev/null
     chmod -R u+rwX "$WORK" 2>/dev/null || :
     rm -rf "$WORK" 2>/dev/null || :
@@ -473,9 +479,9 @@ printf '\n== 11. a filename containing |, %% or a newline cannot corrupt the man
 # "zz<newline>probe" split its own COPIED record across two lines, and the
 # receipt verifier then reported two files missing from a complete package.
 if [ -d /etc/cron.d ]; then
-    _nl='/etc/cron.d/zz-safeguard-nl
+    NL_PLANT='/etc/cron.d/zz-safeguard-nl
 probe'
-    printf '# h\n' > "$_nl" && plant "$_nl"
+    printf '# h\n' > "$NL_PLANT"
     printf '# h\n' > '/etc/cron.d/zz-safeguard-pipe|probe' && plant '/etc/cron.d/zz-safeguard-pipe|probe'
     printf '# h\n' > '/etc/cron.d/zz-safeguard-pct%probe' && plant '/etc/cron.d/zz-safeguard-pct%probe'
     OUT11="$WORK/names"
@@ -500,6 +506,8 @@ probe'
     fi
     for p in $PLANTED; do rm -f "$p"; done
     PLANTED=""
+    rm -f "$NL_PLANT"
+    NL_PLANT=""
 else
     skip "/etc/cron.d absent; hostile-name case not exercised"
 fi
