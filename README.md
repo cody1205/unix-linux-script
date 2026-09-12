@@ -414,10 +414,21 @@ and returns an exit code so it can gate an automated intake process:
 | `2` | Incomplete, truncated, or the collection reported errors. Request a fresh collection. |
 | `3` | Could not be examined at all (missing, corrupt, not a package). |
 
-It checks that the report reaches its execution summary and the log reaches its
+It checks that the report reaches its closing section and the log reaches its
 verdict — both written last, so their absence means the collection was captured
 mid-write — that the manifest names no file the package lacks, and that you can
-actually read what arrived.
+actually read what arrived. The closing-section check looks at the *end* of the
+report, not anywhere in it, because a source file printed into the report can
+contain any words at all.
+
+**It refuses, before extracting anything, an archive with members that could
+write outside the extraction directory** — an absolute path, a `..` component,
+or a symbolic or hard link — with exit `3` and a message saying so. The
+collector writes only regular files under one relative directory, so such
+members cannot be its output; the auditor should hear "this archive is not what
+the collector produced, do not extract it by hand", not "corrupt or truncated".
+GNU and BSD tar mostly defend against these on their own, but their defaults
+differ and the message would be the wrong one.
 
 `HOW-TO-READ-THIS-EVIDENCE.txt` carries a two-command version of the same check,
 so a recipient without this repository can still tell a complete delivery from a

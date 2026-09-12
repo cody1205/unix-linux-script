@@ -283,6 +283,7 @@ TEST_MODE=no
 SHOW_HELP=no
 ARGUMENT_ERROR=no
 APP_DIRECTORIES=""
+APP_DIRECTORY_FLAGS=0
 OUTPUT_DIRECTORY=""
 expect_app_dir_value=no
 expect_output_dir_value=no
@@ -291,6 +292,7 @@ for argument in "$@"; do
     if [ "$expect_app_dir_value" = "yes" ]; then
         APP_DIRECTORIES="$APP_DIRECTORIES
 $argument"
+        APP_DIRECTORY_FLAGS=`expr "$APP_DIRECTORY_FLAGS" + 1`
         expect_app_dir_value=no
         continue
     fi
@@ -314,6 +316,7 @@ $argument"
             if [ -n "$app_dir_value" ]; then
                 APP_DIRECTORIES="$APP_DIRECTORIES
 $app_dir_value"
+                APP_DIRECTORY_FLAGS=`expr "$APP_DIRECTORY_FLAGS" + 1`
             fi
             ;;
         --output-dir)
@@ -335,6 +338,33 @@ done
 OUTPUT_DIRECTORY_FROM_FLAG=no
 if [ -n "$OUTPUT_DIRECTORY" ]; then
     OUTPUT_DIRECTORY_FROM_FLAG=yes
+fi
+
+# A path containing a newline cannot be carried through the newline-separated
+# application-directory list or written into the manifest as a single record.
+# One given as --app-dir was split into two paths that did not exist, and the
+# directory the operator asked about was never listed - with only a "does not
+# exist" warning to say so. Refuse it up front instead.
+_arg_nl='
+'
+case "$OUTPUT_DIRECTORY" in
+    *"$_arg_nl"*)
+        printf 'FAIL: the --output-dir value contains a newline character, which is not supported.\n' >&2
+        exit 1
+        ;;
+esac
+if [ -n "$APP_DIRECTORIES" ]; then
+    _arg_dirs_seen=0
+    _arg_dirs_ifs=$IFS
+    IFS="$_arg_nl"
+    for _arg_dir in $APP_DIRECTORIES; do
+        [ -n "$_arg_dir" ] && _arg_dirs_seen=`expr "$_arg_dirs_seen" + 1`
+    done
+    IFS=$_arg_dirs_ifs
+    if [ "$_arg_dirs_seen" -ne "$APP_DIRECTORY_FLAGS" ]; then
+        printf 'FAIL: an --app-dir value contains a newline character, which is not supported.\n' >&2
+        exit 1
+    fi
 fi
 
 if [ "$expect_app_dir_value" = "yes" ]; then

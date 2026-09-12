@@ -293,6 +293,18 @@ else
     fail "exit=$rc; wrote to cwd=`[ -d "$WORK/cwd/SOX-ITGC-AUDIT-LINUX-UNIX" ] && echo yes || echo no`"
     head -3 "$WORK/cwd/err.txt" | sed 's/^/            /'
 fi
+# A path argument containing a newline was split in two: an --app-dir became
+# two directories that did not exist, and the one the operator asked about was
+# never listed, with only a "does not exist" warning to say so.
+checks=`expr $checks + 1`
+sh "$COLLECTOR" --output-dir "$WORK/cwd/nl" --app-dir "$WORK/one
+two" </dev/null >/dev/null 2>"$WORK/cwd/nl.err"
+_nlrc=$?
+if [ "$_nlrc" = "1" ] && grep -q 'newline character' "$WORK/cwd/nl.err" && ! [ -d "$WORK/cwd/nl" ]; then
+    pass "an --app-dir containing a newline is refused up front, with nothing written"
+else
+    fail "newline in --app-dir: exit=$_nlrc, output created=`[ -d "$WORK/cwd/nl" ] && echo yes || echo no`"
+fi
 
 #############################################################################
 printf '\n== 5. a broken core tool stops the run before anything is collected ==\n'

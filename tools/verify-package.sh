@@ -90,6 +90,35 @@ case "$TARGET" in
             printf 'CANNOT VERIFY: could not create a temporary directory\n' >&2
             exit 3
         }
+        # Refuse an archive that could write outside the extraction directory
+        # BEFORE handing it to tar. GNU and BSD tar strip or refuse absolute
+        # and ".." members by default, but the defaults differ, an old AIX tar
+        # does neither, and a symbolic link followed by a member written
+        # through it defeats some versions. None of these can appear in an
+        # archive the collector built - it writes regular files under one
+        # relative directory - so their presence means the archive is not the
+        # collector's output, which the auditor should hear as such rather
+        # than as "corrupt or truncated".
+        _listing=`tar -tvf "$TARGET_PATH" 2>/dev/null || tar -tvzf "$TARGET_PATH" 2>/dev/null`
+        _names=`tar -tf "$TARGET_PATH" 2>/dev/null || tar -tzf "$TARGET_PATH" 2>/dev/null`
+        _hostile=""
+        if printf '%s\n' "$_listing" | grep -q '^[lh]'; then
+            _hostile="$_hostile links"
+        fi
+        if printf '%s\n' "$_names" | grep -q '^/'; then
+            _hostile="$_hostile absolute-paths"
+        fi
+        if printf '%s\n' "$_names" | grep -qE '(^|/)\.\.(/|$)'; then
+            _hostile="$_hostile parent-directory-components"
+        fi
+        if [ -n "$_hostile" ]; then
+            printf 'CANNOT VERIFY: %s contains archive members that could write outside\n' "$TARGET" >&2
+            printf 'the directory it is extracted into (%s).\n' "`printf '%s' "$_hostile" | sed 's/^ //; s/ /, /g'`" >&2
+            printf 'The collector never produces such members, so this archive is not its\n' >&2
+            printf 'output as delivered. Do NOT extract it by hand. Treat it as suspect and\n' >&2
+            printf 'raise it with the client contact before anything else is done with it.\n' >&2
+            exit 3
+        fi
         if ! ( cd "$WORK" && tar -xf "$TARGET_PATH" ) 2>/dev/null; then
             # Retry without assuming the archive is compressed.
             if ! ( cd "$WORK" && tar -xzf "$TARGET_PATH" ) 2>/dev/null; then
