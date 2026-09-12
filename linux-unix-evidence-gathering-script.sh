@@ -300,6 +300,10 @@ expect_output_dir_value=no
 
 for argument in "$@"; do
     if [ "$expect_app_dir_value" = "yes" ]; then
+        if [ -z "$argument" ]; then
+            printf 'FAIL: --app-dir was given an empty value; it needs a directory path.\n' >&2
+            exit 1
+        fi
         APP_DIRECTORIES="$APP_DIRECTORIES
 $argument"
         APP_DIRECTORY_FLAGS=`expr "$APP_DIRECTORY_FLAGS" + 1`
@@ -323,11 +327,13 @@ $argument"
             ;;
         --app-dir=*)
             app_dir_value=${argument#--app-dir=}
-            if [ -n "$app_dir_value" ]; then
-                APP_DIRECTORIES="$APP_DIRECTORIES
-$app_dir_value"
-                APP_DIRECTORY_FLAGS=`expr "$APP_DIRECTORY_FLAGS" + 1`
+            if [ -z "$app_dir_value" ]; then
+                printf 'FAIL: --app-dir= was given an empty value; it needs a directory path.\n' >&2
+                exit 1
             fi
+            APP_DIRECTORIES="$APP_DIRECTORIES
+$app_dir_value"
+            APP_DIRECTORY_FLAGS=`expr "$APP_DIRECTORY_FLAGS" + 1`
             ;;
         --output-dir)
             expect_output_dir_value=yes
@@ -4680,7 +4686,18 @@ print_application_directory_listing() {
         _adp_state=unresponsive
     fi
     case "$_adp_state" in
-        ok) ;;
+        ok)
+            case "$COLLECTION_DIRECTORY" in
+                "$app_path"|"$app_path"/*)
+                    printf 'NOTE: the output directory of this collection lies inside this\n'
+                    printf '  application directory, so the evidence package itself - its report,\n'
+                    printf '  manifest and copied files - appears in the listing below. Those\n'
+                    printf '  entries are the collection, not the application.\n'
+                    log_event INFO evidence "the collection directory $COLLECTION_DIRECTORY lies inside application directory $app_path; the package appears in its own Section 22 listing"
+                    record_manifest_line "APP_DIR_CONTAINS_PACKAGE|`manifest_path "$app_path"`"
+                    ;;
+            esac
+            ;;
         missing)
             printf 'Result: path does not exist\n'
             record_manifest_line "APP_DIR_MISSING|`manifest_path "$app_path"`"
@@ -5282,7 +5299,10 @@ if [ -n "$APP_DIRECTORIES" ]; then
         fi
     done
     IFS=$_abs_app_ifs
-    APP_DIRECTORIES=$_abs_app_list
+    # The same directory named twice - "/opt" and "/opt/", or an operator
+    # pasting a list with a repeat - was listed twice, in full. Once is the
+    # evidence; the manifest records one APP_DIR_LISTED per directory.
+    APP_DIRECTORIES=`printf '%s\n' "$_abs_app_list" | awk '!seen[$0]++'`
 fi
 
 prepare_collection_directory

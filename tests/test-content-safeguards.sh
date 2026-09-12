@@ -940,6 +940,42 @@ fi
 for _sp in `ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && $3 == "600") { print $1 }'`; do kill "$_sp" 2>/dev/null; done
 
 #############################################################################
+printf '\n== 22. argument edge cases are refused or normalised, never half-applied ==\n'
+# An empty --app-dir value was reported as "contains a newline"; the same
+# directory named twice ("/opt" and "/opt/") was listed twice in full; and a
+# package written inside its own --app-dir appeared in the listing with no
+# explanation.
+mkdir -p "$WORK/args/out" "$WORK/args/app/sub"
+checks=`expr $checks + 1`
+_e1=`sh "$COLLECTOR" --output-dir "$WORK/args/out" --app-dir '' </dev/null 2>&1 >/dev/null; echo "rc=$?"`
+_e2=`sh "$COLLECTOR" --output-dir "$WORK/args/out" --app-dir= </dev/null 2>&1 >/dev/null; echo "rc=$?"`
+if printf '%s' "$_e1" | grep -q 'empty value' && printf '%s' "$_e1" | grep -q 'rc=1' && printf '%s' "$_e2" | grep -q 'empty value' && printf '%s' "$_e2" | grep -q 'rc=1'; then
+    pass "an empty --app-dir value is refused up front, in both spellings, and says why"
+else
+    fail "empty --app-dir: [`printf '%s' "$_e1" | tr '\n' ' '`] [`printf '%s' "$_e2" | tr '\n' ' '`]"
+fi
+checks=`expr $checks + 1`
+rm -rf "$WORK/args/out"; mkdir -p "$WORK/args/out"
+sh "$COLLECTOR" --output-dir "$WORK/args/out" --app-dir "$WORK/args/app" --app-dir "$WORK/args/app/" </dev/null >/dev/null 2>&1
+_am="$WORK/args/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/MANIFEST.txt"
+if [ "`grep -c '^APP_DIR_LISTED|' "$_am" 2>/dev/null`" = "1" ]; then
+    pass "the same directory named twice is listed once"
+else
+    fail "duplicate --app-dir produced `grep -c '^APP_DIR_LISTED|' "$_am" 2>/dev/null` listings"
+fi
+checks=`expr $checks + 1`
+rm -rf "$WORK/args/out"; mkdir -p "$WORK/args/app/out"
+sh "$COLLECTOR" --output-dir "$WORK/args/app/out" --app-dir "$WORK/args/app" </dev/null >/dev/null 2>&1
+_am="$WORK/args/app/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/MANIFEST.txt"
+_arp="$WORK/args/app/out/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+if grep -q '^APP_DIR_CONTAINS_PACKAGE|' "$_am" 2>/dev/null && grep -q 'evidence package itself' "$_arp" 2>/dev/null; then
+    pass "a package written inside its own --app-dir is pointed out in the listing and recorded"
+else
+    fail "package inside app-dir: record=`grep -c '^APP_DIR_CONTAINS_PACKAGE|' "$_am" 2>/dev/null` note=`grep -c 'evidence package itself' "$_arp" 2>/dev/null`"
+fi
+rm -rf "$WORK/args"
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then
