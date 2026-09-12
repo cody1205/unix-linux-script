@@ -381,9 +381,9 @@ sim_verify_common() {
     # verdicts above WARN lines. Counting the lines here catches any return of
     # that class of bug regardless of which call site regresses.
     sim_check
-    _sim_warn_lines=`grep -c ' | WARN  | ' "$LOGFILE" 2>/dev/null`
+    _sim_warn_lines=`grep -c '^[^|]* | WARN  | ' "$LOGFILE" 2>/dev/null`
     [ -n "$_sim_warn_lines" ] || _sim_warn_lines=0
-    _sim_err_lines=`grep -c ' | ERROR | ' "$LOGFILE" 2>/dev/null`
+    _sim_err_lines=`grep -c '^[^|]* | ERROR | ' "$LOGFILE" 2>/dev/null`
     [ -n "$_sim_err_lines" ] || _sim_err_lines=0
     _sim_final_warn=`sed -n 's/^FINAL_WARNINGS: //p' "$LOGFILE" 2>/dev/null | tail -1`
     _sim_final_err=`sed -n 's/^FINAL_ERRORS: //p' "$LOGFILE" 2>/dev/null | tail -1`

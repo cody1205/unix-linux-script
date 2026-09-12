@@ -1187,8 +1187,12 @@ close_log_addendum() {
 # as a fallback for the case where no log file could be created at all.
 #
 # The grep patterns match the padded column layout log_event writes
-# (" | WARN  | ", " | ERROR | ") and cannot match the prose in the header or
-# summary, which never carries the surrounding pipe columns.
+# (" | WARN  | ", " | ERROR | ") anchored to the start of the line with no
+# "|" before the level column - the timestamp field never contains one. An
+# unanchored match counted a WARN line whose MESSAGE named a file called
+# "zz | ERROR | x" as an error, and the verdict for a run with no errors was
+# COMPLETED_WITH_ERRORS. The header and summary prose never carries the
+# column layout at all.
 #
 # The file can undercount too, in exactly one circumstance: when the output
 # filesystem has filled up, the append that would have recorded an ERROR fails,
@@ -1197,8 +1201,8 @@ close_log_addendum() {
 # maximum cannot be lower than the truth.
 recount_log_levels() {
     if [ "$LOG_READY" = "yes" ] && [ -f "$LOG_FILE" ]; then
-        _rll_warn=`grep -c ' | WARN  | ' "$LOG_FILE" 2>/dev/null`
-        _rll_error=`grep -c ' | ERROR | ' "$LOG_FILE" 2>/dev/null`
+        _rll_warn=`grep -c '^[^|]* | WARN  | ' "$LOG_FILE" 2>/dev/null`
+        _rll_error=`grep -c '^[^|]* | ERROR | ' "$LOG_FILE" 2>/dev/null`
         case "$_rll_warn" in ''|*[!0-9]*) _rll_warn=0 ;; esac
         case "$_rll_error" in ''|*[!0-9]*) _rll_error=0 ;; esac
         if [ "$_rll_warn" -gt "$LOG_WARN_COUNT" ]; then

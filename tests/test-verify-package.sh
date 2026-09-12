@@ -101,7 +101,7 @@ expect_exit "intact extracted directory" "$reference_exit" "`fresh_copy intact`"
 # relied on to provide. Construct one: strip the WARN lines and set the verdict to
 # match, so the package is internally consistent and genuinely clean.
 target=`fresh_copy clean`
-grep -v ' | WARN  | ' "$target/metadata/COLLECTION-LOG.txt" \
+grep -v '^[^|]* | WARN  | ' "$target/metadata/COLLECTION-LOG.txt" \
     | sed -e 's/^RESULT: .*/RESULT: COMPLETED_CLEAN/' \
           -e 's/^FINAL_RESULT: .*/FINAL_RESULT: COMPLETED_CLEAN/' \
           -e 's/^WARNINGS: .*/WARNINGS: 0/' \

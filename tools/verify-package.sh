@@ -299,9 +299,9 @@ if [ -z "$verdict" ]; then
     verdict_source=RESULT
 fi
 
-warn_lines=`grep -c ' | WARN  | ' "$LOG" 2>/dev/null`
+warn_lines=`grep -c '^[^|]* | WARN  | ' "$LOG" 2>/dev/null`
 [ -n "$warn_lines" ] || warn_lines=0
-error_lines=`grep -c ' | ERROR | ' "$LOG" 2>/dev/null`
+error_lines=`grep -c '^[^|]* | ERROR | ' "$LOG" 2>/dev/null`
 [ -n "$error_lines" ] || error_lines=0
 
 printf '  %s: %s\n' "$verdict_source" "${verdict:-none found}"
@@ -328,7 +328,7 @@ esac
 if [ "$warn_lines" -gt 0 ]; then
     printf '\n'
     printf '  Warnings recorded during collection:\n'
-    grep ' | WARN  | ' "$LOG" 2>/dev/null | sed 's/^/    /' | head -20
+    grep '^[^|]* | WARN  | ' "$LOG" 2>/dev/null | sed 's/^/    /' | head -20
     if [ "$warn_lines" -gt 20 ]; then
         printf '    ... and %s more; see the collection log\n' "`expr "$warn_lines" - 20`"
     fi
@@ -337,7 +337,7 @@ fi
 if [ "$error_lines" -gt 0 ]; then
     printf '\n'
     printf '  Errors recorded during collection:\n'
-    grep ' | ERROR | ' "$LOG" 2>/dev/null | sed 's/^/    /' | head -20
+    grep '^[^|]* | ERROR | ' "$LOG" 2>/dev/null | sed 's/^/    /' | head -20
 fi
 
 # ---------------------------------------------------------------------------

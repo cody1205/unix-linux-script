@@ -60,13 +60,16 @@ PLANTED=""
 # A planted name containing a newline cannot live in the whitespace-separated
 # PLANTED list - the cleanup loop would split it in two and remove neither,
 # leaving junk in /etc/cron.d on whatever machine ran this test. It is held
-# on its own and removed explicitly.
+# on its own and removed explicitly. The same for a name containing spaces
+# and log-column text.
 NL_PLANT=""
+COL_PLANT=""
 
 WORK=`mktemp -d`
 cleanup() {
     for p in $PLANTED; do rm -f "$p" 2>/dev/null; done
     [ -n "$NL_PLANT" ] && rm -f "$NL_PLANT" 2>/dev/null
+    [ -n "$COL_PLANT" ] && rm -f "$COL_PLANT" 2>/dev/null
     rm -f "$SECRET" 2>/dev/null
     chmod -R u+rwX "$WORK" 2>/dev/null || :
     rm -rf "$WORK" 2>/dev/null || :
@@ -522,6 +525,42 @@ probe'
     NL_PLANT=""
 else
     skip "/etc/cron.d absent; hostile-name case not exercised"
+fi
+
+#############################################################################
+printf '\n== 12. a filename that looks like a log column cannot forge the verdict ==\n'
+# The verdict is recounted from the collection log by matching the level
+# column. Log messages embed host paths verbatim, so a WARN about a file named
+# "zz | ERROR | x" once matched the ERROR pattern: a run with no errors was
+# COMPLETED_WITH_ERRORS, exit 1, and the verifier rejected the package.
+if [ -d /etc/cron.d ]; then
+    COL_PLANT='/etc/cron.d/zz-safeguard | ERROR | x'
+    mkfifo "$COL_PLANT"
+    OUT12="$WORK/logcol"
+    run_collector "$OUT12"
+    _rc12=$?
+    L12="$OUT12/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
+    _err12=`sed -n 's/^FINAL_ERRORS: //p' "$L12" 2>/dev/null | tail -1`
+    _v12=`verdict_of "$OUT12"`
+    checks=`expr $checks + 1`
+    if [ "$_rc12" = "0" ] && [ "${_err12:-x}" = "0" ] && [ "$_v12" != "COMPLETED_WITH_ERRORS" ] && [ "$_v12" != "FAILED" ]; then
+        pass "a WARN about that file is counted as a warning, not an error (verdict $_v12)"
+    else
+        fail "the filename forged the verdict: exit=$_rc12 errors=${_err12:-none} verdict=$_v12"
+    fi
+    checks=`expr $checks + 1`
+    _arc12=`ls "$OUT12"/*.tar.gz 2>/dev/null | head -1`
+    sh "$REPO_ROOT/tools/verify-package.sh" "$_arc12" >/dev/null 2>&1
+    _vrc12=$?
+    if [ "$_vrc12" -le 1 ]; then
+        pass "the receipt verifier counts it the same way (exit $_vrc12)"
+    else
+        fail "the verifier rejected the package (exit $_vrc12)"
+    fi
+    rm -f "$COL_PLANT"
+    COL_PLANT=""
+else
+    skip "/etc/cron.d absent; log-column case not exercised"
 fi
 
 #############################################################################
