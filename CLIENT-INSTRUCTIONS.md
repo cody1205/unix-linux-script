@@ -33,7 +33,7 @@ form that changes state.
 | | |
 |---|---|
 | **Writes** | Only inside the `--output-dir` you choose, plus the archive in that same directory. Nothing in `/tmp`, nothing in any system path. One disclosed exception below. |
-| **Sends** | Nothing. No network connections, no sockets, no outbound anything. |
+| **Sends** | Nothing. The script itself opens no network connections, no sockets, no outbound anything. One thing it cannot control: account and group lookups go through your host's own name service (`getent`), so on a directory-joined host your resolver — `sssd`, `nscd`, or an in-process LDAP client — may contact your directory server exactly as any login would. Nothing is sent to us. Each such lookup is bounded to 45 seconds; if the directory does not answer, the script says so and uses the local files. |
 | **Reads** | OS configuration relevant to access control, and only regular files: a named pipe, socket, or device node where a configuration file is expected is noted and never opened. No user data, no application data, no databases. |
 | **Never collects** | Password hashes (`/etc/shadow`, AIX `/etc/security/passwd`), SSH private keys, Kerberos keytabs, LDAP bind secrets — whether reached by their own path, through a symbolic link at some other name, or as a hard link or stray copy recognised by its contents. Links into home directories are not followed either. |
 | **Needs** | Root via `sudo`, a few hundred MB of free space, typically 1–10 minutes. |
@@ -325,7 +325,13 @@ and do not cross into network-mounted storage. If you would prefer a maintenance
 window that is fine — nothing about it is time-sensitive.
 
 **Does it phone home or transmit anything?** No. It makes no network connections
-and contains no command that could. Verify it with the `strace` check above.
+and contains no command that could. Verify it with the `strace` check above. The
+one caveat is the name service: `getent` resolves accounts and groups through
+your host's own configuration, so on a directory-joined host that resolver may
+talk to your directory server — the same thing that happens at every login. If
+your resolver is an in-process LDAP client rather than `sssd` or `nscd`, the
+`strace` check will show that connection; it is the host's, made on the
+script's behalf, to your own server.
 
 **Could it lock accounts, expire passwords, or change a shell?** No. Where a
 platform's account-status command has a dangerous form — AIX `passwd -s` changes

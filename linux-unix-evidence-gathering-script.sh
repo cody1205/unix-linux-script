@@ -2168,16 +2168,112 @@ privileged_group_names() {
     esac
 }
 
+# Name-service queries, bounded.
+#
+# getent answers through the host's name service, and on a directory-joined
+# host that means sssd, nscd, or an in-process LDAP client talking to a
+# directory server. When that server is down or unreachable, getent blocks for
+# the resolver's full retry cycle - which can be minutes, or forever - and a
+# getent that never answered hung the collection until it was killed. So each
+# query runs with a bound. The first that times out marks the name service
+# unusable for the rest of the run, logs why, and every account and group
+# section from then on reads the local files instead and says so.
+NAME_SERVICE_TIMEOUT_SECONDS=45
+NAME_SERVICE_BROKEN=no
+
+# The "broken" state is kept in a file, not only a variable: the query runs
+# inside command substitutions, and a variable set in that subshell dies with
+# it. Without the file, every one of the six queries waited its full bound in
+# turn - 270 seconds - before the run was killed. The file lives beside the
+# lock, outside the package, and is removed at exit.
+name_service_state_file() {
+    printf '%s/.sox-itgc-name-service-broken' "${WORKING_DIRECTORY:-.}"
+}
+name_service_is_broken() {
+    [ "$NAME_SERVICE_BROKEN" = "yes" ] || [ -f "`name_service_state_file`" ]
+}
+name_service_usable() {
+    command_exists getent && ! name_service_is_broken
+}
+
+# Usage: name_service_query DATABASE [KEY]. Prints what getent printed;
+# returns getent's status, or 1 with nothing printed after a timeout.
+name_service_query() {
+    if name_service_is_broken; then
+        return 1
+    fi
+    _nsq_out="${WORKING_DIRECTORY:-.}/.sox-itgc-name-service.$$"
+    _nsq_timer_pidfile="$_nsq_out.timer"
+    getent "$@" > "$_nsq_out" 2>/dev/null &
+    _nsq_pid=$!
+    # The watchdog. Its sleep's PID is written to a file the moment it exists,
+    # because killing the watchdog alone re-parents its sleep to init where
+    # nothing can find it, and a 45-second sleep was left behind on every run.
+    # getent is killed only if the sleep ran its full course: a sleep ended by
+    # the parent returns non-zero, and by then getent's PID may already belong
+    # to some other process.
+    (
+        sleep "$NAME_SERVICE_TIMEOUT_SECONDS" &
+        _nsq_sleep=$!
+        printf '%s\n' "$_nsq_sleep" > "$_nsq_timer_pidfile" 2>/dev/null
+        wait "$_nsq_sleep"
+        if [ "$?" -eq 0 ]; then
+            kill "$_nsq_pid" 2>/dev/null
+        fi
+    ) &
+    _nsq_timer=$!
+    wait "$_nsq_pid"
+    _nsq_rc=$?
+    # Stop the watchdog: its sleep first, by the PID it recorded, then itself.
+    _nsq_i=0
+    while [ ! -s "$_nsq_timer_pidfile" ] && [ "$_nsq_i" -lt 500 ] && kill -0 "$_nsq_timer" 2>/dev/null; do
+        _nsq_i=`expr "$_nsq_i" + 1`
+    done
+    _nsq_sleep_pid=`cat "$_nsq_timer_pidfile" 2>/dev/null`
+    if [ -n "$_nsq_sleep_pid" ]; then
+        kill "$_nsq_sleep_pid" 2>/dev/null
+    fi
+    kill "$_nsq_timer" 2>/dev/null
+    wait "$_nsq_timer" 2>/dev/null
+    rm -f "$_nsq_timer_pidfile" 2>/dev/null
+    if [ "$_nsq_rc" -gt 128 ]; then
+        NAME_SERVICE_BROKEN=yes
+        : > "`name_service_state_file`" 2>/dev/null
+        rm -f "$_nsq_out" 2>/dev/null
+        log_event WARN evidence "the name service did not answer 'getent $*' within ${NAME_SERVICE_TIMEOUT_SECONDS}s - a directory server that is down or unreachable, most likely; account and group evidence from here on is taken from the local files only, so directory-sourced accounts are not represented"
+        record_manifest_line "NAME_SERVICE_TIMEOUT|getent $*|seconds=$NAME_SERVICE_TIMEOUT_SECONDS|fallback=local_files"
+        return 1
+    fi
+    cat "$_nsq_out" 2>/dev/null
+    rm -f "$_nsq_out" 2>/dev/null
+    return "$_nsq_rc"
+}
+
+# The privileged-group lines from the local file, used when the name service
+# is absent or has stopped answering.
+print_privileged_group_from_file() {
+    awk -F: '$1 == "'"$1"'" { print "- " $1 ": " $4; found = 1 } END { if (!found) exit 1 }' /etc/group 2>/dev/null
+}
+
 print_group_membership_summary() {
     found=no
 
-    if command_exists getent; then
+    if name_service_usable; then
         record_manifest_line "GETENT_QUERY|group privileged|source=name_service"
         record_file_reference /etc/group
         for _priv_group in `privileged_group_names`; do
-            if getent group "$_priv_group" >/dev/null 2>&1; then
-                getent group "$_priv_group" | awk -F: '{print "- " $1 ": " $4}'
+            _pg_line=`name_service_query group "$_priv_group"`
+            if [ -n "$_pg_line" ]; then
+                printf '%s\n' "$_pg_line" | awk -F: '{print "- " $1 ": " $4}'
                 found=yes
+            elif name_service_is_broken && file_readable /etc/group; then
+                # The name service stopped answering part-way through: the
+                # remaining groups come from the local file.
+                if print_privileged_group_from_file "$_priv_group"; then
+                    found=yes
+                else
+                    printf '%s\n' "- $_priv_group: not present on this host (local file; name service unavailable)"
+                fi
             else
                 printf '%s\n' "- $_priv_group: not present on this host"
             fi
@@ -2265,10 +2361,10 @@ print_duplicate_uid_gid_review() {
 # This function prints group membership information from the system's available
 # name service interface or local group file. It does not change group records.
 print_all_groups() {
-    if command_exists getent; then
+    if name_service_usable && _ag_out=`name_service_query group` && [ -n "$_ag_out" ]; then
         record_manifest_line "GETENT_QUERY|group ALL|source=name_service"
         record_file_reference /etc/group
-        getent group 2>/dev/null | awk -F: '{print $1 ": " $4}'
+        printf '%s\n' "$_ag_out" | awk -F: '{print $1 ": " $4}'
     elif file_readable /etc/group; then
         record_file_reference /etc/group
         awk -F: '{print $1 ": " $4}' /etc/group 2>/dev/null
@@ -3895,7 +3991,7 @@ print_interactive_user_accounts() {
     # The cutoff is substituted into the awk program text rather than passed with
     # -v, because Solaris /usr/bin/awk does not support -v; see the equivalent
     # comment in print_service_accounts.
-    if command_exists getent; then
+    if name_service_usable; then
         record_manifest_line "GETENT_QUERY|passwd ALL|source=name_service"
         record_file_reference /etc/passwd
 
@@ -3917,7 +4013,7 @@ print_interactive_user_accounts() {
         # stated. Equal counts do not prove enumeration is disabled (a host with
         # no directory at all looks identical); they mean the question has to be
         # settled against the authentication evidence in Section 3.
-        _iua_getent_count=`getent passwd 2>/dev/null | grep -c . 2>/dev/null`
+        _iua_getent_count=`name_service_query passwd | grep -c . 2>/dev/null`
         [ -n "$_iua_getent_count" ] || _iua_getent_count=0
         _iua_local_count=0
         if file_readable /etc/passwd; then
@@ -3958,14 +4054,15 @@ print_interactive_user_accounts() {
         fi
         blank_line
 
-        if getent passwd 2>/dev/null | awk -F: '
-            $7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= '"$uid_cutoff"') {
-                print $1 ":" $3 ":" $4 ":" $6 ":" $7
-                found = 1
-            }
-            END { if (!found) exit 1 }
-        '; then
-            :
+        if name_service_is_broken; then
+            printf 'Name service did not answer within %ss; the list below is from the\n' "$NAME_SERVICE_TIMEOUT_SECONDS"
+            printf '  local /etc/passwd only and does not represent directory-sourced accounts.\n'
+            _iua_list=`awk -F: '$7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= '"$uid_cutoff"') { print $1 ":" $3 ":" $4 ":" $6 ":" $7 }' /etc/passwd 2>/dev/null`
+        else
+            _iua_list=`name_service_query passwd | awk -F: '$7 !~ /(nologin|false)$/ && ($3 == 0 || $3 >= '"$uid_cutoff"') { print $1 ":" $3 ":" $4 ":" $6 ":" $7 }'`
+        fi
+        if [ -n "$_iua_list" ]; then
+            printf '%s\n' "$_iua_list"
         else
             no_entries_found
         fi
@@ -4773,6 +4870,7 @@ handle_interruption() {
     if [ -n "$LOCK_FILE" ]; then
         rm -f "$LOCK_FILE" 2>/dev/null
     fi
+    rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* 2>/dev/null
     # An interrupted report is still going to be read - that is how the
     # interruption is discovered - so it gets the same control-character
     # sanitisation as a complete one. A half-finished sanitisation file from
@@ -5234,6 +5332,7 @@ _final_result=`collection_log_result`
 if [ -n "$LOCK_FILE" ]; then
     rm -f "$LOCK_FILE" 2>/dev/null
 fi
+rm -f "`name_service_state_file`" "${WORKING_DIRECTORY:-.}"/.sox-itgc-name-service.* 2>/dev/null
 
 case "$_final_result" in
     COMPLETED_CLEAN|COMPLETED_WITH_WARNINGS)

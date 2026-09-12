@@ -553,6 +553,16 @@ Stated here rather than discovered during an engagement:
   enumeration by default while still resolving accounts by name, so on a
   directory-joined host the interactive-user list may be local accounts only. The
   script detects this case, says so in the report, and raises a `WARN`.
+- **Name-service lookups are bounded, and are the one thing that may touch the
+  network.** `getent` resolves through the host's own resolver, which on a
+  directory-joined host may contact the directory server — the host's action,
+  not the script's, and nothing leaves for anywhere else. A resolver whose
+  server is down can block for its full retry cycle, and a `getent` that never
+  answered hung the collection until it was killed. Each query is now bounded
+  to 45 seconds; the first timeout marks the name service unusable for the
+  rest of the run, records `NAME_SERVICE_TIMEOUT` in the manifest with a
+  `WARN`, and every account and group section from then on reads the local
+  files and says so.
 - **AIX and HP-UX are exercised by simulation, not on real hardware.** Neither
   boots on x86. The simulations reproduce the file and command layer faithfully
   enough to have caught a real credential leak and a real account-modification

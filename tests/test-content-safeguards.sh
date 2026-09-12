@@ -669,6 +669,47 @@ else
 fi
 
 #############################################################################
+printf '\n== 16. a name service that never answers cannot hang the collection ==\n'
+# getent resolves through the host's resolver, and a directory server that is
+# down blocks it for the resolver's retry cycle - or forever. A getent that
+# never answered hung the collection until it was killed. Each query is now
+# bounded; the first timeout marks the name service unusable and the account
+# sections read the local files instead. Exercised with a getent that sleeps,
+# bind-mounted over the real one in a private mount namespace.
+checks=`expr $checks + 1`
+if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null && command -v getent >/dev/null 2>&1; then
+    mkdir -p "$WORK/ns"
+    printf '#!/bin/sh\nsleep 600\n' > "$WORK/ns/fake-getent"
+    chmod 755 "$WORK/ns/fake-getent"
+    _getent=`command -v getent`
+    _t0=`date +%s`
+    unshare -m sh -c "mount --bind '$WORK/ns/fake-getent' '$_getent' && timeout 300 sh '$COLLECTOR' --output-dir '$WORK/ns/out' </dev/null >/dev/null 2>&1; echo \$? > '$WORK/ns/rc'" 2>/dev/null
+    _t1=`date +%s`
+    _nrc=`cat "$WORK/ns/rc" 2>/dev/null`
+    _nl="$WORK/ns/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
+    _nm="$WORK/ns/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/MANIFEST.txt"
+    _nr="$WORK/ns/out/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+    _elapsed=`expr $_t1 - $_t0`
+    if [ "$_nrc" = "0" ] && [ "$_elapsed" -lt 200 ] && grep -q '^NAME_SERVICE_TIMEOUT|' "$_nm" 2>/dev/null && grep -q 'did not answer' "$_nl" 2>/dev/null && grep -q '^root:0:' "$_nr" 2>/dev/null; then
+        pass "completed in ${_elapsed}s with one bounded timeout, a WARN, and local accounts listed from /etc/passwd"
+    else
+        fail "hanging name service: exit=${_nrc:-none} elapsed=${_elapsed}s timeout-recorded=`grep -c '^NAME_SERVICE_TIMEOUT|' "$_nm" 2>/dev/null` local-users=`grep -c '^root:0:' "$_nr" 2>/dev/null`"
+    fi
+    # The fake getent's own sleep is an orphan of the fixture, not the collector:
+    # the collector killed the getent wrapper, and the sleep it had started was
+    # re-parented to init. Both are ended here so the test leaves nothing behind.
+    for _sp in `ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && $3 == "600") || $0 ~ /fake-getent/ { print $1 }'`; do kill "$_sp" 2>/dev/null; done
+    sleep 1
+else
+    skip "cannot create a mount namespace here; name-service timeout not exercised"
+    if grep -q '^name_service_query()' "$COLLECTOR"; then
+        pass "the bounded name-service query is present"
+    else
+        fail "the bounded name-service query is missing"
+    fi
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then
