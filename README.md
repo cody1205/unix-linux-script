@@ -528,7 +528,7 @@ the report and manifest.
 | Section | Cost | Bounded how |
 | --- | --- | --- |
 | 9 — world-writable | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per scanned root per category (so an `--app-dir` root cannot be crowded out by system paths), each root's walk stopped after 240 seconds |
-| 10 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev`, each root's walk stopped after 240 seconds |
+| 10 — SetUID/SetGID | seconds to minutes | pruned scope, `find -xdev`, output capped at 500 entries per scanned root per category with the cap disclosed, each root's walk stopped after 240 seconds |
 | 22 — application directory listing | up to ten minutes per root; only runs when `--app-dir` is given | not capped and not `-xdev` — the operator chooses the roots — but the listing is stopped after 600 seconds and the report says so |
 
 Sections 9 and 10 are pruned to system binary, system configuration, and

@@ -976,6 +976,29 @@ fi
 rm -rf "$WORK/args"
 
 #############################################################################
+printf '\n== 23. a root with hundreds of SetUID files is capped and disclosed, like Section 9 ==\n'
+# 600 SetUID files planted under an --app-dir were listed in full, with no
+# sign that the population was abnormal. Section 9 has always capped its
+# findings per root and said so; Section 10 now does the same.
+checks=`expr $checks + 1`
+mkdir -p "$WORK/suid/app" "$WORK/suid/out"
+_i=1
+while [ "$_i" -le 600 ]; do : > "$WORK/suid/app/s$_i"; _i=`expr $_i + 1`; done
+chmod 4755 "$WORK/suid/app"/s*
+sh "$COLLECTOR" --output-dir "$WORK/suid/out" --app-dir "$WORK/suid/app" </dev/null >/dev/null 2>&1
+_sm="$WORK/suid/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/MANIFEST.txt"
+_sr="$WORK/suid/out/SOX-ITGC-AUDIT-LINUX-UNIX/report/SOX-ITGC-AUDIT-REPORT.txt"
+_sl="$WORK/suid/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
+_listed=`sed -n '/^SetUID Files:/,/^SetGID Files:/p' "$_sr" 2>/dev/null | grep -c "^$WORK/suid/app/s"`
+if [ "$_listed" = "500" ] && grep -q "^PRIVILEGED_BIT_SCAN|setuid|root=$WORK/suid/app|entries=more than 500|listed=500|truncated=yes" "$_sm" 2>/dev/null \
+    && grep -q 'more than 500 SetUID files exist under this root' "$_sr" 2>/dev/null && grep -q ' | WARN  | .*SetUID files exist under' "$_sl" 2>/dev/null; then
+    pass "500 of 600 listed under that root, with the note, the WARN and the manifest's truncated=yes"
+else
+    fail "SetUID cap: listed=$_listed record=`grep -c "^PRIVILEGED_BIT_SCAN|setuid|root=$WORK/suid/app|" "$_sm" 2>/dev/null` note=`grep -c 'more than 500 SetUID' "$_sr" 2>/dev/null`"
+fi
+rm -rf "$WORK/suid"
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

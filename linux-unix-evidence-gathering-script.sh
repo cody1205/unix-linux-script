@@ -3454,6 +3454,40 @@ print_world_writable_review() {
 #   right, which is what keeps -xdev from skipping an application tree that lives
 #   on its own mount. Results are passed through sort -u because a root that is
 #   not a separate mount would otherwise be traversed twice.
+# One root's SetUID or SetGID findings, listed under the root and capped
+# per root exactly as the world-writable findings are: 600 SetUID files
+# planted under an application directory were all listed, and a host with
+# tens of thousands - a badly packaged application, or one planted to bury
+# the real ones - would have produced a report nobody could read, with no
+# sign that the population was abnormal. The cap is disclosed in the section
+# and the log, and the manifest records that the list is truncated.
+print_privileged_bit_findings() {   # KIND ROOT DESCRIPTION
+    _pbf_kind=$1
+    _pbf_root=$2
+    _pbf_desc=$3
+    _pbf_probe=`expr "$WORLD_WRITABLE_MAX_ENTRIES" + 1`
+    _pbf_list=`sort -u "\`scan_output_file\`" 2>/dev/null | head -n "$_pbf_probe"`
+    _pbf_count=`printf '%s' "$_pbf_list" | grep -c . 2>/dev/null`
+    [ -n "$_pbf_count" ] || _pbf_count=0
+    if [ "$_pbf_count" -eq 0 ]; then
+        record_manifest_line "PRIVILEGED_BIT_SCAN|$_pbf_kind|root=`manifest_path "$_pbf_root"`|entries=0|truncated=no"
+        return
+    fi
+    printf 'Under %s:\n' "$_pbf_root"
+    _pbf_tally="entries=$_pbf_count|truncated=no"
+    if [ "$_pbf_count" -gt "$WORLD_WRITABLE_MAX_ENTRIES" ]; then
+        printf 'NOTE: more than %s %s exist under this root. The list\n' "$WORLD_WRITABLE_MAX_ENTRIES" "$_pbf_desc"
+        printf 'below is truncated to the first %s entries.\n' "$WORLD_WRITABLE_MAX_ENTRIES"
+        _pbf_list=`printf '%s\n' "$_pbf_list" | head -n "$WORLD_WRITABLE_MAX_ENTRIES"`
+        _pbf_count=$WORLD_WRITABLE_MAX_ENTRIES
+        _pbf_tally="entries=more than $WORLD_WRITABLE_MAX_ENTRIES|listed=$WORLD_WRITABLE_MAX_ENTRIES|truncated=yes"
+        _sx_truncated=yes
+        log_event WARN evidence "more than $WORLD_WRITABLE_MAX_ENTRIES $_pbf_desc exist under $_pbf_root; Section 10 lists the first $WORLD_WRITABLE_MAX_ENTRIES for that root only and the full population is not in this package"
+    fi
+    printf '%s\n' "$_pbf_list"
+    _sx_total=`expr "$_sx_total" + "$_pbf_count"`
+    record_manifest_line "PRIVILEGED_BIT_SCAN|$_pbf_kind|root=`manifest_path "$_pbf_root"`|$_pbf_tally"
+}
 print_setuid_setgid_files() {
     if ! command_exists find; then
         not_available
@@ -3492,35 +3526,31 @@ print_setuid_setgid_files() {
     # ways; the pair that used to be here read as two distinct tests but was one
     # test performed twice.
     subsection "SetUID Files:"
-    : > "`scan_output_file`.all" 2>/dev/null
+    print_scan_skip_notes "$@"
+    _sx_total=0
+    _sx_truncated=no
     for _sx_root in "$@"; do
         bounded_scan find_setuid_under "$_sx_root"
-        cat "`scan_output_file`" >> "`scan_output_file`.all" 2>/dev/null
+        print_privileged_bit_findings setuid "$_sx_root" "SetUID files"
     done
-    _suid_list=`sort -u "\`scan_output_file\`.all" 2>/dev/null`
-    rm -f "`scan_output_file`.all" 2>/dev/null
-    print_scan_skip_notes "$@"
-    if [ -n "$_suid_list" ]; then
-        printf '%s\n' "$_suid_list"
-    else
+    if [ "$_sx_total" -eq 0 ]; then
         no_entries_found
     fi
+    record_manifest_line "PRIVILEGED_BIT_SCAN|setuid|roots=$#|xdev=yes|entries=$_sx_total|truncated=$_sx_truncated"
     blank_line
 
     subsection "SetGID Files:"
-    : > "`scan_output_file`.all" 2>/dev/null
+    print_scan_skip_notes "$@"
+    _sx_total=0
+    _sx_truncated=no
     for _sx_root in "$@"; do
         bounded_scan find_setgid_under "$_sx_root"
-        cat "`scan_output_file`" >> "`scan_output_file`.all" 2>/dev/null
+        print_privileged_bit_findings setgid "$_sx_root" "SetGID files"
     done
-    _sgid_list=`sort -u "\`scan_output_file\`.all" 2>/dev/null`
-    rm -f "`scan_output_file`.all" 2>/dev/null
-    print_scan_skip_notes "$@"
-    if [ -n "$_sgid_list" ]; then
-        printf '%s\n' "$_sgid_list"
-    else
+    if [ "$_sx_total" -eq 0 ]; then
         no_entries_found
     fi
+    record_manifest_line "PRIVILEGED_BIT_SCAN|setgid|roots=$#|xdev=yes|entries=$_sx_total|truncated=$_sx_truncated"
 }
 
 # Cron spool fallback:
