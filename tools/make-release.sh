@@ -37,6 +37,18 @@ if [ -z "$VERSION" ]; then
     VERSION=`date '+%Y%m%d' 2>/dev/null || echo undated`
 fi
 
+# The version becomes part of the bundle's filename, which the client types
+# into sha256sum and tar. A space there means a quoting exercise for someone
+# who should not need one; a slash means a path, and the build failed with
+# "could not create ..." - blaming the output directory for a bad version.
+case "$VERSION" in
+    *[!A-Za-z0-9._-]*|'')
+        printf 'FAIL: version "%s" is not usable in a filename. Use letters, digits,\n' "$VERSION" >&2
+        printf '      dots, underscores and hyphens only - for example v1.0 or v1.0-rc2.\n' >&2
+        exit 1
+        ;;
+esac
+
 COLLECTOR="linux-unix-evidence-gathering-script.sh"
 INSTRUCTIONS="CLIENT-INSTRUCTIONS.md"
 BUNDLE="sox-itgc-collector-$VERSION.tar.gz"
