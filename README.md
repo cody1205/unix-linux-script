@@ -639,6 +639,15 @@ Stated here rather than discovered during an engagement:
   category. The affected sections carry a note naming the root, the log a
   `WARN`, and the manifest a `SCAN_TIMEOUT` record. The other roots are still
   scanned in full. The Section 22 listing has its own ten-minute bound.
+- **Solaris resolves its POSIX tools first.** `/usr/bin/awk` on Solaris is
+  the 1977 awk — no `-v`, no user functions, no `gsub`, no character
+  classes — and `/usr/bin/grep` has no `-E` or `-q`; the POSIX versions
+  live in `/usr/xpg4/bin`, which the script now puts first in its fixed
+  `PATH` (the directory exists nowhere else). The preflight exercises
+  exactly those awk and grep features, so a host that still resolves to the
+  old tools is refused up front rather than reported on with silently
+  empty sections. Solaris itself is not exercised by simulation; a dry run
+  on client hardware before the engagement remains advisable.
 - **AIX and HP-UX are exercised by simulation, not on real hardware.** Neither
   boots on x86. The simulations reproduce the file and command layer faithfully
   enough to have caught a real credential leak and a real account-modification

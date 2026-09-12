@@ -192,7 +192,8 @@ stops the run with exit status 1 and nothing written:
   again.
 - **`FAIL: this host is missing, or cannot run, tools this script depends on`**
   — one of `awk`, `sed`, `grep`, `sort`, `expr`, `cut`, `tr`, `wc`, `date`,
-  `ls`, `dirname`, `basename`, `dd`, `od`, or `sleep` is present but does not work
+  `ls`, `dirname`, `basename`, `dd`, `od`, or `sleep` is present but does not work,
+  or `awk`/`grep` is an old pre-POSIX version (the message says which feature)
   (wrong permissions, a damaged binary, a stub). The message names it. Without
   these the report would be silently incomplete, so the script refuses rather
   than produce something that looks whole and is not.

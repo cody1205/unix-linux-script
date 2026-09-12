@@ -203,7 +203,15 @@
 # Restrict command lookup to standard administrative paths. This reduces the
 # chance that a shell alias, user-local wrapper, or non-standard executable is
 # used during evidence collection.
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# /usr/xpg4/bin first: on Solaris, /usr/bin/awk is the 1977 awk (no -v, no
+# user functions, no gsub, no character classes), /usr/bin/grep has no -E
+# or -q, and the POSIX versions this script is written against live in
+# /usr/xpg4/bin. The directory does not exist elsewhere, and a directory
+# that does not exist costs a PATH search nothing. The preflight below
+# exercises exactly the awk and grep features in use, so a host that still
+# resolves to the old tools is refused rather than reported on with
+# silently empty sections.
+PATH=/usr/xpg4/bin:/usr/sbin:/usr/bin:/sbin:/bin
 readonly PATH
 
 # Restrict permissions on generated evidence artifacts. This applies only to
@@ -418,6 +426,12 @@ ARCHIVE_TIMESTAMP=`date '+%Y%m%d-%H%M%S' 2>/dev/null || echo unknown_time`
 readonly ARCHIVE_TIMESTAMP
 
 SAFE_HOSTNAME=`printf '%s' "$HOSTNAME_VALUE" | tr -c 'A-Za-z0-9._-' '_'`
+# The archive's file name carries the hostname. Linux caps a hostname at 64
+# characters, but Solaris and AIX allow 255, and with the prefix and the
+# timestamp a name that long exceeds NAME_MAX on every common filesystem,
+# so the archive could not be created at all. The file name takes the first
+# 64 characters; the report and log carry the hostname in full.
+SAFE_HOSTNAME=`printf '%s' "$SAFE_HOSTNAME" | cut -c1-64`
 readonly SAFE_HOSTNAME
 
 # Default evidence output location: the operator's current working directory.
@@ -5306,6 +5320,11 @@ fi
 preflight_required_tools() {
     _pf_missing=""
     [ "`printf 'a b\n' | awk '{ print $2 }' 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing awk"
+    # The features the report's awk programs rely on, which the 1977 awk
+    # still shipped as Solaris /usr/bin/awk lacks: -v, user-defined
+    # functions, gsub, and POSIX character classes.
+    [ "`printf ' a\tb\n' | awk -v want=b 'function f(x) { gsub(/[[:space:]]+/, "-", x); return x } { print f($0) "=" want }' 2>/dev/null`" = "-a-b=b" ] || _pf_missing="$_pf_missing awk(POSIX:-v,functions,gsub,classes)"
+    [ "`printf 'ab\ncd\n' | grep -E 'a|d' 2>/dev/null | wc -l | tr -d ' '`" = "2" ] && printf 'x\n' | grep -q x 2>/dev/null || _pf_missing="$_pf_missing grep(POSIX:-E,-q)"
     [ "`printf 'a\n' | sed 's/a/b/' 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing sed"
     [ "`printf 'a\nb\n' | grep -c b 2>/dev/null`" = "1" ] || _pf_missing="$_pf_missing grep"
     [ "`printf 'b\na\n' | sort 2>/dev/null | awk 'NR == 1' 2>/dev/null`" = "a" ] || _pf_missing="$_pf_missing sort"

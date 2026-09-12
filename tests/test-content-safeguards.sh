@@ -1065,6 +1065,20 @@ if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null; then
     else
         fail "broken ps: rc=`cat "$WORK/pf/ps.rc" 2>/dev/null` console=`grep -c 'ps cannot list' "$WORK/pf/ps.err" 2>/dev/null` logged=`grep -c 'ps cannot list' "$_pl" 2>/dev/null`"
     fi
+    checks=`expr $checks + 1`
+    # Solaris /usr/bin/awk: no -v. Stood in for by a wrapper that rejects -v
+    # and is otherwise the real awk, so the basic "$2" check still passes
+    # and only the feature check can catch it.
+    _awk=`command -v awk`; cp "$_awk" "$WORK/pf/awk.real"
+    printf '#!/bin/sh\ncase "$1" in -v) echo "awk: syntax error" >&2; exit 2 ;; esac\nexec %s "$@"\n' "$WORK/pf/awk.real" > "$WORK/pf/oldawk"
+    chmod 755 "$WORK/pf/oldawk" "$WORK/pf/awk.real"
+    rm -rf "$WORK/pf/out"; mkdir -p "$WORK/pf/out"
+    unshare -m sh -c "mount --bind '$WORK/pf/oldawk' '$_awk' && sh '$COLLECTOR' --output-dir '$WORK/pf/out' </dev/null >/dev/null 2>'$WORK/pf/awk.err'; echo \$? > '$WORK/pf/awk.rc'" 2>/dev/null
+    if [ "`cat "$WORK/pf/awk.rc" 2>/dev/null`" = "1" ] && grep -q 'awk(POSIX' "$WORK/pf/awk.err" 2>/dev/null && [ "`ls "$WORK/pf/out" | wc -l`" = "0" ]; then
+        pass "an awk without -v (Solaris /usr/bin/awk) is refused by the feature check, not reported on with empty sections"
+    else
+        fail "old awk: rc=`cat "$WORK/pf/awk.rc" 2>/dev/null` stderr=`head -c 100 "$WORK/pf/awk.err" 2>/dev/null | tr '\n' ' '` package=`ls "$WORK/pf/out" | wc -l`"
+    fi
     rm -rf "$WORK/pf"
 else
     skip "cannot create a mount namespace here; preflight of sleep and ps not exercised"
