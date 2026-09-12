@@ -662,10 +662,14 @@ mkdir -p "$WORK/pipe"
 _prc=`cat "$WORK/pipe-rc.txt" 2>/dev/null`
 _pv=`verdict_of "$WORK/pipe"`
 _parc=`ls "$WORK/pipe"/*.tar.gz 2>/dev/null | wc -l | tr -d ' '`
-if [ "${_prc:-141}" -le 1 ] && [ -n "$_pv" ] && [ "$_parc" = "1" ] && [ ! -f "$WORK/pipe/.sox-itgc-collector.lock" ] && [ ! -s "$WORK/pipe-stderr.txt" ]; then
-    pass "piped into head: exit $_prc, verdict $_pv, archive built, no lock left, nothing on stderr"
+# What stderr must not carry is the symptom itself - a broken-pipe complaint.
+# Other stderr noise is the host's tools (a CI runner's systemctl with no bus,
+# say) and is not what this case is about.
+if [ "${_prc:-141}" -le 1 ] && [ -n "$_pv" ] && [ "$_parc" = "1" ] && [ ! -f "$WORK/pipe/.sox-itgc-collector.lock" ] && ! grep -qi 'broken pipe' "$WORK/pipe-stderr.txt" 2>/dev/null; then
+    pass "piped into head: exit $_prc, verdict $_pv, archive built, no lock left, no broken-pipe error"
 else
     fail "piped into head: exit=${_prc:-none} verdict=${_pv:-none} archive=$_parc lock=`[ -f "$WORK/pipe/.sox-itgc-collector.lock" ] && echo left || echo removed` stderr=`wc -l < "$WORK/pipe-stderr.txt" 2>/dev/null` lines"
+    head -5 "$WORK/pipe-stderr.txt" 2>/dev/null | sed 's/^/            /'
 fi
 
 #############################################################################
