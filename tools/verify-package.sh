@@ -270,7 +270,17 @@ if [ -s "$MANIFEST" ] && [ -d "$ROOT_DIR/raw_files" ]; then
         # Paths are recorded with %, |, newline and carriage return encoded
         # as %25, %7C, %0A and %0D, so a filename containing one of them
         # cannot split or corrupt its own record. Decoded here, %25 last.
-        claimed_path=`printf '%s' "$manifest_line" | sed 's/^COPIED|//' | cut -d'|' -f1 | awk 'BEGIN { ORS = "" } { gsub(/%7C/, "|"); gsub(/%0A/, "\n"); gsub(/%0D/, "\r"); gsub(/%25/, "%"); print }'`
+        claimed_path=`printf '%s' "$manifest_line" | sed 's/^COPIED|//' | cut -d'|' -f1 | awk '
+            BEGIN { ORS = ""; hex = "0123456789ABCDEF" }
+            {
+                s = $0
+                while (match(s, /%[0-9A-F][0-9A-F]/)) {
+                    v = (index(hex, substr(s, RSTART + 1, 1)) - 1) * 16 + index(hex, substr(s, RSTART + 2, 1)) - 1
+                    printf "%s%c", substr(s, 1, RSTART - 1), v
+                    s = substr(s, RSTART + 3)
+                }
+                print s
+            }'`
         claimed=`expr "$claimed" + 1`
         if [ ! -f "$ROOT_DIR/raw_files$claimed_path" ]; then
             absent=`expr "$absent" + 1`

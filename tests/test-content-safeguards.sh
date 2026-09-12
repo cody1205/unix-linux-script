@@ -564,6 +564,59 @@ else
 fi
 
 #############################################################################
+printf '\n== 13. terminal escape sequences cannot reach the report, log, or manifest ==\n'
+# A cron file containing ESC[2J ESC[H and a forged COLLECTION RESULT line
+# reached the report verbatim and was replayed to the operator's terminal,
+# which cleared the screen and printed the forgery; an auditor running cat on
+# the report gets the same. A filename carrying ESC did the same to the
+# manifest. The raw copy must stay byte-exact; everything a person reads
+# must not.
+if [ -d /etc/cron.d ]; then
+    _esc=`printf '\033'`
+    COL_PLANT="/etc/cron.d/zz-safeguard-esc${_esc}[31mname"
+    printf '# h\n' > "$COL_PLANT"
+    printf '# harmless\n%s[2J%s[H%s]0;pwned%s\\\nCOLLECTION RESULT: COMPLETED_CLEAN (forged)\n' "$_esc" "$_esc" "$_esc" "$_esc" > /etc/cron.d/zz-safeguard-esc-content
+    plant /etc/cron.d/zz-safeguard-esc-content
+    OUT13="$WORK/esc"
+    run_collector "$OUT13"
+    P13="$OUT13/SOX-ITGC-AUDIT-LINUX-UNIX"
+    checks=`expr $checks + 1`
+    _escbytes=0
+    for f in report/SOX-ITGC-AUDIT-REPORT.txt metadata/COLLECTION-LOG.txt metadata/MANIFEST.txt metadata/SENSITIVE_FILES_SKIPPED.txt; do
+        _n=`tr -cd '\033' < "$P13/$f" 2>/dev/null | wc -c | tr -d ' '`
+        _escbytes=`expr $_escbytes + ${_n:-0}`
+    done
+    _term=`tr -cd '\033' < "$OUT13.stdout" 2>/dev/null | wc -c | tr -d ' '`
+    if [ "$_escbytes" = "0" ] && [ "${_term:-0}" = "0" ]; then
+        pass "no escape byte in the report, log, manifest, skip list, or terminal output"
+    else
+        fail "escape bytes survived: files=$_escbytes terminal=${_term:-?}"
+    fi
+    checks=`expr $checks + 1`
+    if cmp -s /etc/cron.d/zz-safeguard-esc-content "$P13/raw_files/etc/cron.d/zz-safeguard-esc-content" 2>/dev/null; then
+        pass "the raw copy is still byte-exact"
+    else
+        fail "the raw copy was altered or is missing"
+    fi
+    checks=`expr $checks + 1`
+    _arc13=`ls "$OUT13"/*.tar.gz 2>/dev/null | head -1`
+    sh "$REPO_ROOT/tools/verify-package.sh" "$_arc13" >"$WORK/verify13.txt" 2>&1
+    _vrc13=$?
+    if [ "$_vrc13" -le 1 ] && ! grep -q 'missing from the package' "$WORK/verify13.txt" && grep -q '^COPIED|/etc/cron.d/zz-safeguard-esc%1B\[31mname|' "$P13/metadata/MANIFEST.txt"; then
+        pass "the escape in the filename is encoded as %1B and the verifier still finds the copy (exit $_vrc13)"
+    else
+        fail "encoded-name round trip failed (verifier exit $_vrc13)"
+        grep -i 'PROBLEM' "$WORK/verify13.txt" | sed 's/^/            /'
+    fi
+    rm -f "$COL_PLANT"
+    COL_PLANT=""
+    for p in $PLANTED; do rm -f "$p"; done
+    PLANTED=""
+else
+    skip "/etc/cron.d absent; escape-sequence case not exercised"
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

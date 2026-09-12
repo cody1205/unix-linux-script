@@ -364,11 +364,23 @@ Permissions inside the package are deliberately **not** uniform:
 system, which survives transfer even when filesystem metadata does not.
 
 Manifest and skip-list records are one per line with `|` between fields, and a
-filename can contain `|`, `%`, a newline, or a carriage return. Those four are
-written as `%7C`, `%25`, `%0A`, and `%0D` so a hostile name cannot split or
-corrupt its own record; `verify-package.sh` decodes them. A name containing a
-newline once split its `COPIED` record in two, and the verifier reported two
-files missing from a package that was complete.
+filename can contain `|`, `%`, a newline, a carriage return, or any other
+control character. `%` and `|` are written as `%25` and `%7C`, and every C0
+control character and DEL as `%XX`, so a hostile name cannot split or corrupt
+its own record or carry a terminal escape into the manifest;
+`verify-package.sh` decodes them. A name containing a newline once split its
+`COPIED` record in two, and the verifier reported two files missing from a
+package that was complete.
+
+The report and the collection log are sanitised once, at the end of the run:
+every control character other than tab, newline, and carriage return is
+replaced by `?`, byte for byte. A cron file containing `ESC[2J` and a forged
+"COLLECTION RESULT" line reached the report verbatim and was replayed to the
+operator's terminal, which cleared the screen; an auditor running `cat` on the
+report would get the same. Anything printed into the report can carry such
+bytes — file contents, filenames, process titles, login records — so the whole
+file is cleaned rather than each route separately. The copies in `raw_files/`
+are untouched.
 
 ### Which version of the collector produced this package?
 

@@ -968,11 +968,28 @@ write_redacted_passwd_copy() {
 # path actually contains one of them, which is nearly never.
 MANIFEST_NL='
 '
-MANIFEST_CR=`printf '\r'`
+# Every C0 control character except newline (handled by the line split) plus
+# DEL, in code order, so a character's position in this string is its code.
+MANIFEST_CTL=`printf '\001\002\003\004\005\006\007\010\011\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177'`
 manifest_path() {
     case "$1" in
-        *[%\|]*|*"$MANIFEST_NL"*|*"$MANIFEST_CR"*)
-            printf '%s' "$1" | awk 'BEGIN { ORS = "" } NR > 1 { print "%0A" } { gsub(/%/, "%25"); gsub(/\|/, "%7C"); gsub(/\r/, "%0D"); print }'
+        *[%\|]*|*"$MANIFEST_NL"*|*[$MANIFEST_CTL]*)
+            printf '%s' "$1" | awk -v ctl="$MANIFEST_CTL" '
+                BEGIN { ORS = "" }
+                NR > 1 { print "%0A" }
+                {
+                    n = length($0)
+                    for (i = 1; i <= n; i++) {
+                        c = substr($0, i, 1)
+                        if (c == "%") { print "%25"; continue }
+                        if (c == "|") { print "%7C"; continue }
+                        k = index(ctl, c)
+                        if (k == 0) { print c; continue }
+                        if (k >= 10) k++        # position 10 onward skips the newline (code 10)
+                        if (k == 31) k = 127    # the last entry is DEL
+                        printf "%%%02X", k
+                    }
+                }'
             ;;
         *)
             printf '%s' "$1"
@@ -1212,6 +1229,28 @@ recount_log_levels() {
             LOG_ERROR_COUNT=$_rll_error
         fi
     fi
+}
+
+# Replace control characters in a text file that people will read, byte for
+# byte, so the file keeps its size and any open descriptor's offset stays
+# valid. TAB, LF and CR are kept. Everything else in the C0 range and DEL
+# becomes "?".
+#
+# A cron file containing ESC[2J ESC[H and a forged "COLLECTION RESULT" line
+# reached the report verbatim and was replayed to the operator's terminal,
+# which cleared the screen and printed the forgery; an auditor running cat on
+# the report gets the same. Anything that ends up in the report or log can
+# carry such bytes - file contents, filenames, process titles, login records
+# - so the whole file is sanitised once, at the end, rather than each route
+# separately. The copies in raw_files/ are untouched.
+sanitize_text_file() {
+    _stf=$1
+    [ -f "$_stf" ] || return 0
+    if tr '\000-\010\013\014\016-\037\177' '[?*]' < "$_stf" > "$_stf.sanitizing" 2>/dev/null \
+       && cat "$_stf.sanitizing" > "$_stf" 2>/dev/null; then
+        :
+    fi
+    rm -f "$_stf.sanitizing" 2>/dev/null
 }
 
 # Prove the package can still be written before the verdict is. Under a full
@@ -5087,6 +5126,12 @@ record_manifest_line "COLLECTION_LOG|`manifest_path "${LOG_FILE:-not created}"`"
 #
 # Permissions and ownership are also applied before archiving, because the modes
 # recorded inside a tar are the modes the recipient gets.
+# The report is complete at this point; nothing below writes to it.
+sanitize_text_file "$REPORT_FILE"
+if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+    sanitize_text_file "$LOG_FILE"
+fi
+
 write_handling_instructions
 normalize_package_permissions
 apply_ownership_to_evidence
@@ -5100,6 +5145,9 @@ open_log_addendum
 create_collection_archive
 apply_ownership_to_archive
 close_log_addendum
+if [ "$LOG_READY" = "yes" ] && [ -n "$LOG_FILE" ]; then
+    sanitize_text_file "$LOG_FILE"
+fi
 
 if [ -r "$REPORT_FILE" ]; then
     cat "$REPORT_FILE" >&3
