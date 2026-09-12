@@ -617,6 +617,40 @@ else
 fi
 
 #############################################################################
+printf '\n== 14. the run lock refuses a live second launch and ignores a stale one ==\n'
+# A second collection launched into the same directory used to delete the
+# first run's package mid-collection; both then failed with several hundred
+# errors. A lock left by a process that has since died - or whose PID now
+# belongs to something unrelated - must not wedge the directory.
+checks=`expr $checks + 1`
+mkdir -p "$WORK/lock"
+sh "$COLLECTOR" --output-dir "$WORK/lock" --app-dir /usr </dev/null >/dev/null 2>&1 &
+_first=$!
+_w=0
+while [ ! -f "$WORK/lock/.sox-itgc-collector.lock" ] && [ "$_w" -lt 30 ]; do sleep 1; _w=`expr $_w + 1`; done
+sh "$COLLECTOR" --output-dir "$WORK/lock" </dev/null >"$WORK/lock-second.txt" 2>&1
+_second=$?
+wait "$_first"
+_firstrc=$?
+if [ "$_second" = "1" ] && grep -q 'already running' "$WORK/lock-second.txt" && [ "$_firstrc" = "0" ] && [ ! -f "$WORK/lock/.sox-itgc-collector.lock" ]; then
+    pass "second launch refused in one line; first run completed (exit $_firstrc); lock removed after"
+else
+    fail "second=$_second first=$_firstrc lock-left=`[ -f "$WORK/lock/.sox-itgc-collector.lock" ] && echo yes || echo no`"
+    head -2 "$WORK/lock-second.txt" | sed 's/^/            /'
+fi
+checks=`expr $checks + 1`
+mkdir -p "$WORK/stale"
+printf '1\n' > "$WORK/stale/.sox-itgc-collector.lock"     # PID 1 is alive and is not this script
+sh "$COLLECTOR" --output-dir "$WORK/stale" </dev/null >"$WORK/stale-run.txt" 2>&1
+_stale=$?
+if [ "$_stale" = "0" ]; then
+    pass "a lock naming a live, unrelated process is ignored and the run proceeds"
+else
+    fail "a stale lock naming PID 1 blocked the run (exit $_stale)"
+    head -2 "$WORK/stale-run.txt" | sed 's/^/            /'
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then

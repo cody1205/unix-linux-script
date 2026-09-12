@@ -558,6 +558,11 @@ Stated here rather than discovered during an engagement:
   enough to have caught a real credential leak and a real account-modification
   bug, but **a dry run on client hardware before the engagement remains
   advisable.**
+- **A busybox userland is verified, not just GNU.** The collector and the
+  verifier have been run with busybox applets bind-mounted over every tool
+  they use (`awk`, `sed`, `grep`, `tr`, `od`, `dd`, `sort`, `find`, `ls`,
+  `tar`, and twenty more), as an Alpine-based appliance would present them:
+  identical copied-file set, 24 sections, zero warnings, verifier CLEAN.
 - **Section 22 is unbounded** when used. See the table above.
 
 ## Tests

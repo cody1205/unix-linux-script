@@ -1633,7 +1633,23 @@ prepare_collection_directory() {
         case "$_lock_pid" in
             ''|*[!0-9]*) _lock_pid="" ;;
         esac
+        # A live process with that PID is only a running collection if it
+        # is one: after a reboot or a crash, PIDs are reused, and a lock left
+        # behind could otherwise name an unrelated process for as long as it
+        # lives. Where ps can show the command line, it has to name this
+        # script; where it cannot, a live PID is taken at its word.
+        _lock_live=no
         if [ -n "$_lock_pid" ] && [ "$_lock_pid" != "$$" ] && kill -0 "$_lock_pid" 2>/dev/null; then
+            _lock_live=yes
+            _lock_args=`ps -o args= -p "$_lock_pid" 2>/dev/null`
+            if [ -n "$_lock_args" ]; then
+                case "$_lock_args" in
+                    *evidence-gathering-script*) ;;
+                    *) _lock_live=no ;;
+                esac
+            fi
+        fi
+        if [ "$_lock_live" = "yes" ]; then
             printf 'FAIL: another collection (process %s) is already running in %s.\n' "$_lock_pid" "$WORKING_DIRECTORY" >&2
             printf '      Wait for it to finish, or choose a different --output-dir. Nothing\n' >&2
             printf '      was collected by this run and nothing on the host was changed.\n' >&2
@@ -4666,6 +4682,11 @@ preflight_required_tools() {
     ls -d / >/dev/null 2>&1 || _pf_missing="$_pf_missing ls"
     [ "`dirname /a/b 2>/dev/null`" = "/a" ] || _pf_missing="$_pf_missing dirname"
     [ "`basename /a/b 2>/dev/null`" = "b" ] || _pf_missing="$_pf_missing basename"
+    # Binary detection reads the first block of every printed file with dd
+    # and looks for a NUL with od. Without them, binary content would be
+    # printed into the report.
+    [ "`printf 'ab' | dd bs=1 count=1 2>/dev/null`" = "a" ] || _pf_missing="$_pf_missing dd"
+    [ "`printf 'a' | od -An -c 2>/dev/null | tr -d ' '`" = "a" ] || _pf_missing="$_pf_missing od"
     if [ -n "$_pf_missing" ]; then
         printf 'FAIL: this host is missing, or cannot run, tools this script depends on:%s\n' "$_pf_missing" >&2
         printf '      Without them the report would be silently incomplete and the verdict\n' >&2

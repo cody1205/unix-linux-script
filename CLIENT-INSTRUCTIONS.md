@@ -189,10 +189,10 @@ stops the run with exit status 1 and nothing written:
   again.
 - **`FAIL: this host is missing, or cannot run, tools this script depends on`**
   — one of `awk`, `sed`, `grep`, `sort`, `expr`, `cut`, `tr`, `wc`, `date`,
-  `ls`, `dirname`, or `basename` is present but does not work (wrong
-  permissions, a damaged binary, a stub). The message names it. Without these
-  the report would be silently incomplete, so the script refuses rather than
-  produce something that looks whole and is not.
+  `ls`, `dirname`, `basename`, `dd`, or `od` is present but does not work
+  (wrong permissions, a damaged binary, a stub). The message names it. Without
+  these the report would be silently incomplete, so the script refuses rather
+  than produce something that looks whole and is not.
 - **`FAIL: another collection (process N) is already running in ...`** — the
   script was started twice into the same directory. The second start is
   refused so it cannot delete the first run's evidence mid-collection. Wait
