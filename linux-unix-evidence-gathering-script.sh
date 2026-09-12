@@ -5448,6 +5448,13 @@ handle_interruption() {
     # of them behind on the client host. Background jobs ignore SIGINT, so
     # the operator's Ctrl-C stopped the collector and left its find running.
     kill_descendants "$$"
+    # An archive the interruption caught mid-build is removed: the tar that
+    # was writing it has just been stopped, and a truncated archive beside a
+    # package that says it was interrupted is exactly the kind of file that
+    # gets sent anyway. An archive already reported as created is kept.
+    if [ -z "$ARCHIVE_FILE" ] && [ -n "${archive_base:-}" ]; then
+        rm -f "$archive_base.tar" "$archive_base.tar.gz" 2>/dev/null
+    fi
     if [ -n "$LOCK_FILE" ]; then
         rm -f "$LOCK_FILE" 2>/dev/null
     fi

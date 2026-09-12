@@ -302,11 +302,20 @@ fi
 printf '\n'
 printf 'Collection verdict\n'
 
+# The LAST verdict line wins. A collection interrupted after its summary was
+# written - during the archive step - appends a second summary that says
+# FAILED and names the signal, and taking the first RESULT line accepted
+# such a package as clean. An INTERRUPTED_BY line anywhere in the log is
+# decisive on its own.
 verdict=`sed -n 's/^FINAL_RESULT: //p' "$LOG" 2>/dev/null | tail -1`
 verdict_source=FINAL_RESULT
 if [ -z "$verdict" ]; then
-    verdict=`sed -n 's/^RESULT: //p' "$LOG" 2>/dev/null | head -1`
+    verdict=`sed -n 's/^RESULT: //p' "$LOG" 2>/dev/null | tail -1`
     verdict_source=RESULT
+fi
+if grep -q '^INTERRUPTED_BY: ' "$LOG" 2>/dev/null; then
+    verdict=FAILED
+    verdict_source="INTERRUPTED_BY (`sed -n 's/^INTERRUPTED_BY: //p' "$LOG" | tail -1`)"
 fi
 
 warn_lines=`grep -c '^[^|]* | WARN  | ' "$LOG" 2>/dev/null`

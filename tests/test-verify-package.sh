@@ -137,6 +137,15 @@ target=`fresh_copy no_log`
 rm -f "$target/metadata/COLLECTION-LOG.txt"
 expect_exit "collection log absent entirely" 2 "$target"
 
+printf '\n== a collection interrupted after its summary is rejected ==\n'
+# Interrupted during the archive step, after RESULT: COMPLETED_CLEAN had
+# been written, the collector appends a second summary naming the signal.
+# The verifier took the FIRST RESULT line and verified such a package.
+target=`fresh_copy interrupted_late`
+grep -v '^FINAL_RESULT: \|^FINAL_WARNINGS: \|^FINAL_ERRORS: \|^ARCHIVE_RESULT: \|^ARCHIVE_FILE: ' "$target/metadata/COLLECTION-LOG.txt" > "$WORK/t" && mv "$WORK/t" "$target/metadata/COLLECTION-LOG.txt"
+printf '\nSUMMARY (INTERRUPTED RUN)\nRESULT: FAILED\nINTERRUPTED_BY: SIGTERM\n' >> "$target/metadata/COLLECTION-LOG.txt"
+expect_exit "second summary says the run was interrupted" 2 "$target"
+
 printf '\n== a package that lost all its collected files is rejected ==\n'
 # Removing raw_files/ entirely, rather than one file from it. The original guard
 # only ran the manifest check when raw_files/ existed, so a package that had lost

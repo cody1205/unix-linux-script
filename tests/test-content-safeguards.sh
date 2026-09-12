@@ -1090,6 +1090,38 @@ else
 fi
 
 #############################################################################
+printf '\n== 26. an interruption during the archive step leaves no half-built archive ==\n'
+# Stopped while tar was writing the archive, the collector left the partial
+# .tar beside a package whose log ended in an interrupted-run summary. The
+# handler now removes an archive it caught mid-build; one already reported
+# as created is kept. Exercised with a tar that sleeps before it starts.
+checks=`expr $checks + 1`
+if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null; then
+    mkdir -p "$WORK/tar/out"
+    _tar=`command -v tar`; cp "$_tar" "$WORK/tar/tar.real"
+    printf '#!/bin/sh\ncase "$1" in -cf) sleep 30 ;; esac\nexec %s "$@"\n' "$WORK/tar/tar.real" > "$WORK/tar/slowtar"
+    chmod 755 "$WORK/tar/slowtar" "$WORK/tar/tar.real"
+    unshare -m sh -c "mount --bind '$WORK/tar/slowtar' '$_tar' && sh '$COLLECTOR' --output-dir '$WORK/tar/out' </dev/null >/dev/null 2>&1 & p=\$!; i=0; while [ \$i -lt 120 ]; do ps -e -o args= | grep -q '^sleep 30\$' && break; sleep 0.5; i=\`expr \$i + 1\`; done; kill -TERM \$p; wait \$p; echo \$? > '$WORK/tar/rc'" 2>/dev/null
+    sleep 1
+    _tl="$WORK/tar/out/SOX-ITGC-AUDIT-LINUX-UNIX/metadata/COLLECTION-LOG.txt"
+    _tarchives=`ls "$WORK/tar/out"/*.tar "$WORK/tar/out"/*.tar.gz 2>/dev/null | wc -l | tr -d ' '`
+    if [ "$_tarchives" = "0" ] && grep -q '^INTERRUPTED_BY: SIGTERM' "$_tl" 2>/dev/null && [ ! -f "$WORK/tar/out/.sox-itgc-collector.lock" ]; then
+        pass "no archive left behind, the log names the interruption, the lock is gone"
+    else
+        fail "interrupt during tar: archives-left=$_tarchives interrupted=`grep -c '^INTERRUPTED_BY' "$_tl" 2>/dev/null` lock=`ls "$WORK/tar/out/.sox-itgc-collector.lock" 2>/dev/null | wc -l`"
+    fi
+    for _sp in `ps -eo pid,args 2>/dev/null | awk '($2 == "sleep" && $3 == "30") || $0 ~ /tar.real/ { print $1 }'`; do kill "$_sp" 2>/dev/null; done
+    rm -rf "$WORK/tar"
+else
+    skip "cannot create a mount namespace here; interruption during the archive step not exercised"
+    if grep -q 'rm -f "\$archive_base.tar" "\$archive_base.tar.gz"' "$COLLECTOR"; then
+        pass "the handler's partial-archive cleanup is present"
+    else
+        fail "the handler's partial-archive cleanup is missing"
+    fi
+fi
+
+#############################################################################
 printf '\n-----------------------------------------------\n'
 printf 'checks: %s   failures: %s\n' "$checks" "$failures"
 if [ "$failures" -eq 0 ]; then
